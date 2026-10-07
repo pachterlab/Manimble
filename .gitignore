@@ -1,0 +1,16 @@
+# build products
+.build/
+Manimble.app/
+*.xcodeproj/
+.swiftpm/
+
+# python
+__pycache__/
+*.pyc
+
+# manimble caches inside a deck folder
+.manimble/
+
+# macOS
+.DS_Store
+manimble.iconset/
