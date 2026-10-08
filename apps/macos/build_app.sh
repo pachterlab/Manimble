@@ -17,6 +17,7 @@ mkdir -p "$ROOT/.build/swift-cache" "$ROOT/.build/swift-config" \
   "$ROOT/.build/swift-security" "$ROOT/.build/module-cache"
 export CLANG_MODULE_CACHE_PATH="$ROOT/.build/module-cache"
 swift build -c release \
+  --skip-update --force-resolved-versions \
   --cache-path "$ROOT/.build/swift-cache" \
   --config-path "$ROOT/.build/swift-config" \
   --security-path "$ROOT/.build/swift-security"

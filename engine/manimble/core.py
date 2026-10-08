@@ -25,16 +25,22 @@ HERE = Path(__file__).resolve().parent
 class WorkerProc:
     """A long-lived manim process speaking JSON lines."""
 
-    def __init__(self, python: str, deck: str):
+    def __init__(self, python: str, deck: str, worker_name: str):
         self.python, self.deck = python, deck
+        # Manim caches generated Text/TeX SVGs by content under media_dir.
+        # Independent workers rendering different slides concurrently can
+        # otherwise delete each other's temporary SVGs while parsing them.
+        self.media_dir = str(Path(deck).parent / "media" / "manimble" / worker_name)
         self.lock = threading.Lock()
         self.proc = None
 
     def _start(self):
+        env = os.environ.copy()
+        env["MANIMBLE_MEDIA_DIR"] = self.media_dir
         self.proc = subprocess.Popen(
             [self.python, str(HERE / "worker.py"), self.deck],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
-            text=True, bufsize=1, encoding="utf-8",
+            text=True, bufsize=1, encoding="utf-8", env=env,
         )
 
     def request(self, req: dict) -> dict:
@@ -69,13 +75,13 @@ class Manimble:
         self.cache_dir = Path(cache) if cache else Path(self.deck) / ".manimble"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         (self.cache_dir / ".gitignore").write_text("*\n")
-        self.render_worker = WorkerProc(python, self.deck)
-        self.aux_worker = WorkerProc(python, self.deck)
+        self.render_worker = WorkerProc(python, self.deck, "background")
+        self.aux_worker = WorkerProc(python, self.deck, "auxiliary")
         self.on_event = None
         self.lock = threading.RLock()           # guards the tables below
         self.edit_lock = threading.RLock()      # serialises edits
         self.scene_locks: dict = {}             # one render per scene at a time
-        self.edit_worker = WorkerProc(python, self.deck)   # edits never wait behind background renders
+        self.edit_worker = WorkerProc(python, self.deck, "interactive")   # edits never wait behind background renders
         self.scenes: list[dict] = []            # ordered scene descriptors (the slides of the talk)
         self.all_scenes: list[dict] = []        # every scene class found, including ones not in order.txt
         self.results: dict[str, dict] = {}      # name -> {"key","dir","data"} or {"error"}
@@ -189,7 +195,11 @@ class Manimble:
         if f.exists():
             try:
                 res = json.loads(f.read_text())
-                self.results[name] = res
+                # Render failures can be transient (for example, concurrent
+                # Manim workers racing over a generated SVG). Retry them on
+                # the next deck open instead of preserving a dead-end error.
+                if "error" not in res:
+                    self.results[name] = res
             except Exception:
                 pass
 
@@ -891,4 +901,3 @@ class Manimble:
 
 
 # -------------------------------------------------------------------- HTTP
-

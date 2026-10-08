@@ -53,7 +53,9 @@ config.disable_caching = True
 config.write_to_movie = False
 config.save_last_frame = False
 config.preview = False
-config.media_dir = os.path.realpath(os.path.join(DECK, "..", "media"))
+config.media_dir = os.path.realpath(
+    os.environ.get("MANIMBLE_MEDIA_DIR", os.path.join(DECK, "..", "media"))
+)
 
 # ----------------------------------------------------------------- tracing
 
