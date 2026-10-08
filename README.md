@@ -78,6 +78,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Slides and decks**
 - Slide list with thumbnails, builds strip for every `next_slide()` stop, ⌘↑/⌘↓ and ⌘[ ⌘] navigation.
 - Slide menu: New, Duplicate, Delete, Move Up/Down (edits the scene class and `order.txt`, fully undoable).
+- Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
+  skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
 - Python source pane with syntax colours, highlighted changed/selected lines, always-visible scroll bars.
 - Working copy with **Save to Original**, **Revert**, an "edited" indicator, and a prompt on close/quit; the render
   cache lives outside your deck.
@@ -167,7 +169,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
   refer to files Manimble has not seen; render every slide before packaging for sharing.
-- Scenes not listed in `order.txt` are hidden, with no toggle to show them.
+- Restored slides are appended to the show; use Move Slide Up/Down to choose their final position.
 
 **App and environment**
 - Undo history is kept in memory and lost on quit (the working copy is deleted on close, so use Save).
@@ -185,18 +187,17 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 
 1. **Animations panel**: list a build's `self.play(...)` calls, add simple ones to the selected object (fade, write,
    create, grow, move, scale, indicate), reorder, delete, set duration, and preview a build as a short clip.
-2. Skip Slide (hide from the show without deleting) and a View toggle for unused slides.
-3. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
-4. Per-word text styling; per-element font; non-uniform resize; rotate.
-5. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
-6. Presenter display (current + next slide, notes, timer); animated playback in the built-in player; PDF/video
+2. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
+3. Per-word text styling; per-element font; non-uniform resize; rotate.
+4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
+5. Presenter display (current + next slide, notes, timer); animated playback in the built-in player; PDF/video
    export at full resolution.
-7. Slide-navigator drag-and-drop reordering; Go to Slide; multi-slide selection; find / replace.
-8. Persistent undo history; crash recovery of the working copy.
-9. Slide transitions, themes / master slides, and a theme picker for new decks.
-10. Keep build scripts and progress tables in sync when slides are added, moved or deleted.
-11. Image tools: replace, crop, mask; SVG and PDF insertion.
-12. Packaging: notarisation and an automated test suite.
+6. Slide-navigator drag-and-drop reordering; Go to Slide; multi-slide selection; find / replace.
+7. Persistent undo history; crash recovery of the working copy.
+8. Slide transitions, themes / master slides, and a theme picker for new decks.
+9. Keep build scripts and progress tables in sync when slides are added, moved or deleted.
+10. Image tools: replace, crop, mask; SVG and PDF insertion.
+11. Packaging: notarisation and an automated test suite.
 
 ## License
 

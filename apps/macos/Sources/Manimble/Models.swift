@@ -14,6 +14,7 @@ struct StateInfo: Decodable {
     var deck: String
     var path: String
     var scenes: [SceneSummary]
+    var unusedScenes: [SceneSummary]
     var canUndo: Bool
     var canRedo: Bool
     var undoLabel: String

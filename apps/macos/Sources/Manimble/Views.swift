@@ -63,12 +63,12 @@ final class SlideCell: NSTableCellView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(number: Int, name n: String, image: NSImage?, status: String, stops: Int, active: Bool) {
-        num.stringValue = String(number)
+    func configure(number: Int, name n: String, image: NSImage?, status: String, stops: Int, active: Bool, unused: Bool = false) {
+        num.stringValue = unused ? "–" : String(number)
         name.stringValue = status == "error" ? "\(n) — error" : n
         name.textColor = status == "error" ? .systemRed : (active ? .labelColor : .secondaryLabelColor)
         thumb.image = image
-        badge.stringValue = stops > 1 ? "\(stops) builds" : (image == nil && status != "error" ? "…" : "")
+        badge.stringValue = unused ? "unused" : (stops > 1 ? "\(stops) builds" : (image == nil && status != "error" ? "…" : ""))
         setActive(active)
     }
 

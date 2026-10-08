@@ -21,6 +21,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     // Keep the selection and open it as soon as launch() has started the engine.
     private var pendingDeck: String?
     var state: StateInfo?
+    var showUnusedSlides = false
+    var navigatorScenes: [SceneSummary] {
+        guard let state else { return [] }
+        return state.scenes + (showUnusedSlides ? state.unusedScenes : [])
+    }
+    var selectedSlideIsUnused: Bool {
+        guard let name = sceneName else { return false }
+        return state?.unusedScenes.contains(where: { $0.name == name }) == true
+    }
     var scene: SceneData?
     var sceneName: String?
     var stopIndex = 0
@@ -523,17 +532,20 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let old = state
         state = st
         // reload only the rows that changed
-        if let old = old, old.scenes.count == st.scenes.count {
+        let oldRows = old.map { $0.scenes + (showUnusedSlides ? $0.unusedScenes : []) } ?? []
+        let newRows = navigatorScenes
+        if oldRows.map(\.name) == newRows.map(\.name) {
             var changed = IndexSet()
-            for (i, (a, b)) in zip(old.scenes, st.scenes).enumerated() where a.thumb != b.thumb || a.status != b.status || a.stops != b.stops { changed.insert(i) }
+            for (i, (a, b)) in zip(oldRows, newRows).enumerated() where a.thumb != b.thumb || a.status != b.status || a.stops != b.stops { changed.insert(i) }
             if !changed.isEmpty { table.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0)) }
         } else {
             suppressTable = true; table.reloadData(); suppressTable = false
-            if let n = sceneName, let i = st.scenes.firstIndex(where: { $0.name == n }) { selectRow(i) }
+            if let n = sceneName, let i = newRows.firstIndex(where: { $0.name == n }) { selectRow(i) }
+            else { table.deselectAll(nil) }
         }
         updateDocumentState()
         // the slide on screen was re-rendered (an edit from outside, e.g. Claude in the terminal): show it
-        if let n = sceneName, busy == 0, let cur = st.scenes.first(where: { $0.name == n }), cur.status == "ready",
+        if let n = sceneName, busy == 0, let cur = newRows.first(where: { $0.name == n }), cur.status == "ready",
            let t = cur.thumb, let shown = shownDir, URL(fileURLWithPath: t).deletingLastPathComponent().path != shown {
             await loadScene(n, keepStop: true)
         }
@@ -551,7 +563,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         sceneName = name; stopIndex = 0; selection = nil
         refreshRings()
         canvas.overrides = [:]; canvas.lineOverrides = [:]; canvas.selection = nil
-        if let i = state?.scenes.firstIndex(where: { $0.name == name }) { selectRow(i) }
+        if let i = navigatorScenes.firstIndex(where: { $0.name == name }) { selectRow(i) }
         await loadScene(name, keepStop: false)
     }
 
@@ -696,17 +708,19 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     // MARK: table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { state?.scenes.count ?? 0 }
+    func numberOfRows(in tableView: NSTableView) -> Int { navigatorScenes.count }
 
     func tableView(_ tv: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
-        guard let s = state?.scenes[row] else { return nil }
+        guard navigatorScenes.indices.contains(row) else { return nil }
+        let s = navigatorScenes[row]
         let cell = (tv.makeView(withIdentifier: SlideCell.id, owner: nil) as? SlideCell) ?? SlideCell()
         var img: NSImage?
         if let t = s.thumb {
             img = thumbCache.object(forKey: t as NSString)
             if img == nil, let i = NSImage(contentsOfFile: t) { thumbCache.setObject(i, forKey: t as NSString); img = i }
         }
-        cell.configure(number: row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName)
+        let unused = row >= (state?.scenes.count ?? 0)
+        cell.configure(number: unused ? 0 : row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName, unused: unused)
         _ = tv
         return cell
     }
@@ -721,15 +735,17 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func refreshRings() {
-        for r in 0..<(state?.scenes.count ?? 0) {
-            (table.view(atColumn: 0, row: r, makeIfNecessary: false) as? SlideCell)?.setActive(state?.scenes[r].name == sceneName)
+        for r in navigatorScenes.indices {
+            (table.view(atColumn: 0, row: r, makeIfNecessary: false) as? SlideCell)?.setActive(navigatorScenes[r].name == sceneName)
         }
     }
 
     func tableViewSelectionDidChange(_ n: Notification) {
         if suppressTable { return }
         let r = table.selectedRow
-        guard r >= 0, let s = state?.scenes[r], s.name != sceneName else { return }
+        guard navigatorScenes.indices.contains(r) else { return }
+        let s = navigatorScenes[r]
+        guard s.name != sceneName else { return }
         Task { @MainActor in await selectScene(s.name) }
     }
 
@@ -1172,6 +1188,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func newSlide() { slideOp("new") }
     @objc func duplicateSlide() { slideOp("duplicate") }
     @objc func deleteSlide() { slideOp("delete") }
+    @objc func toggleSkipSlide() { slideOp(selectedSlideIsUnused ? "unskip" : "skip") }
+    @objc func toggleUnusedSlides() {
+        showUnusedSlides.toggle()
+        suppressTable = true; table.reloadData(); suppressTable = false
+        if let name = sceneName, let row = navigatorScenes.firstIndex(where: { $0.name == name }) { selectRow(row) }
+        else if let first = navigatorScenes.first { Task { @MainActor in await selectScene(first.name) } }
+        else { table.deselectAll(nil) }
+    }
     @objc func moveSlideUp() { slideOp("up") }
     @objc func moveSlideDown() { slideOp("down") }
 
@@ -1186,6 +1210,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             self.lastChanged = nil
             await self.reloadState()
             if let sel = res.select { await self.selectScene(sel) }
+            else if let first = self.navigatorScenes.first { await self.selectScene(first.name) }
+            else {
+                self.sceneName = nil; self.scene = nil; self.selection = nil
+                self.canvas.stop = nil; self.sourceView.string = ""
+                self.rebuildSteps(); self.rebuildInspector()
+            }
             self.toast((res.message ?? op).capitalized + (op == "delete" ? " — ⌘Z to undo" : ""))
             self.updateDocumentState()
         }
@@ -1238,14 +1268,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         switch item.action {
         case #selector(formatBold), #selector(formatItalic): return objInfo?.kind == "text"
         case #selector(formatBigger), #selector(formatSmaller): return objInfo?.kind == "text" || objInfo?.kind == "tex"
-        case #selector(newSlide), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown),
-             #selector(playFromCurrent), #selector(insertTextPressed), #selector(insertFormulaPressed), #selector(insertTablePressed),
+        case #selector(newSlide), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
+            return sceneName != nil && !selectedSlideIsUnused && player == nil
+        case #selector(toggleSkipSlide):
+            item.title = selectedSlideIsUnused ? "Restore Slide to Show" : "Skip Slide"
+            return sceneName != nil && player == nil
+        case #selector(toggleUnusedSlides):
+            item.state = showUnusedSlides ? .on : .off
+            return workspace != nil
+        case #selector(playFromCurrent), #selector(insertTextPressed), #selector(insertFormulaPressed), #selector(insertTablePressed),
              #selector(insertImagePressed), #selector(insertShapePressed(_:)):
             return sceneName != nil && player == nil
         case #selector(toggleTerminal):
             item.title = terminal.isHidden ? "Show Terminal" : "Hide Terminal"; return workspace != nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil
-        case #selector(deleteSlide): return sceneName != nil && (state?.scenes.count ?? 0) > 1 && player == nil
+        case #selector(deleteSlide): return sceneName != nil && ((state?.scenes.count ?? 0) > 1 || selectedSlideIsUnused) && player == nil
         case #selector(undo): return state?.canUndo ?? true
         case #selector(redo): return state?.canRedo ?? true
         default: return true

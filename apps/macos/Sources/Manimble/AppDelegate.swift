@@ -96,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("New Slide", #selector(MainController.newSlide), "n", [.command, .shift]),
             item("Duplicate Slide", #selector(MainController.duplicateSlide), "d"),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
+            item("Skip Slide", #selector(MainController.toggleSkipSlide), "", []),
             .separator(),
             item("Move Slide Up", #selector(MainController.moveSlideUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.command, .option]),
             item("Move Slide Down", #selector(MainController.moveSlideDown), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.command, .option]),
@@ -114,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ])
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j"),
+            item("Show Unused Slides", #selector(MainController.toggleUnusedSlides), "", []),
             .separator(),
             item("Zoom In", #selector(MainController.zoomIn), "="),
             item("Zoom Out", #selector(MainController.zoomOut), "-"),

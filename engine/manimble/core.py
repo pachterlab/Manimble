@@ -114,14 +114,15 @@ class Manimble:
         listed = rows
         if os.path.exists(order_file):
             with open(order_file, encoding="utf-8") as fh:
-                names = set(fh.read().split())
-            listed = [r for r in rows if r["name"] in names]     # classes not in order.txt are not part of the talk
+                names = fh.read().split()
+            by_name = {r["name"]: r for r in rows}
+            listed = [by_name[n] for n in dict.fromkeys(names) if n in by_name]
         with self.lock:
             self.all_scenes = rows
             self.scenes = listed
 
     def scene(self, name: str) -> dict:
-        for s in self.scenes:
+        for s in self.all_scenes:
             if s["name"] == name:
                 return s
         raise KeyError(name)
@@ -346,7 +347,7 @@ class Manimble:
     def api_state(self, current: str | None = None) -> dict:
         self.refresh_scenes()
         # the slide on screen was changed behind our back (e.g. edited by Claude): re-render it right away
-        if current and current in {x["name"] for x in self.scenes} and self.status(current) in ("pending", "stale") \
+        if current and current in {x["name"] for x in self.all_scenes} and self.status(current) in ("pending", "stale") \
                 and current not in self.rendering and current not in getattr(self, "_kicked", set()):
             self._kicked = getattr(self, "_kicked", set()) | {current}
 
@@ -358,17 +359,23 @@ class Manimble:
                 finally:
                     self._kicked.discard(name)
             threading.Thread(target=kick, daemon=True).start()
-        out = []
-        for s in self.scenes:
-            st = self.status(s["name"])
-            r = self.results.get(s["name"])
-            item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st}
-            if r and "data" in r:
-                item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
-                item["stops"] = len(r["data"]["stops"])
-            if r and "error" in r and st == "error":
-                item["error"] = r["error"]
-            out.append(item)
+        def summaries(scenes):
+            out = []
+            for s in scenes:
+                st = self.status(s["name"])
+                r = self.results.get(s["name"])
+                item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st}
+                if r and "data" in r:
+                    item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
+                    item["stops"] = len(r["data"]["stops"])
+                if r and "error" in r and st == "error":
+                    item["error"] = r["error"]
+                out.append(item)
+            return out
+        ordered = {s["name"] for s in self.scenes}
+        unused = [s for s in self.all_scenes if s["name"] not in ordered]
+        out = summaries(self.scenes)
+        unused_out = summaries(unused)
         for s in self.scenes:
             if self.status(s["name"]) in ("pending", "stale"):
                 self.enqueue(s["name"])
@@ -376,6 +383,7 @@ class Manimble:
             "deck": os.path.basename(os.path.dirname(self.deck)) + "/" + os.path.basename(self.deck),
             "path": self.deck,
             "scenes": out,
+            "unusedScenes": unused_out,
             "canUndo": bool(self.history), "canRedo": bool(self.redo),
             "undoLabel": self.history[-1]["label"] if self.history else "",
             "hasPresent": os.path.exists(os.path.join(self.deck, "present.sh")),
@@ -635,7 +643,7 @@ class Manimble:
         return Edit("order.txt", 0, len(old), " ".join(names) + "\n")
 
     def slide_op(self, req: dict) -> dict:
-        """New / duplicate / delete / move a slide (a scene class + its place in order.txt)."""
+        """Edit a scene class or its membership in the show's order.txt."""
         from .srcedit import Edit
         with self.edit_lock:
             self.refresh_scenes()
@@ -693,11 +701,24 @@ class Manimble:
                     while a >= 2 and src.data[a - 1:a] == b"\n" and src.data[a - 2:a - 1] == b"\n":
                         a -= 1
                     edits.append(Edit(src.rel, a, b, ""))
-                    i = names.index(name)
+                    i = names.index(name) if name in names else -1
                     rest = [n for n in names if n != name]
-                    edits.append(self._order_edit(rest))
+                    if name in names:
+                        edits.append(self._order_edit(rest))
                     label = "delete slide"
+                    select = names[i + 1] if i >= 0 and i + 1 < len(names) else (names[i - 1] if i > 0 else (names[0] if names else None))
+                elif op == "skip":
+                    if name not in names:
+                        return {"ok": False, "error": "slide is already skipped"}
+                    i = names.index(name)
+                    edits.append(self._order_edit([n for n in names if n != name]))
+                    label = "skip slide"
                     select = names[i + 1] if i + 1 < len(names) else (names[i - 1] if i > 0 else None)
+                elif op == "unskip":
+                    if name in names:
+                        return {"ok": False, "error": "slide is already in the show"}
+                    edits.append(self._order_edit(names + [name]))
+                    label = "restore slide"
                 elif op in ("up", "down"):
                     i = names.index(name)
                     j = i - 1 if op == "up" else i + 1
