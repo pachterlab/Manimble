@@ -80,6 +80,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Slide menu: New, Duplicate, Delete, Move Up/Down (edits the scene class and `order.txt`, fully undoable).
 - Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
   skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
+- Drag a slide in the navigator to reorder the show; the change is saved to `order.txt` and can be undone.
 - Python source pane with syntax colours, highlighted changed/selected lines, always-visible scroll bars.
 - Working copy with **Save to Original**, **Revert**, an "edited" indicator, and a prompt on close/quit; the render
   cache lives outside your deck.
@@ -192,7 +193,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
 5. Presenter display (current + next slide, notes, timer); animated playback in the built-in player; PDF/video
    export at full resolution.
-6. Slide-navigator drag-and-drop reordering; Go to Slide; multi-slide selection; find / replace.
+6. Go to Slide; multi-slide selection; find / replace.
 7. Persistent undo history; crash recovery of the working copy.
 8. Slide transitions, themes / master slides, and a theme picker for new decks.
 9. Keep build scripts and progress tables in sync when slides are added, moved or deleted.

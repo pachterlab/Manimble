@@ -28,7 +28,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `insert` | `scene`, `stop`, `kind`, plus `tex?`, `rows?`, `cols?`, `file?` | `{ok, message, line, file, changed, hidden}` |
 | `insert_sprite` | same as `insert` | a sprite (below) previewing what the insert will look like |
 | `sprite` | `kind` (`text`, `tex` or `code`), `value`/`code`, `font_size`, `color?`, `font?`, `weight?`, `slant?` | `{file, path, x, y, w, h, cx, cy}` (a transparent PNG, `cx`/`cy` = offset of its centre from the frame centre) |
-| `slide` | `op` (`new`, `duplicate`, `delete`, `up`, `down`, `skip`, `unskip`), `scene` | `{ok, message, select}` (`select` = slide to show afterwards); `skip` removes the scene from `order.txt`, `unskip` appends it |
+| `slide` | `op` (`new`, `duplicate`, `delete`, `up`, `down`, `skip`, `unskip`, `reorder`), `scene`, `index?` | `{ok, message, select}` (`select` = slide to show afterwards); `skip` removes the scene from `order.txt`, `unskip` appends it; `reorder` inserts the scene at the zero-based slot `index` in the original list |
 | `undo`, `redo` | | `{ok, label}` or `{ok: false, error}` |
 | `present` | | `{ok}`; builds out-of-date slides and starts the deck's presenter, see events |
 | `export` | `kind` (`pptx` or `key`), `path`, `builds?`, `editable?` | `{ok}`; progress by events |

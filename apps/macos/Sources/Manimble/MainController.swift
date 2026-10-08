@@ -8,6 +8,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     let canvas = CanvasView()
     let table = NSTableView()
+    private let slideDragType = NSPasteboard.PasteboardType("org.manimble.slide-reorder")
     let stepsBar = NSStackView()
     let inspector = NSStackView()
     let sourceView = NSTextView()
@@ -88,6 +89,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         table.headerView = nil
         table.rowHeight = 108
         table.dataSource = self; table.delegate = self
+        table.registerForDraggedTypes([slideDragType])
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.style = .plain
         table.backgroundColor = .clear
         let side = NSScrollView(); side.documentView = table; side.hasVerticalScroller = true
@@ -749,6 +752,32 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         Task { @MainActor in await selectScene(s.name) }
     }
 
+    func tableView(_ tv: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard tv === table, player == nil, let scenes = state?.scenes, scenes.indices.contains(row) else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(scenes[row].name, forType: slideDragType)
+        return item
+    }
+
+    func tableView(_ tv: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+        guard tv === table, info.draggingSource as? NSTableView === table, player == nil,
+              let scenes = state?.scenes, (0...scenes.count).contains(row),
+              let name = info.draggingPasteboard.string(forType: slideDragType),
+              let source = scenes.firstIndex(where: { $0.name == name }),
+              row != source && row != source + 1 else { return [] }
+        tv.setDropRow(row, dropOperation: .above)
+        return .move
+    }
+
+    func tableView(_ tv: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
+                   dropOperation operation: NSTableView.DropOperation) -> Bool {
+        guard tableView(tv, validateDrop: info, proposedRow: row, proposedDropOperation: operation) == .move,
+              let name = info.draggingPasteboard.string(forType: slideDragType) else { return false }
+        slideOp("reorder", index: row, sceneOverride: name)
+        return true
+    }
+
     // MARK: steps strip
 
     func rebuildSteps() {
@@ -1199,12 +1228,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func moveSlideUp() { slideOp("up") }
     @objc func moveSlideDown() { slideOp("down") }
 
-    func slideOp(_ op: String) {
-        guard let name = sceneName else { return }
+    func slideOp(_ op: String, index: Int? = nil, sceneOverride: String? = nil) {
+        guard let name = sceneOverride ?? sceneName else { return }
         submit { [weak self] in
             guard let self = self else { return }
             self.busy += 1
-            let r = try? await self.engine.call("slide", ["op": op, "scene": name], as: SlideResult.self)
+            var args: [String: Any] = ["op": op, "scene": name]
+            if let index { args["index"] = index }
+            let r = try? await self.engine.call("slide", args, as: SlideResult.self)
             self.busy -= 1
             guard let res = r, res.ok == true else { self.toast(r?.error ?? "slide operation failed", error: true); return }
             self.lastChanged = nil

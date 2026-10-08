@@ -719,6 +719,19 @@ class Manimble:
                         return {"ok": False, "error": "slide is already in the show"}
                     edits.append(self._order_edit(names + [name]))
                     label = "restore slide"
+                elif op == "reorder":
+                    if name not in names:
+                        return {"ok": False, "error": "only slides in the show can be reordered"}
+                    destination = req.get("index")
+                    if not isinstance(destination, int) or isinstance(destination, bool) or not 0 <= destination <= len(names):
+                        return {"ok": False, "error": "invalid slide destination"}
+                    source = names.index(name)
+                    if destination in (source, source + 1):
+                        return {"ok": True, "message": "slide is already there", "select": name}
+                    names.pop(source)
+                    names.insert(destination - (1 if source < destination else 0), name)
+                    edits.append(self._order_edit(names))
+                    label = "move slide"
                 elif op in ("up", "down"):
                     i = names.index(name)
                     j = i - 1 if op == "up" else i + 1
