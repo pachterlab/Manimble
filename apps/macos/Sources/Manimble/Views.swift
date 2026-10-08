@@ -2,6 +2,43 @@ import AppKit
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
+/// Shows numbered, coloured source while idle and plain editable Python on focus.
+final class SourceCodeView: NSTextView {
+    var onFocus: (() -> Void)?
+    var onBlur: (() -> Void)?
+    var onChange: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocus?() }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onBlur?() }
+        return accepted
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        onChange?()
+    }
+
+    override func insertTab(_ sender: Any?) {
+        insertText("    ", replacementRange: selectedRange())
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        let text = string as NSString
+        let before = text.substring(to: min(selectedRange().location, text.length))
+        let line = before.components(separatedBy: "\n").last ?? ""
+        let indentation = String(line.prefix(while: { $0 == " " || $0 == "\t" }))
+        let extra = line.trimmingCharacters(in: .whitespaces).hasSuffix(":") ? "    " : ""
+        insertText("\n" + indentation + extra, replacementRange: selectedRange())
+    }
+}
+
 extension NSColor {
     convenience init(hex: String) {
         var h = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))

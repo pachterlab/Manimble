@@ -404,7 +404,7 @@ class Manimble:
         if not rec:
             return {"name": name, "status": self.status(name)}
         if "error" in rec:
-            return {"name": name, "status": "error", "error": rec["error"]}
+            return {"name": name, "status": "error", "error": rec["error"], "source": self.api_source(name)}
         data = rec["data"]
         fw, fh = data["frame"]
         pw, ph = data["size"]
@@ -451,12 +451,46 @@ class Manimble:
         s = self.scene(name)
         self.refresh_scenes()
         s = self.scene(name)
-        lines = self.project.read(s["file"]).decode("utf-8").split("\n")
+        src = self.project.src(s["file"])
+        cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+        a, b = src.span(cls)
         return {
             "file": s["file"], "start": s["line"], "end": s["end"],
-            "text": "\n".join(lines[s["line"] - 1: s["end"]]),
+            "text": src.data[a:b].decode("utf-8"),
             "changed": self.last_changed if self.last_changed.get("file") == s["file"] else None,
         }
+
+    def edit_source(self, req: dict) -> dict:
+        """Replace one scene class, leaving the surrounding module untouched."""
+        from .srcedit import Edit
+        with self.edit_lock:
+            self.refresh_scenes()
+            name = req["scene"]
+            source = self.api_source(name)
+            if req.get("file") != source["file"] or req.get("expected") != source["text"]:
+                return {"ok": False, "error": "Source changed since editing began. Copy your draft, then reload the slide."}
+            replacement = req["text"]
+            if replacement == source["text"]:
+                return {"ok": True, "message": "no change"}
+            src = self.project.src(source["file"])
+            cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+            a, b = src.span(cls)
+            data = src.data[:a] + replacement.encode("utf-8") + src.data[b:]
+            try:
+                tree = ast.parse(data, filename=source["file"])
+            except SyntaxError as exc:
+                return {"ok": False, "error": f"{source['file']}:{exc.lineno}: {exc.msg}"}
+            if not any(isinstance(n, ast.ClassDef) and n.name == name and
+                       any(isinstance(m, ast.FunctionDef) and m.name == "construct" for m in n.body)
+                       for n in tree.body):
+                return {"ok": False, "error": f"Keep class {name} and its construct() method in this code box."}
+            written = self.project.apply([Edit(source["file"], a, b, replacement)])
+            self._sig_at = 0
+            self._commit("edit Python source", written)
+            self.refresh_scenes()
+            rec = self.render_now(name, interactive=True, force=True)
+            self.enqueue_all()
+            return {"ok": True, "changed": self.last_changed, "error": rec.get("error")}
 
     # -------------------------------------------------------- API: edit
     def _commit(self, label: str, written: dict):

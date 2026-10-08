@@ -55,6 +55,7 @@ def main():
         "dependency_report": lambda a: need().dependency_report(),
         "scene": lambda a: need().api_scene(a["name"]),
         "edit": lambda a: need().edit(a),
+        "edit_source": lambda a: need().edit_source(a),
         "undo": lambda a: need().undo(),
         "redo": lambda a: need().redo_(),
         "sprite": lambda a: need().sprite(a),

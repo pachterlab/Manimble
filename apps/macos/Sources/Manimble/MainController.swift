@@ -11,8 +11,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     private let slideDragType = NSPasteboard.PasteboardType("org.manimble.slide-reorder")
     let stepsBar = NSStackView()
     let inspector = NSStackView()
-    let sourceView = NSTextView()
+    let sourceView = SourceCodeView()
     let srcHeader = NSTextField(labelWithString: "PYTHON")
+    let sourceError = NSTextField(wrappingLabelWithString: "")
+    let sourceErrorButton = NSButton(title: "Error Details…", target: nil, action: nil)
+    var sourceErrorMessage: String?
+    var sourceEditBase: SourceInfo?
+    var sourceEditSceneName: String?
+    var sourceDraft: String?
+    var sourceFocused = false
     let toastPill = Pill()
     let busyPill = Pill()
     var busyText = "Rendering…" { didSet { if busy > 0 { busyPill.show(busyText, symbol: nil, tint: nil, spinning: true) } } }
@@ -77,6 +84,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.onDelete = { [weak self] oid in self?.deleteSelected(oid) }
         window.center()
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(canvas)
     }
 
     func buildUI() -> NSView {
@@ -173,6 +181,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         inspScroll.documentView = flip
         flip.widthAnchor.constraint(equalTo: inspScroll.contentView.widthAnchor).isActive = true
         sourceView.isEditable = false
+        sourceView.isRichText = false
+        sourceView.allowsUndo = true
+        sourceView.isAutomaticQuoteSubstitutionEnabled = false
+        sourceView.isAutomaticDashSubstitutionEnabled = false
+        sourceView.isAutomaticSpellingCorrectionEnabled = false
+        sourceView.onFocus = { [weak self] in self?.beginSourceEditing() }
+        sourceView.onBlur = { [weak self] in self?.endSourceEditing() }
+        sourceView.onChange = { [weak self] in self?.sourceTextChanged() }
         sourceView.font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
         sourceView.backgroundColor = NSColor(srgbRed: 0.098, green: 0.102, blue: 0.125, alpha: 1)
         sourceView.textColor = .init(white: 0.88, alpha: 1)
@@ -196,10 +212,28 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let headBar = NSView(); headBar.wantsLayer = true
         headBar.layer?.backgroundColor = NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1).cgColor
         srcHeader.translatesAutoresizingMaskIntoConstraints = false; headBar.addSubview(srcHeader)
+        sourceErrorButton.target = self
+        sourceErrorButton.action = #selector(showSourceErrorDetails)
+        sourceErrorButton.isBordered = false
+        sourceErrorButton.font = Theme.font(10, .medium)
+        sourceErrorButton.contentTintColor = .systemRed
+        sourceErrorButton.isHidden = true
+        sourceErrorButton.translatesAutoresizingMaskIntoConstraints = false
+        headBar.addSubview(sourceErrorButton)
         headBar.heightAnchor.constraint(equalToConstant: 26).isActive = true
         NSLayoutConstraint.activate([srcHeader.leadingAnchor.constraint(equalTo: headBar.leadingAnchor, constant: 14),
-                                     srcHeader.centerYAnchor.constraint(equalTo: headBar.centerYAnchor)])
-        let srcBox = NSStackView(views: [headBar, srcScroll]); srcBox.orientation = .vertical; srcBox.spacing = 0
+                                     srcHeader.centerYAnchor.constraint(equalTo: headBar.centerYAnchor),
+                                     srcHeader.trailingAnchor.constraint(lessThanOrEqualTo: sourceErrorButton.leadingAnchor, constant: -4),
+                                     sourceErrorButton.trailingAnchor.constraint(equalTo: headBar.trailingAnchor, constant: -10),
+                                     sourceErrorButton.centerYAnchor.constraint(equalTo: headBar.centerYAnchor)])
+        sourceError.font = Theme.mono(10)
+        sourceError.textColor = .systemRed
+        sourceError.backgroundColor = NSColor.systemRed.withAlphaComponent(0.1)
+        sourceError.drawsBackground = true
+        sourceError.isSelectable = true
+        sourceError.maximumNumberOfLines = 5
+        sourceError.isHidden = true
+        let srcBox = NSStackView(views: [headBar, sourceError, srcScroll]); srcBox.orientation = .vertical; srcBox.spacing = 0
         headBar.widthAnchor.constraint(equalTo: srcBox.widthAnchor).isActive = true
         let right = GrabSplitView(); right.isVertical = false; right.dividerStyle = .thin
         // the code sits in an inset card with its own edge
@@ -386,6 +420,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         guard confirmClose(for: "opening another deck") else { return }
+        window.makeFirstResponder(canvas)
         Task { @MainActor in
             busy += 1
             defer { busy -= 1 }
@@ -397,6 +432,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 _ = try await engine.raw("open", ["deck": ws.work.path, "cache": Workspace.cacheDir(for: ws.original)])
                 UserDefaults.standard.set(deck, forKey: "lastDeck")
                 sceneName = nil; scene = nil; selection = nil
+                sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil
+                sourceFocused = false
                 canvas.stop = nil
                 await reloadState()
                 if let first = state?.scenes.first { await selectScene(first.name) }
@@ -409,7 +446,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func updateDocumentState() {
         guard let ws = workspace else { return }
-        let m = ws.isModified
+        let m = ws.isModified || sourceDraft != nil
         window.isDocumentEdited = m
         window.title = ws.original.deletingLastPathComponent().lastPathComponent + " / " + ws.original.lastPathComponent
         window.subtitle = m ? "Edited — not saved to the original" : "Manimble"
@@ -417,6 +454,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     @objc func saveToOriginal() {
         guard let ws = workspace else { return }
+        if sourceDraft != nil {
+            window.makeFirstResponder(canvas)
+            submit { [weak self] in self?.saveToOriginalAfterSourceEdit() }
+            return
+        }
         if !ws.isModified { toast("Nothing to save"); return }
         if !ws.conflictFiles.isEmpty {
             let a = NSAlert(); a.alertStyle = .warning
@@ -429,13 +471,24 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         catch { alert("Could not save", "\(error)") }
     }
 
+    func saveToOriginalAfterSourceEdit() {
+        guard sourceDraft == nil else {
+            toast("Fix the Python code before saving", error: true)
+            window.makeFirstResponder(sourceView)
+            return
+        }
+        saveToOriginal()
+    }
+
     @objc func revertToOriginal() {
-        guard let ws = workspace, ws.isModified else { toast("No changes to revert"); return }
+        guard let ws = workspace, ws.isModified || sourceDraft != nil else { toast("No changes to revert"); return }
         let a = NSAlert(); a.alertStyle = .warning
         a.messageText = "Discard all unsaved edits?"
         a.informativeText = "The working copy goes back to the last saved version of the deck."
         a.addButton(withTitle: "Revert"); a.addButton(withTitle: "Cancel")
         guard a.runModal() == .alertFirstButtonReturn else { return }
+        sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil
+        window.makeFirstResponder(canvas)
         submit { [weak self] in
             guard let self = self, let ws = self.workspace else { return }
             try? ws.revert()
@@ -449,6 +502,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     /// Ask what to do with unsaved edits. Returns false if the user cancelled.
     func confirmClose(for what: String) -> Bool {
+        if sourceDraft != nil {
+            let draftAlert = NSAlert(); draftAlert.alertStyle = .warning
+            draftAlert.messageText = "Python code has not been applied"
+            draftAlert.informativeText = "Fix the code error and click outside the editor, or discard this draft before \(what)."
+            draftAlert.addButton(withTitle: "Keep Editing"); draftAlert.addButton(withTitle: "Discard Draft")
+            if draftAlert.runModal() != .alertSecondButtonReturn { window.makeFirstResponder(sourceView); return false }
+            sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil
+        }
         guard let ws = workspace, ws.isModified else { return true }
         let a = NSAlert()
         a.messageText = "Save your edits to \(ws.original.lastPathComponent)?"
@@ -563,6 +624,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func selectScene(_ name: String) async {
+        if name != sceneName && sourceFocused { window.makeFirstResponder(canvas) }
+        if name != sceneName && sourceDraft != nil {
+            await queueTail?.value
+            if sourceDraft != nil {
+                toast("Fix the Python code before changing slides", error: true)
+                if let current = sceneName, let row = navigatorScenes.firstIndex(where: { $0.name == current }) { selectRow(row) }
+                window.makeFirstResponder(sourceView)
+                return
+            }
+        }
         sceneName = name; stopIndex = 0; selection = nil
         refreshRings()
         canvas.overrides = [:]; canvas.lineOverrides = [:]; canvas.selection = nil
@@ -577,10 +648,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let old = scene, old.name == name, old.stops?.first?.png != sc.stops?.first?.png { canvas.dropTextures() }
         if sc.status != "ready" || sc.stops == nil {
             // keep showing the last good frame instead of a blank canvas
-            if scene?.name != name || scene?.stops == nil { canvas.stop = nil; scene = sc }
+            if scene?.name != name || scene?.stops == nil { canvas.stop = nil }
+            scene = sc; selection = nil
             canvas.overrides = [:]
             toast("Slide failed to render: " + (sc.error ?? "unknown error").split(separator: "\n").suffix(3).joined(separator: " "), error: true)
+            renderSource()
             showSourceError(sc.error ?? "scene not ready")
+            rebuildInspector()
             return
         }
         scene = sc
@@ -1092,8 +1166,105 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     // MARK: source pane
 
+    func beginSourceEditing() {
+        if sourceFocused { return }
+        guard let name = sceneName, let src = scene?.source else { return }
+        sourceFocused = true
+        if sourceEditSceneName != name || sourceEditBase == nil {
+            sourceEditBase = src
+            sourceEditSceneName = name
+            sourceDraft = nil
+        }
+        let wasDraft = sourceDraft != nil
+        let position = sourceView.selectedRange().location
+        let old = sourceView.string as NSString
+        let prefix = old.substring(to: min(position, old.length))
+        let line = prefix.filter { $0 == "\n" }.count
+        sourceView.string = sourceDraft ?? src.text
+        let caret = min(max(0, position - (wasDraft ? 0 : 7 * (line + 1))), (sourceView.string as NSString).length)
+        sourceView.setSelectedRange(NSRange(location: caret, length: 0))
+        srcHeader.stringValue = "PYTHON  ·  \(src.file):\(src.start)  ·  EDITING"
+    }
+
+    func sourceTextChanged() {
+        guard sourceFocused, let base = sourceEditBase else { return }
+        sourceDraft = sourceView.string == base.text ? nil : sourceView.string
+        srcHeader.stringValue = "PYTHON  ·  \(base.file):\(base.start)" + (sourceDraft == nil ? "  ·  EDITING" : "  ·  UNSAVED CODE")
+        if sourceDraft != nil { clearSourceError() }
+        updateDocumentState()
+    }
+
+    func endSourceEditing() {
+        sourceFocused = false
+        guard sourceDraft != nil else { sourceEditBase = nil; renderSource(); return }
+        submit { [weak self] in await self?.commitSourceDraft() }
+    }
+
+    func commitSourceDraft() async {
+        guard let name = sourceEditSceneName, let base = sourceEditBase, let draft = sourceDraft else { return }
+        busy += 1
+        let result: SourceEditResult?
+        var failure: String?
+        do {
+            result = try await engine.call("edit_source", ["scene": name, "file": base.file,
+                                                           "expected": base.text, "text": draft], as: SourceEditResult.self)
+        } catch {
+            result = nil
+            failure = "\(error)"
+        }
+        busy -= 1
+        guard result?.ok == true else {
+            let message = result?.error ?? failure ?? "Could not update Python source"
+            showSourceError(message)
+            toast(message, error: true)
+            updateDocumentState()
+            return
+        }
+        lastChanged = result?.changed
+        let hasNewerDraft = sourceDraft != draft
+        if !hasNewerDraft {
+            sourceDraft = nil
+        }
+        if sceneName == name { await loadScene(name, keepStop: true) }
+        sourceEditBase = scene?.source
+        await reloadState()
+        if result?.error == nil { toast("Python source updated") }
+        updateDocumentState()
+        if hasNewerDraft && !sourceFocused { submit { [weak self] in await self?.commitSourceDraft() } }
+    }
+
+    func clearSourceError() {
+        sourceErrorMessage = nil
+        sourceError.stringValue = ""
+        sourceError.toolTip = nil
+        sourceError.isHidden = true
+        sourceErrorButton.isHidden = true
+    }
+
+    func showSourceError(_ message: String) {
+        sourceErrorMessage = message
+        let lines = message.split(separator: "\n", omittingEmptySubsequences: true)
+        sourceError.stringValue = lines.suffix(5).joined(separator: "\n")
+        sourceError.toolTip = message
+        sourceError.isHidden = false
+        sourceErrorButton.isHidden = false
+        srcHeader.stringValue = "PYTHON  ·  ERROR"
+    }
+
+    @objc func showSourceErrorDetails() {
+        guard let message = sourceErrorMessage else { return }
+        let alert = NSAlert(); alert.alertStyle = .critical
+        alert.messageText = "Python error"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     func renderSource() {
-        guard let src = scene?.source else { sourceView.string = ""; return }
+        if sourceFocused || sourceDraft != nil { return }
+        guard let src = scene?.source else { sourceView.isEditable = false; sourceView.string = ""; return }
+        sourceView.isEditable = true
+        clearSourceError()
         srcHeader.stringValue = "PYTHON  ·  \(src.file):\(src.start)"
         let chg = lastChanged ?? src.changed
         var changed = Set<Int>()
@@ -1124,6 +1295,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             for k in 0..<min(idx, lines.count) { loc += 7 + lines[k].utf16.count + 1 }
             sourceView.scrollRangeToVisible(NSRange(location: min(loc, numbered.length), length: 0))
         }
+        if scene?.status == "error", let message = scene?.error { showSourceError(message) }
     }
     // Python syntax colouring (dark palette)
     static let pyKeywords = try! NSRegularExpression(pattern: "\\b(def|class|self|for|in|if|elif|else|return|import|from|as|with|while|and|or|not|None|True|False|lambda|pass|yield|try|except|raise|is|assert|break|continue)\\b")
@@ -1157,13 +1329,17 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func highlightSource() { if scene?.source != nil { renderSource() } }
-    func showSourceError(_ s: String) { sourceView.string = s }
 
     // MARK: undo / navigation / misc
 
     @objc func undo() { doUndo(redo: false) }
     @objc func redo() { doUndo(redo: true) }
     func doUndo(redo: Bool) {
+        if window.firstResponder === sourceView || sourceDraft != nil {
+            window.makeFirstResponder(sourceView)
+            if redo { sourceView.undoManager?.redo() } else { sourceView.undoManager?.undo() }
+            return
+        }
         if window.firstResponder is NSTextView && window.firstResponder !== sourceView && window.firstResponder !== canvas { return }
         submit { [weak self] in
             guard let self = self else { return }

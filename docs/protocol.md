@@ -25,6 +25,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `state` | `current?` (slide on screen; re-rendered first if its source changed) | `{deck, path, scenes: [{name, file, line, status, thumb?, stops?, error?}], unusedScenes: [same summary], canUndo, canRedo, undoLabel, hasPresent}`; `scenes` follows `order.txt` and `unusedScenes` contains scene classes outside it; `status` is `ready`, `rendering`, `queued`, `stale`, `pending` or `error` |
 | `scene` | `name` | see below; renders the slide if needed and waits |
 | `edit` | `scene`, `stop`, `oid`, `op`, plus op arguments | `{ok, message?, siblings?, changed?: {file, ranges}}` or `{ok: false, error}` |
+| `edit_source` | `scene`, `file`, `expected` (source block shown when editing began), `text` (replacement Python class) | `{ok, changed?, error?}`; syntax errors reject the edit, render errors keep it in the working copy and return the error |
 | `insert` | `scene`, `stop`, `kind`, plus `tex?`, `rows?`, `cols?`, `file?` | `{ok, message, line, file, changed, hidden}` |
 | `insert_sprite` | same as `insert` | a sprite (below) previewing what the insert will look like |
 | `sprite` | `kind` (`text`, `tex` or `code`), `value`/`code`, `font_size`, `color?`, `font?`, `weight?`, `slant?` | `{file, path, x, y, w, h, cx, cy}` (a transparent PNG, `cx`/`cy` = offset of its centre from the frame centre) |

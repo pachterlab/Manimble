@@ -81,7 +81,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
   skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
 - Drag a slide in the navigator to reorder the show; the change is saved to `order.txt` and can be undone.
-- Python source pane with syntax colours, highlighted changed/selected lines, always-visible scroll bars.
+- Python source pane with syntax colours, highlighted changed/selected lines, and always-visible scroll bars. Click the
+  code to edit that scene class, then click outside to update the slide. Syntax errors leave the draft in the editor;
+  render errors keep the code in the working copy and appear above the editor while the last good frame remains visible.
 - Working copy with **Save to Original**, **Revert**, an "edited" indicator, and a prompt on close/quit; the render
   cache lives outside your deck.
 - Undo/redo (⌘Z / ⇧⌘Z) for every edit while the app is open.
@@ -149,7 +151,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Changing a shared constant (or a formula whose parts the code selects by name with `get_part_by_tex`) can break
   other slides. Only the slide on screen is re-rendered, so the breakage shows later as an error badge. A "re-render
   the other slides that use this constant and warn" check is not built.
-- Text produced by f-strings or other computation is read-only.
+- Text produced by f-strings or other computation cannot be retyped on the canvas; edit its Python code in the source pane.
 - Delete only works for elements inserted with the toolbar. Elements that were already in your code must be removed
   in the source.
 - Table editing needs literal table data; cells are rendered as math.
@@ -157,8 +159,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Drawing order is approximated when text sits between filled shapes; the canvas is exact when idle.
 
 **Animations**
-- Animations are not editable. Existing `self.play(...)` calls run normally but cannot be added, removed or re-timed
-  from the UI. Inserted elements simply appear (`self.add`) rather than animating in.
+- Animations have no direct editing controls. You can edit `self.play(...)` calls in the Python pane; inserted elements
+  still appear (`self.add`) rather than animating in.
 
 **Presenting and sharing**
 - The built-in player shows stills of each build scaled up from 1280×720, with no animation playback, no presenter

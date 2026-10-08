@@ -92,6 +92,13 @@ struct EditResult: Decodable {
     var changed: ChangedLines?
 }
 
+struct SourceEditResult: Decodable {
+    var ok: Bool
+    var message: String?
+    var error: String?
+    var changed: ChangedLines?
+}
+
 struct SpriteResult: Decodable {
     var file: String?
     var path: String?
