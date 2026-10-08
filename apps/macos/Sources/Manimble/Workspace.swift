@@ -30,7 +30,10 @@ final class Workspace {
         let x = original.deletingLastPathComponent()
         let g = x.deletingLastPathComponent()
         let h = SHA256.hash(data: Data(original.path.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
-        root = Workspace.base.appendingPathComponent("work").appendingPathComponent(original.lastPathComponent + "-" + h)
+        // Give each open its own root. Reopening the same deck creates the new
+        // workspace before the controller discards the old one; a deterministic
+        // path lets that cleanup accidentally delete the new workspace.
+        root = Workspace.base.appendingPathComponent("work").appendingPathComponent(original.lastPathComponent + "-" + h + "-" + UUID().uuidString)
         try? fm.removeItem(at: root)
         let wx = root.appendingPathComponent(x.lastPathComponent)
         work = wx.appendingPathComponent(original.lastPathComponent)

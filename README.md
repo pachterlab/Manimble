@@ -7,27 +7,28 @@ Python source, and you can watch the lines change in the built-in code pane.
 ## Run it
 
 ```bash
-git clone <this repository> && cd manimble/apps/macos
-./build_app.sh          # builds Manimble.app (Swift + Metal) in apps/macos
-open Manimble.app       # File ▸ Open Deck…  (try ../../examples/hello/deck)
+git clone <this repository> && cd manimble
+./install_manimble.sh   # installs dependencies and builds the app
+open "$HOME/Applications/Manimble.app"  # File ▸ Open Deck… (try examples/hello/deck)
 ```
 
 Requirements:
-- macOS 13+ and the Swift toolchain (Xcode or the command line tools; the first build downloads
-  [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)).
-- A Python environment with `manim`, `manim-slides` and `pillow` (the one you render your slides with). Add
-  `python-pptx` for PowerPoint/Keynote import and export. Keynote import/export also needs Keynote installed.
-- LaTeX (as manim needs it) for formulas.
+- macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
+  [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), creates a Python environment in
+  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides, Pillow,
+  python-pptx, FFmpeg, and MacTeX when they are missing.
+- Keynote is needed only for Keynote import and export.
 
-On launch Manimble looks for a suitable Python on its own: the one you chose before, `$MANIMBLE_PYTHON`, then every
-`python3` / `python` on your login shell's PATH. The first that can import manim and Pillow is used. If none is
-found it asks you to pick one (**Manimble ▸ Choose Python…**), and remembers the choice.
+On launch Manimble checks `$MANIMBLE_PYTHON`, your saved choice, its installed Python environment, a checkout-local
+`.venv`, and Python on your login shell's `PATH`. It uses the first one that can import Manim and Pillow, so no
+Python chooser is needed after `install_manimble.sh` completes.
 
 A deck is a folder of scene classes (`class MySlide(Slide): def construct(self): ...`). If it has an `order.txt`
 (scene names separated by spaces/newlines), only those scenes, in that order, are the slides of the talk;
 otherwise every scene class is listed.
 
-`Manimble.app` is a thin bundle that carries the engine and uses your Python. Rebuild it after pulling changes.
+`~/Applications/Manimble.app` carries the engine and uses the installed Python environment. Rerun
+`install_manimble.sh` after pulling changes.
 
 The repository is organised so other front ends can share the same engine: the Python engine in [`engine/`](engine) does
 everything that involves manim and your source code and talks a small JSON protocol ([`docs/protocol.md`](docs/protocol.md));
@@ -192,12 +193,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 9. Slide transitions, themes / master slides, and a theme picker for new decks.
 10. Keep build scripts and progress tables in sync when slides are added, moved or deleted.
 11. Image tools: replace, crop, mask; SVG and PDF insertion.
-12. Packaging: notarisation, bundling or auto-installing the Python environment, an automated test suite.
+12. Packaging: notarisation and an automated test suite.
 
 ## License
 
 BSD 2-Clause, see [LICENSE](LICENSE). Manimble links against [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
-(MIT) and drives your own installs of manim, manim-slides and python-pptx, each under its own license.
+(MIT) and installs Manim, manim-slides and python-pptx into its app environment, each under its own license.
 
 ## Layout of this repository
 
@@ -206,6 +207,7 @@ engine/                  platform-independent Python engine (rpc, core, srcedit,
 docs/protocol.md         the engine's JSON-lines protocol
 apps/macos/              the macOS app: Package.swift, Sources/Manimble (AppKit, Metal, SwiftTerm),
                          build_app.sh, assets/Manimble.icns, tools/make_icon.py
+install_manimble.sh      installs dependencies and builds ~/Applications/Manimble.app
 apps/windows/            placeholder with notes for a future Windows front end
 examples/hello/deck/     a tiny deck to try Manimble on
 LICENSE                  BSD 2-Clause

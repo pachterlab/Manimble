@@ -3,7 +3,23 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"
-swift build -c release
+# Prefer the complete Xcode toolchain when installed. The standalone Command
+# Line Tools can lag behind the SDK shipped with macOS, which makes SwiftPM
+# fail while compiling the package manifest.
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
+
+# Keep SwiftPM and Clang caches with the checkout so builds also work when the
+# user's home cache directories are unavailable (for example, in restricted
+# environments).
+mkdir -p "$ROOT/.build/swift-cache" "$ROOT/.build/swift-config" \
+  "$ROOT/.build/swift-security" "$ROOT/.build/module-cache"
+export CLANG_MODULE_CACHE_PATH="$ROOT/.build/module-cache"
+swift build -c release \
+  --cache-path "$ROOT/.build/swift-cache" \
+  --config-path "$ROOT/.build/swift-config" \
+  --security-path "$ROOT/.build/swift-security"
 APP="$ROOT/Manimble.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

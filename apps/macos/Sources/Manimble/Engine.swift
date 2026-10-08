@@ -16,13 +16,22 @@ final class Engine {
     private var buffer = Data()
     var onEvent: (([String: Any]) -> Void)?
 
-    /// The saved choice, $MANIMBLE_PYTHON, then every python3/python on the login shell's PATH (plus the usual
-    /// Homebrew locations): the first one that can import manim and Pillow wins.
+    /// Prefer an explicit or saved choice, then the environment installed by
+    /// install_manimble.sh, then a checkout-local environment and login PATH.
     static func findPython() -> String? {
         let fm = FileManager.default
         var candidates: [String] = []
-        if let saved = UserDefaults.standard.string(forKey: "python") { candidates.append(saved) }
         if let env = ProcessInfo.processInfo.environment["MANIMBLE_PYTHON"] { candidates.append(env) }
+        if let saved = UserDefaults.standard.string(forKey: "python") { candidates.append(saved) }
+
+        if let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            candidates.append(support.appendingPathComponent("Manimble/python/bin/python").path)
+        }
+        // Also support running Manimble.app directly from a source checkout.
+        let appDirectory = Bundle.main.bundleURL.deletingLastPathComponent()
+        let checkout = appDirectory.appendingPathComponent("../..").standardizedFileURL
+        candidates.append(checkout.appendingPathComponent(".venv/bin/python").path)
+
         let sh = Process()
         sh.executableURL = URL(fileURLWithPath: "/bin/zsh")
         sh.arguments = ["-lc", "which -a python3 python 2>/dev/null"]
@@ -67,6 +76,12 @@ final class Engine {
         env["PYTHONPATH"] = Engine.enginePath()
         env["MANIMBLE_PYTHON"] = python
         env["PYTHONUNBUFFERED"] = "1"
+        let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin", "/Library/TeX/texbin"] + path.split(separator: ":").map(String.init))
+            .reduce(into: [String]()) { result, item in
+                if !result.contains(item) { result.append(item) }
+            }
+            .joined(separator: ":")
         p.environment = env
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe

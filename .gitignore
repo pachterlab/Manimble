@@ -4,9 +4,11 @@ Manimble.app/
 *.xcodeproj/
 .swiftpm/
 
-# python
+# Python
+/.venv/
 __pycache__/
 *.pyc
+*.pyo
 
 # manimble caches inside a deck folder
 .manimble/

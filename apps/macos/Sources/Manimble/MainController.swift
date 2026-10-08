@@ -16,6 +16,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var busyText = "Rendering…" { didSet { if busy > 0 { busyPill.show(busyText, symbol: nil, tint: nil, spinning: true) } } }
 
     var workspace: Workspace?
+    // Opening a deck can happen while startup is still searching for Python.
+    // Keep the selection and open it as soon as launch() has started the engine.
+    private var pendingDeck: String?
     var state: StateInfo?
     var scene: SceneData?
     var sceneName: String?
@@ -251,10 +254,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func launch(python: String) {
         do { try engine.start(python: python) }
-        catch { alert("Could not start the engine", "\(error)"); return }
+        catch {
+            pendingDeck = nil
+            busyPill.hide()
+            alert("Could not start the engine", "\(error)")
+            return
+        }
+        busyPill.hide()
         engine.onEvent = { [weak self] ev in self?.handleEvent(ev) }
-        let last = UserDefaults.standard.string(forKey: "lastDeck")
-        if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { openDeck() }
+        if let pending = pendingDeck {
+            pendingDeck = nil
+            open(deck: pending)
+        } else {
+            let last = UserDefaults.standard.string(forKey: "lastDeck")
+            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { openDeck() }
+        }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == 0 { await self?.reloadState() } }
         }
@@ -280,6 +294,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func open(deck: String) {
+        guard engine.isRunning else {
+            pendingDeck = deck
+            busyPill.show("Waiting for Manimble engine…", symbol: nil, tint: nil, spinning: true)
+            return
+        }
         guard confirmClose(for: "opening another deck") else { return }
         Task { @MainActor in
             busy += 1
