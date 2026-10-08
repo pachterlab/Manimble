@@ -89,7 +89,10 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
   top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
   go into the working copy's `slides/` folder, so the original's builds are untouched.
-- Share menu: PDF (one page per slide or per build) and source archive (.zip), via the macOS share sheet or Save.
+- File ▸ Save Project Copy… writes an editable, portable project folder. File ▸ Package for Sharing… creates one
+  `.manimble` file that can be transferred and opened in Manimble. Both scan files opened while scenes render,
+  preserve project-relative paths, and report missing or out-of-project dependencies. The Share menu stays focused
+  on PDFs and presentation formats.
 - **Export to PowerPoint (.pptx) and Keynote (.key)** (File ▸ Export To, and the Share menu). One slide per build or
   per slide. *Editable* mode keeps text as real text boxes (font, size, colour, bold/italic) over a picture of
   everything else; *Pictures only* gives the exact rendered frames. Keynote export builds the .pptx and has Keynote
@@ -162,8 +165,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   them. Rendering also writes manim's cache into the deck's `../media` folder.
 - New or duplicated slides are added to `order.txt` only: decks that keep their own hand-written lists (build
   scripts, footer progress tables) must be updated by hand.
-- The source archive contains the deck folder and its sibling `assets/` only; data files elsewhere in the project are
-  not included.
+- Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
+  refer to files Manimble has not seen; render every slide before packaging for sharing.
 - Scenes not listed in `order.txt` are hidden, with no toggle to show them.
 
 **App and environment**

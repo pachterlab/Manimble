@@ -52,6 +52,7 @@ def main():
     handlers = {
         "open": open_deck,
         "state": lambda a: need().api_state(a.get("current")),
+        "dependency_report": lambda a: need().dependency_report(),
         "scene": lambda a: need().api_scene(a["name"]),
         "edit": lambda a: need().edit(a),
         "undo": lambda a: need().undo(),

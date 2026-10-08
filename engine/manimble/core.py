@@ -245,7 +245,7 @@ class Manimble:
             except Exception:
                 traceback.print_exc()
 
-    def render_now(self, name: str, interactive: bool = False) -> dict:
+    def render_now(self, name: str, interactive: bool = False, force: bool = False) -> dict:
         """Render a scene (blocking). Returns the stored result record.
 
         interactive=True uses a dedicated worker so user edits are not queued behind the
@@ -256,7 +256,7 @@ class Manimble:
             s = self.scene(name)
             key = self.scene_key(s)
             cur = self.results.get(name)
-            if cur and cur.get("key") == key and "error" not in cur and not cur.get("stale_meta"):
+            if cur and cur.get("key") == key and "error" not in cur and not cur.get("stale_meta") and not force:
                 return cur
             self.rendering.add(name)
             try:
@@ -266,10 +266,14 @@ class Manimble:
                 res = (self.edit_worker if interactive else self.render_worker).request(
                     {"cmd": "render", "scene": name, "module": s["module"], "out": str(out)}
                 )
+                dependencies = sorted(set(res.get("dependencies", [])))
                 if "error" in res:
-                    rec = {"key": key, "error": res["error"], "dir": sub}
+                    rec = {"key": key, "error": res["error"], "dir": sub,
+                           "dependencies": dependencies, "dependencies_scanned": True}
                 else:
                     rec = {"key": key, "dir": sub, "data": res}
+                    rec["dependencies"] = dependencies
+                    rec["dependencies_scanned"] = True
                     for old in (self.cache_dir / name).iterdir():
                         if old.is_dir() and old.name != sub:
                             shutil.rmtree(old, ignore_errors=True)
@@ -280,6 +284,50 @@ class Manimble:
                 return rec
             finally:
                 self.rendering.discard(name)
+
+    def dependency_report(self) -> dict:
+        """Render any unscanned scenes and report files opened by deck code."""
+        failures = []
+        current_workspace = Path(self.deck).absolute().parent.parent
+        work_root = current_workspace.parent
+        for s in self.scenes:
+            with self.lock:
+                rec = self.results.get(s["name"])
+            stale_workspace_paths = False
+            if rec and rec.get("dependencies_scanned"):
+                for raw in rec.get("dependencies", []):
+                    dependency = Path(raw).absolute()
+                    # Render-cache records survive closing and reopening a deck,
+                    # but their absolute paths refer to the previous UUID-named
+                    # working copy. Rerender those scenes to collect paths from
+                    # this session's workspace before packaging.
+                    if dependency.is_relative_to(work_root) and not dependency.is_relative_to(current_workspace):
+                        stale_workspace_paths = True
+                        break
+            if not rec or not rec.get("dependencies_scanned") or stale_workspace_paths:
+                rec = self.render_now(s["name"], force=True)
+            if "error" in rec:
+                failures.append({"scene": s["name"], "error": rec["error"]})
+        with self.lock:
+            results = [self.results[s["name"]] for s in self.scenes if s["name"] in self.results]
+        media_root = Path(self.deck).parent / "media" / "manimble"
+        media_roots = (media_root.absolute(), media_root.resolve())
+
+        def generated_media(path: str) -> bool:
+            file = Path(path)
+            return any(file.absolute().is_relative_to(root) or file.resolve().is_relative_to(root)
+                       for root in media_roots)
+
+        paths = sorted({
+            path
+            for rec in results
+            for path in rec.get("dependencies", [])
+            if not generated_media(path)
+        })
+        with self.lock:
+            scanned = sum(bool(self.results.get(s["name"], {}).get("dependencies_scanned")) for s in self.scenes)
+        return {"dependencies": paths, "scannedScenes": scanned,
+                "totalScenes": len(self.scenes), "failures": failures}
 
     def fresh_record(self, name: str) -> dict:
         """A record whose positional metadata matches the files on disk."""

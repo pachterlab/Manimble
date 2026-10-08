@@ -56,10 +56,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exportMenu.addItem(item("PDF…", #selector(MainController.exportPDFPressed), "", []))
         let exportItem = NSMenuItem(title: "Export To", action: nil, keyEquivalent: ""); exportItem.submenu = exportMenu
         add("File", [
-            item("Open Deck…", #selector(MainController.openDeck), "o"),
+            item("Open Deck or Project…", #selector(MainController.openDeck), "o"),
             importItem,
             .separator(),
             item("Save to Original", #selector(MainController.saveToOriginal), "s"),
+            item("Save Project Copy…", #selector(MainController.saveProjectFolderPressed), ""),
+            item("Package for Sharing…", #selector(MainController.packageProjectPressed), ""),
             item("Revert to Original…", #selector(MainController.revertToOriginal), ""),
             .separator(),
             exportItem,

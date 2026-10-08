@@ -138,6 +138,18 @@ struct PagesResult: Decodable {
     var error: String?
 }
 
+struct DependencyFailure: Decodable {
+    var scene: String
+    var error: String
+}
+
+struct DependencyReportResult: Decodable {
+    var dependencies: [String]
+    var scannedScenes: Int
+    var totalScenes: Int
+    var failures: [DependencyFailure]
+}
+
 struct DeckSlide: Decodable {
     var scene: String
     var pages: [String]

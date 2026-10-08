@@ -82,13 +82,11 @@ extension MainController: NSToolbarDelegate {
             }
             add("Share PDF (one page per slide)…", #selector(shareChosen(_:)), 0)
             add("Share PDF (every build)…", #selector(shareChosen(_:)), 1)
-            add("Share Source Archive (.zip)…", #selector(shareChosen(_:)), 2)
             m.addItem(.separator())
             add("Export PowerPoint (.pptx)…", #selector(exportPowerPoint))
             add("Export Keynote (.key)…", #selector(exportKeynote))
             m.addItem(.separator())
             add("Save PDF…", #selector(shareChosen(_:)), 3)
-            add("Save Source Archive…", #selector(shareChosen(_:)), 4)
             i.menu = m
             return i
         default: return nil
@@ -304,10 +302,10 @@ extension MainController: NSToolbarDelegate {
             switch m.tag {
             case 0, 3: url = await makePDF(builds: false)
             case 1: url = await makePDF(builds: true)
-            default: url = await makeArchive()
+            default: return
             }
             guard let u = url else { return }
-            if m.tag >= 3 { saveCopy(of: u) } else { showSharePicker(u) }
+            if m.tag == 3 { saveCopy(of: u) } else { showSharePicker(u) }
         }
     }
 
@@ -348,37 +346,4 @@ extension MainController: NSToolbarDelegate {
         return out
     }
 
-    func makeArchive() async -> URL? {
-        guard let ws = workspace else { return nil }
-        busy += 1; busyText = "Packaging…"
-        defer { busy -= 1; busyText = "Rendering…" }
-        let fm = FileManager.default
-        let name = ws.original.deletingLastPathComponent().lastPathComponent + "-" + ws.original.lastPathComponent
-        let stage = exportDir().appendingPathComponent("stage-" + name)
-        try? fm.removeItem(at: stage)
-        let x = ws.original.deletingLastPathComponent()
-        let top = stage.appendingPathComponent(name)
-        let deckDest = top.appendingPathComponent(x.lastPathComponent).appendingPathComponent(ws.original.lastPathComponent)
-        do {
-            try fm.createDirectory(at: deckDest, withIntermediateDirectories: true)
-            for e in try fm.contentsOfDirectory(atPath: ws.work.path) where !e.hasPrefix(".") && e != "__pycache__" {
-                let src = ws.work.appendingPathComponent(e)
-                let isLink = (try? src.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
-                if isLink { continue }                 // generated output dirs (slides/, snap/) are left out
-                try fm.copyItem(at: src, to: deckDest.appendingPathComponent(e))
-            }
-            let assets = x.appendingPathComponent("assets")
-            if fm.fileExists(atPath: assets.path) { try fm.copyItem(at: assets, to: top.appendingPathComponent(x.lastPathComponent).appendingPathComponent("assets")) }
-            try "Shared from Manimble.\nOpen the deck folder in Manimble, or render it with manim-slides (see the scripts in the deck folder).\nNote: data files outside the deck and assets folders are not included.\n"
-                .write(to: top.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
-        } catch { alert("Could not package the deck", "\(error)"); return nil }
-        let zip = exportDir().appendingPathComponent(name + ".zip")
-        try? fm.removeItem(at: zip)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        p.arguments = ["-c", "-k", "--keepParent", top.path, zip.path]
-        do { try p.run(); p.waitUntilExit() } catch { alert("Could not create the archive", "\(error)"); return nil }
-        try? fm.removeItem(at: stage)
-        return zip
-    }
 }

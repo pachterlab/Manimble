@@ -9,6 +9,8 @@ final class Workspace {
     let original: URL
     let work: URL            // the copied deck folder (what the engine opens)
     let root: URL            // workspace root, deleted on discard
+    let projectName: String
+    let deckRelativePath: String
     private var baseline: [String: Data] = [:]     // original contents when the copy was made
 
     static var base: URL {
@@ -29,6 +31,7 @@ final class Workspace {
         original = URL(fileURLWithPath: deck).standardizedFileURL.resolvingSymlinksInPath()
         let x = original.deletingLastPathComponent()
         let g = x.deletingLastPathComponent()
+        projectName = x.lastPathComponent + "-" + original.lastPathComponent
         let h = SHA256.hash(data: Data(original.path.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
         // Give each open its own root. Reopening the same deck creates the new
         // workspace before the controller discards the old one; a deterministic
@@ -37,6 +40,7 @@ final class Workspace {
         try? fm.removeItem(at: root)
         let wx = root.appendingPathComponent(x.lastPathComponent)
         work = wx.appendingPathComponent(original.lastPathComponent)
+        deckRelativePath = x.lastPathComponent + "/" + original.lastPathComponent
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         // siblings of the deck's parent and of the deck itself become symlinks
         for e in try fm.contentsOfDirectory(atPath: g.path) where e != x.lastPathComponent && !e.hasPrefix(".") {

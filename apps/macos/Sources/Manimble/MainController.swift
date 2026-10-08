@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate {
@@ -287,10 +288,83 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     @objc func openDeck() {
         let p = NSOpenPanel()
-        p.message = "Choose the deck folder (the one containing your scene .py files)"
-        p.canChooseDirectories = true; p.canChooseFiles = false
+        p.message = "Choose a deck folder, a Manimble project folder, or a .manimble package"
+        p.canChooseDirectories = true; p.canChooseFiles = true
         if let last = UserDefaults.standard.string(forKey: "lastDeck") { p.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent() }
-        if p.runModal() == .OK, let u = p.url { open(deck: u.path) }
+        guard p.runModal() == .OK, let u = p.url else { return }
+        do {
+            if u.pathExtension.lowercased() == "manimble" {
+                open(deck: try PortableProject.unpackArchive(u).path)
+            } else if let deck = try PortableProject.deckURL(in: u) {
+                open(deck: deck.path)
+            } else if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                open(deck: u.path)
+            } else {
+                alert("Could not open project", "Choose a deck folder or a .manimble package.")
+            }
+        } catch { alert("Could not open project", "\(error.localizedDescription)") }
+    }
+
+    @objc func saveProjectFolderPressed() {
+        guard let ws = workspace else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Save a Portable Project Folder"
+        panel.message = "Choose where Manimble should create the project folder."
+        panel.prompt = "Save Project Here"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        var name = ws.projectName
+        var destination = parent.appendingPathComponent(name)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: destination.path) {
+            name = "\(ws.projectName) (\(suffix))"
+            destination = parent.appendingPathComponent(name)
+            suffix += 1
+        }
+        savePortableProject(workspace: ws, destination: destination, archive: false)
+    }
+
+    @objc func packageProjectPressed() {
+        guard let ws = workspace else { return }
+        let panel = NSSavePanel()
+        panel.title = "Package Project for Sharing"
+        panel.message = "Create one portable .manimble file that includes the deck and its checked dependencies."
+        panel.nameFieldStringValue = ws.projectName + ".manimble"
+        if let projectType = UTType(filenameExtension: "manimble") { panel.allowedContentTypes = [projectType] }
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, var destination = panel.url else { return }
+        if destination.pathExtension.lowercased() != "manimble" { destination.appendPathExtension("manimble") }
+        savePortableProject(workspace: ws, destination: destination, archive: true)
+    }
+
+    private func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool) {
+        Task { @MainActor in
+            busyText = "Checking slide dependencies…"
+            busy += 1
+            defer { busy -= 1; busyText = "Rendering…" }
+            do {
+                let report = try await engine.call("dependency_report", as: DependencyReportResult.self)
+                guard report.scannedScenes == report.totalScenes else {
+                    alert("Dependency scan incomplete", "Manimble checked \(report.scannedScenes) of \(report.totalScenes) slides. Please try again.")
+                    return
+                }
+                if !report.failures.isEmpty {
+                    let details = report.failures.prefix(5).map { "\($0.scene): \($0.error)" }.joined(separator: "\n")
+                    let a = NSAlert()
+                    a.alertStyle = .warning
+                    a.messageText = "Some slides did not render during the dependency check"
+                    a.informativeText = "Manimble found dependencies in \(report.scannedScenes) slides, but the package may be incomplete.\n\n\(details)\n\nContinue with the project copy?"
+                    a.addButton(withTitle: "Continue Anyway"); a.addButton(withTitle: "Cancel")
+                    guard a.runModal() == .alertFirstButtonReturn else { return }
+                }
+                if archive {
+                    try PortableProject.createArchive(workspace: ws, dependencies: report.dependencies, at: destination)
+                } else {
+                    try PortableProject.createFolder(workspace: ws, dependencies: report.dependencies, at: destination)
+                }
+                toast(archive ? "Packaged \(destination.lastPathComponent)" : "Saved project folder \(destination.lastPathComponent)")
+            } catch { alert("Could not save portable project", "\(error.localizedDescription)") }
+        }
     }
 
     func open(deck: String) {

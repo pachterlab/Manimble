@@ -31,6 +31,9 @@ import functools
 DECK = os.path.realpath(sys.argv[1])
 os.chdir(DECK)
 sys.path.insert(0, DECK)
+MEDIA_DIR = os.path.abspath(os.environ.get("MANIMBLE_MEDIA_DIR", os.path.join(DECK, "..", "media")))
+MEDIA_DIR_REAL = os.path.realpath(MEDIA_DIR)
+DEPENDENCIES: set[str] = set()
 
 # stdout carries the protocol; anything else printing must go to stderr.
 _proto = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8")
@@ -47,15 +50,57 @@ from manim.utils.family import extract_mobject_family_members  # noqa: E402
 from manim.utils.iterables import list_update  # noqa: E402
 from manim.mobject.mobject import _AnimationBuilder  # noqa: E402
 
+
+def _track_project_reads(event, args):
+    """Record files opened by deck code outside the selected deck directory."""
+    if event != "open" or not args or isinstance(args[0], int):
+        return
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 and isinstance(args[2], int) else 0
+    if (mode is not None and any(c in str(mode) for c in "wax+")) or flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+        return
+    try:
+        path = os.path.abspath(os.fsdecode(os.fspath(args[0])))
+    except (TypeError, ValueError):
+        return
+    if path == DECK or path.startswith(DECK + os.sep):
+        return
+    if any(path == media_root or path.startswith(media_root + os.sep)
+           for media_root in {MEDIA_DIR, MEDIA_DIR_REAL}):
+        return
+    trusted_roots = (sys.prefix, sys.base_prefix, "/System", "/Library", "/usr", "/opt/homebrew", "/Applications")
+    if any(path == root or path.startswith(root.rstrip(os.sep) + os.sep) for root in trusted_roots):
+        return
+
+    # Only treat an open as a deck dependency when the active Python call stack
+    # came from a source file in the deck. This avoids collecting Manim's own
+    # font, package, and renderer reads.
+    frame = sys._getframe(1)
+    from_deck = False
+    while frame is not None:
+        filename = os.path.abspath(frame.f_code.co_filename)
+        if filename == DECK or filename.startswith(DECK + os.sep):
+            from_deck = True
+            break
+        frame = frame.f_back
+    if not from_deck:
+        return
+
+    # The working project root contains symlinks to the original project's
+    # siblings; preserve those lexical paths so the portable copy can retain
+    # the same relative layout.
+    DEPENDENCIES.add(path)
+
+
+sys.addaudithook(_track_project_reads)
+
 config.verbosity = "ERROR"
 config.progress_bar = "none"
 config.disable_caching = True
 config.write_to_movie = False
 config.save_last_frame = False
 config.preview = False
-config.media_dir = os.path.realpath(
-    os.environ.get("MANIMBLE_MEDIA_DIR", os.path.join(DECK, "..", "media"))
-)
+config.media_dir = os.path.realpath(MEDIA_DIR)
 
 # ----------------------------------------------------------------- tracing
 
@@ -516,6 +561,7 @@ def collect_events(m, seen=None):
 
 
 def render(req):
+    DEPENDENCIES.clear()
     out = req["out"]
     os.makedirs(out, exist_ok=True)
     for f in os.listdir(out):
@@ -566,6 +612,7 @@ def render(req):
         "stops": _STATE["stops"],
         "objects": objects,
         "files": files,
+        "dependencies": sorted(DEPENDENCIES),
         "size": [config.pixel_width, config.pixel_height],
         "frame": [config.frame_width, config.frame_height],
     }
@@ -663,7 +710,7 @@ def main():
             tb = traceback.format_exc()
             sys.stderr.write(tb)
             msg = describe_error(exc)
-            res = {"error": msg[-1800:], "trace": tb[-3000:]}
+            res = {"error": msg[-1800:], "trace": tb[-3000:], "dependencies": sorted(DEPENDENCIES)}
         _proto.write(json.dumps(res) + "\n")
 
 
