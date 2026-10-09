@@ -977,6 +977,14 @@ class Manimble:
             if not cli.exists():
                 emit({"event": "present", "phase": "error", "error": f"manim-slides not found next to {self.python}"})
                 return
+            presenter = deck / "present.py"
+            if only_scene is not None or not presenter.exists():
+                qt = subprocess.run([self.python, "-c", "from qtpy.QtCore import Qt; from qtpy.QtMultimedia import QMediaPlayer"],
+                                    cwd=self.deck, capture_output=True, text=True)
+                if qt.returncode != 0:
+                    emit({"event": "present", "phase": "error",
+                          "error": "Animation playback needs a Qt binding. Re-run install_manimble.sh to install PySide6."})
+                    return
             def is_stale(s):
                 if not (slides_dir / f"{s['name']}.json").exists():
                     return True
@@ -1004,7 +1012,6 @@ class Manimble:
                 if (slides_dir / f"{s['name']}.json").exists():
                     built.setdefault(s["name"], self.scene_key(s))
             stamp.write_text(json.dumps(built))
-            presenter = deck / "present.py"
             if presenter.exists() and only_scene is None:
                 cmd = [self.python, str(presenter)]
             else:

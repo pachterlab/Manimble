@@ -15,7 +15,7 @@ open "$HOME/Applications/Manimble.app"  # File ▸ Open Deck… (try examples/he
 Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
   [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), creates a Python environment in
-  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides, Pillow,
+  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides with PySide6, Pillow,
   python-pptx, FFmpeg, and MacTeX when they are missing.
 - Keynote is needed only for Keynote import and export.
 
