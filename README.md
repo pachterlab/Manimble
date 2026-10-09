@@ -92,8 +92,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Built-in full-screen slideshow (Play menu: ⌥⌘P from the current slide, ⌥⌘⇧P from the beginning) with fades,
   progress bar, counter, click/keyboard navigation and blank screen.
 - **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
-  real animations and builds inside the editor. Use the player controls to pause or scrub, and Previous/Next to
-  move between builds.
+  real animations and builds inside the editor. Each build pauses at its end; click the slide or press → to play the
+  next build. Use the player controls to pause or scrub, and ← to go back.
 - **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
   top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
   go into the working copy's `slides/` folder, so the original's builds are untouched.
