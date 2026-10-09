@@ -111,6 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .separator(),
             item("Bigger", #selector(MainController.formatBigger), "=", [.command, .option]),
             item("Smaller", #selector(MainController.formatSmaller), "-", [.command, .option]),
+            .separator(),
+            item("Background…", #selector(MainController.formatBackground), "", []),
         ])
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j"),
@@ -120,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Fit in Window", #selector(MainController.zoomFit), "0"),
             .separator(),
             item("Show Terminal", #selector(MainController.toggleTerminal), "t", [.command, .option]),
+            item("New Terminal", #selector(MainController.newTerminal), "t", [.command, .option, .shift]),
+            item("Split Terminal", #selector(MainController.splitTerminal), "\\"),
             .separator(),
             item("Hide/Show Slide Navigator", #selector(MainController.toggleNavigator), "n", [.command, .option]),
             item("Hide/Show Inspector and Source", #selector(MainController.toggleInspector), "i", [.command, .option]),

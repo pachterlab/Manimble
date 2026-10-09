@@ -154,6 +154,7 @@ final class CanvasView: MTKView {
     var onNudge: ((Int, Double, Double) -> Void)?
     var onDelete: ((Int) -> Void)?
     var onZoomChange: (() -> Void)?
+    var onContextMenu: (() -> NSMenu?)?
 
     /// Points per frame pixel; nil = fit the slide to the window.
     var zoom: CGFloat? { didSet { if zoom == nil { pan = .zero }; needsDisplay2(); onZoomChange?() } }
@@ -530,6 +531,8 @@ final class CanvasView: MTKView {
         else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), handleAt(framePoint(event), b) != nil { NSCursor.crosshair.set() }
         else if h != nil { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
     }
+
+    override func menu(for event: NSEvent) -> NSMenu? { onContextMenu?() }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)

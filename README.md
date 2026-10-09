@@ -76,6 +76,10 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   The Delete key removes elements inserted this way.
 
 **Slides and decks**
+- Format Background (right-click the slide, or Format ▸ Background…), as in PowerPoint: a solid colour or a picture
+  (stretched to fill the slide), a transparency slider with a live preview, and Apply / Apply to All / Reset
+  Background. It is written as one marked line at the top of `construct()` (`self.camera.background_color = ...` or
+  a full-frame `ImageMobject` at the back); transparency blends with the deck's `manim.cfg` background colour.
 - Slide list with thumbnails, builds strip for every `next_slide()` stop, ⌘↑/⌘↓ and ⌘[ ⌘] navigation.
 - Slide menu: New, Duplicate, Delete, Move Up/Down (edits the scene class and `order.txt`, fully undoable).
 - Python source pane with syntax colours, highlighted changed/selected lines, always-visible scroll bars.
@@ -111,6 +115,11 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   of the deck, with a "Run claude" shortcut for [Claude Code](https://claude.com/claude-code). Edits made there (by
   Claude or by hand) are noticed within about two seconds; the slide you are looking at is re-rendered first and
   refreshes on screen by itself (about 1–3 s in total), the other slides re-render in the background.
+- Several terminals, VS Code style: the + in the terminal header (or View ▸ New Terminal, ⇧⌥⌘T) opens a new tab,
+  and once there is more than one terminal they are listed vertically on the right (click to switch, × to kill).
+  The split button (View ▸ Split Terminal, ⌘\) opens another shell beside the active one in the same tab; split
+  tabs are grouped in the list with ┌ └ lines. The header's Run claude, restart and kill buttons act on the active
+  terminal; killing the last one hides the terminal.
 
 **Interface**
 - Toolbar (insert, zoom, terminal, share), Keynote-style menus (File, Edit, Insert, Slide, Format, View, Play,
@@ -173,12 +182,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Undo history is kept in memory and lost on quit (the working copy is deleted on close, so use Save).
 - If the app crashes, the working copy is left behind and replaced on the next open of that deck, so unsaved edits
   from a crash are not recovered.
-- The terminal restarts (ending any running `claude` session) when you open a different deck, and does not remember
+- The terminals restart (ending any running `claude` sessions) when you open a different deck, and does not remember
   its scrollback between launches. Claude edits the working copy, so use Save to Original afterwards.
 - The app is ad-hoc signed, not notarised.
 - Scene renders still take 0.4–1 s; brand-new LaTeX adds roughly half a second for TeX.
 - macOS only. There are no automated tests; the app has headless self-test hooks (`MANIMBLE_SELFTEST`,
-  `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
+  `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_BG`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
   checks.
 
 ## Roadmap (missing, roughly in order of value)

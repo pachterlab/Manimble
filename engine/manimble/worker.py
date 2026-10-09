@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import itertools
+import linecache
 import json
 import os
 import sys
@@ -257,6 +258,9 @@ def _track(kind, cls, value_of):
             stack = project_stack(caller)
             if not stack or any(fr["func"] == "setup" for fr in stack):
                 return
+            linecache.checkcache(caller.f_code.co_filename)       # the deck changes between renders
+            if "# manimble background" in linecache.getline(caller.f_code.co_filename, caller.f_lineno):
+                return            # a slide background is part of the backdrop, not an editable object
             self._sl_id = len(TRACKED)
             self._sl_kind = kind
             self._sl_frames = stack

@@ -65,6 +65,7 @@ def main():
         "pages": lambda a: need().pages(a),
         "slide": lambda a: need().slide_op(a),
         "deck_pages": lambda a: need().deck_pages(a),
+        "background": lambda a: need().background(a),
     }
     def import_job(a):
         from . import importer

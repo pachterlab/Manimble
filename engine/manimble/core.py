@@ -7,6 +7,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -806,6 +807,133 @@ class Manimble:
                                                  if o["frames"][-1]["pos"][0] == line and o["frames"][-1]["file"] == edit.rel))
             return {"ok": True, "message": f"inserted {kind}", "line": line, "file": edit.rel,
                     "changed": self.last_changed, "hidden": not shown}
+
+    # -------------------------------------------------------- background
+    BG_MARK = "# manimble background"
+
+    def _default_background(self) -> str:
+        """The deck-wide background colour from manim.cfg (black when not set)."""
+        import configparser
+        cp = configparser.ConfigParser()
+        try:
+            cp.read(os.path.join(self.deck, "manim.cfg"), encoding="utf-8")
+            v = cp.get("CLI", "background_color", fallback="#000000").strip().strip('"\'')
+        except Exception:
+            v = "#000000"
+        return v.upper() if re.fullmatch(r"#[0-9A-Fa-f]{6}", v) else "#000000"
+
+    def _construct(self, s: dict):
+        src = self.project.src(s["file"])
+        cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == s["name"]), None)
+        fn = next((n for n in (cls.body if cls else []) if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
+        if fn is None:
+            raise EditError(f"{s['name']} has no construct()")
+        return src, fn
+
+    def _bg_statements(self, src, fn) -> list:
+        """[(start, end, text)] of construct()'s top-level statements that set the slide background:
+        lines Manimble wrote (marked) and plain `self.camera.background_color = ...` (e.g. from an import)."""
+        out = []
+        for st in fn.body:
+            a = src.line_starts[st.lineno - 1]
+            b = src.line_starts[st.end_lineno] if st.end_lineno < len(src.line_starts) else len(src.data)
+            text = src.data[a:b].decode("utf-8")
+            plain = (isinstance(st, ast.Assign) and len(st.targets) == 1
+                     and ast.unparse(st.targets[0]) == "self.camera.background_color")
+            if self.BG_MARK in text or plain:
+                out.append((a, b, text))
+        return out
+
+    def _bg_parse(self, texts: list) -> dict:
+        info = {"mode": "none", "color": None, "image": None, "transparency": 0.0}
+        for t in texts:
+            if "background_color" in t:
+                m = re.search(r'["\'](#[0-9A-Fa-f]{6})["\']', t)
+                info["color"] = m.group(1).upper() if m else None
+                m = re.search(r"interpolate_color\(.*,\s*([0-9.]+)\s*\)", t)
+                if info["mode"] == "none":
+                    info["mode"] = "color"
+                    info["transparency"] = float(m.group(1)) if m else 0.0
+            elif "ImageMobject" in t:
+                m = re.search(r'/\s*("(?:[^"\\]|\\.)*")\s*\)', t)
+                if m:
+                    info["image"] = str(Path(self.deck) / json.loads(m.group(1)))
+                m = re.search(r"set_opacity\(\s*([0-9.]+)\s*\)", t)
+                info["mode"] = "image"
+                info["transparency"] = round(1 - float(m.group(1)), 3) if m else 0.0
+        return info
+
+    def _bg_code(self, req: dict, base: str) -> list[str]:
+        mode = req.get("mode")
+        t = min(max(float(req.get("transparency", 0) or 0), 0.0), 1.0)
+        if mode == "color":
+            c = str(req.get("color", "#000000")).upper()
+            if not re.fullmatch(r"#[0-9A-F]{6}", c):
+                raise EditError(f"not a colour: {c}")
+            if t < 0.005:
+                return [f'self.camera.background_color = "{c}"']
+            return [f'self.camera.background_color = interpolate_color(ManimColor("{c}"), ManimColor("{base}"), {fmt(t)})']
+        if mode == "image":
+            f = req.get("file")
+            if not f or not (Path(self.deck) / f).is_file():
+                raise EditError("choose a picture first")
+            opacity = f".set_opacity({fmt(1 - t)})" if t >= 0.005 else ""
+            return [f'self.add(ImageMobject(str(__import__("pathlib").Path(__file__).resolve().parent / {py_str(f)}))'
+                    f'.stretch_to_fit_width(config.frame_width).stretch_to_fit_height(config.frame_height)'
+                    f'{opacity}.set_z_index(-1000))']
+        raise EditError(f"unknown background mode {mode}")
+
+    def background(self, req: dict) -> dict:
+        """Read (op=get), set (op=set) or remove (op=reset) a slide's background; all=True for every slide."""
+        from .srcedit import Edit
+        op = req.get("op", "get")
+        self.refresh_scenes()
+        base = self._default_background()
+        if op == "get":
+            src, fn = self._construct(self.scene(req["scene"]))
+            info = self._bg_parse([t for _, _, t in self._bg_statements(src, fn)])
+            info["default"] = base
+            return info
+        with self.edit_lock:
+            name = req["scene"]
+            targets = self.scenes if req.get("all") else [self.scene(name)]
+            edits = []
+            try:
+                lines = self._bg_code(req, base) if op == "set" else []
+                for s in targets:
+                    src, fn = self._construct(s)
+                    old = self._bg_statements(src, fn)
+                    first = fn.body[0]
+                    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str) \
+                            and len(fn.body) > 1:
+                        first = fn.body[1]                    # keep the docstring on top
+                    indent = " " * first.col_offset
+                    new = "".join(f"{indent}{ln}  {self.BG_MARK}\n" for ln in lines)
+                    if old:
+                        edits.append(Edit(src.rel, old[0][0], old[0][1], new))
+                        edits += [Edit(src.rel, a, b, "") for a, b, _ in old[1:]]
+                    elif new:
+                        at = src.line_starts[first.lineno - 1]
+                        edits.append(Edit(src.rel, at, at, new))
+                if not edits:
+                    return {"ok": True, "message": "no change"}
+                written = self.project.apply(edits)
+                self._sig_at = 0
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": "The slide no longer renders with this background, so it was undone: "
+                        + new["error"][-300:]}
+            label = "reset background" if op == "reset" else "set background"
+            self._commit(label + (" (all slides)" if req.get("all") else ""), written)
+            self.refresh_scenes()
+            self.enqueue_all()
+            n = len(targets)
+            return {"ok": True, "message": label + (f" on {n} slides" if n > 1 else ""), "changed": self.last_changed}
 
     def pages(self, req: dict) -> dict:
         """Frame images for exporting: every build or just the last build of each slide."""

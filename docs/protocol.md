@@ -34,6 +34,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `export` | `kind` (`pptx` or `key`), `path`, `builds?`, `editable?` | `{ok}`; progress by events |
 | `import` | `src` (`.pptx` or `.key`), `dest` (new folder); needs no open deck | `{ok}`; progress by events |
 | `pages` | `builds?` | `{pages: [png, ...]}` (the exact frame of every slide or build, for PDF export) |
+| `background` | `op` (`get`, `set`, `reset`), `scene`, `all?` (every slide), and for `set`: `mode` (`color` or `image`), `color?` (`#RRGGBB`), `file?` (picture in the deck folder), `transparency` (0–1) | `get`: `{mode, color, image, transparency, default}`; otherwise `{ok, message, changed}` or `{ok: false, error}` |
 | `deck_pages` | | `{slides: [{scene, pages: [png, ...], error?}]}` (for a slideshow) |
 
 ### `scene` result
