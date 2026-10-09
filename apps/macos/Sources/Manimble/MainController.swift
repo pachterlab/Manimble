@@ -59,6 +59,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var mainSplit: NSSplitView?
     var sideScroll: NSScrollView?
     var player: SlidePlayer?
+    var animationPreview: AnimationPreviewView?
+    var previewScene: String?
+    let stageArea = NSView()
     let terminal = TerminalPanel()
     var centerSplit: NSSplitView?
 
@@ -133,7 +136,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         stepsScroll.drawsBackground = true; stepsScroll.backgroundColor = Theme.canvasBottom
         stepsScroll.heightAnchor.constraint(equalToConstant: 68).isActive = true
         let center = NSView()
-        let vs = NSStackView(views: [canvas, stepsScroll]); vs.orientation = .vertical; vs.spacing = 0
+        stageArea.addSubview(canvas)
+        stageArea.setContentHuggingPriority(.defaultLow, for: .vertical)
+        canvas.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            canvas.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: stageArea.trailingAnchor),
+            canvas.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            canvas.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
+        ])
+        let vs = NSStackView(views: [stageArea, stepsScroll]); vs.orientation = .vertical; vs.spacing = 0
         // slides on top, optional terminal below
         let cs = GrabSplitView(); cs.isVertical = false; cs.dividerStyle = .thin
         cs.addArrangedSubview(vs); cs.addArrangedSubview(terminal)
@@ -420,6 +432,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         guard confirmClose(for: "opening another deck") else { return }
+        closeAnimationPreview()
         window.makeFirstResponder(canvas)
         Task { @MainActor in
             busy += 1
@@ -530,9 +543,56 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    func finish() { engine.stop(); workspace?.discard(); workspace = nil }
+    func finish() { closeAnimationPreview(); engine.stop(); workspace?.discard(); workspace = nil }
+
+    func closeAnimationPreview() {
+        previewScene = nil
+        animationPreview?.stop()
+        animationPreview?.removeFromSuperview()
+        animationPreview = nil
+        if window.isVisible { window.makeFirstResponder(canvas) }
+    }
+
+    func showAnimationPreview(scene: String, clips: [AnimationClip]) {
+        closeAnimationPreview()
+        let preview = AnimationPreviewView(scene: scene, clips: clips)
+        preview.onClose = { [weak self] in self?.closeAnimationPreview() }
+        preview.onError = { [weak self] message in self?.toast(message, error: true) }
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        stageArea.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor),
+            preview.trailingAnchor.constraint(equalTo: stageArea.trailingAnchor),
+            preview.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            preview.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
+        ])
+        animationPreview = preview
+        window.makeFirstResponder(preview)
+    }
 
     func handleEvent(_ ev: [String: Any]) {
+        if ev["event"] as? String == "animation_preview" {
+            switch ev["phase"] as? String {
+            case "building":
+                let done = (ev["done"] as? Int ?? 0) + 1, total = ev["total"] as? Int ?? 0
+                busyPill.show("Building animations \(done)/\(total)…", symbol: nil, tint: nil, spinning: true)
+            case "ready":
+                busyPill.hide()
+                guard let name = ev["scene"] as? String, name == sceneName, name == previewScene,
+                      let records = ev["clips"] as? [[String: Any]] else { return }
+                let clips = records.compactMap { item -> AnimationClip? in
+                    guard let path = item["path"] as? String, let kind = item["kind"] as? String else { return nil }
+                    return AnimationClip(url: URL(fileURLWithPath: path), kind: kind,
+                                         playbackRate: (item["playbackRate"] as? NSNumber)?.floatValue ?? 1)
+                }
+                if clips.isEmpty { toast("No playable animation clips", error: true); return }
+                showAnimationPreview(scene: name, clips: clips)
+            default:
+                busyPill.hide(); previewScene = nil
+                toast(ev["error"] as? String ?? "Animation preview failed", error: true)
+            }
+            return
+        }
         if ev["event"] as? String == "import" {
             switch ev["phase"] as? String {
             case "building":
@@ -640,6 +700,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 return
             }
         }
+        if name != sceneName { closeAnimationPreview() }
         sceneName = name; stopIndex = 0; selection = nil
         refreshRings()
         canvas.overrides = [:]; canvas.lineOverrides = [:]; canvas.selection = nil
@@ -1193,6 +1254,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func sourceTextChanged() {
+        if animationPreview != nil { closeAnimationPreview() }
         guard sourceFocused, let base = sourceEditBase else { return }
         sourceDraft = sourceView.string == base.text ? nil : sourceView.string
         srcHeader.stringValue = "PYTHON  ·  \(base.file):\(base.start)" + (sourceDraft == nil ? "  ·  EDITING" : "  ·  UNSAVED CODE")
@@ -1369,11 +1431,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     @objc func playCurrentSlideAnimations() {
-        guard let name = sceneName else { return }
+        guard let name = sceneName, sourceDraft == nil else { return }
+        closeAnimationPreview()
+        previewScene = name
         Task { @MainActor in
             busyPill.show("Preparing \(name)’s animations…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("present", ["scene": name], as: UndoResult.self)
-            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not play this slide", error: true) }
+            let r = try? await engine.call("animation_preview", ["scene": name], as: UndoResult.self)
+            if r?.ok != true { busyPill.hide(); previewScene = nil; toast(r?.error ?? "Could not play this slide", error: true) }
         }
     }
 
@@ -1384,6 +1448,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func play(fromCurrent: Bool) {
         guard player == nil else { return }
+        closeAnimationPreview()
         Task { @MainActor in
             busyText = "Preparing slideshow…"
             busy += 1
@@ -1501,7 +1566,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(playFromCurrent), #selector(insertTextPressed), #selector(insertFormulaPressed), #selector(insertTablePressed),
              #selector(insertImagePressed), #selector(insertShapePressed(_:)):
             return sceneName != nil && player == nil
-        case #selector(playCurrentSlideAnimations): return sceneName != nil && sourceDraft == nil && player == nil
+        case #selector(playCurrentSlideAnimations): return sceneName != nil && sourceDraft == nil && player == nil && previewScene == nil
         case #selector(toggleTerminal):
             item.title = terminal.isHidden ? "Show Terminal" : "Hide Terminal"; return workspace != nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil

@@ -32,6 +32,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `slide` | `op` (`new`, `duplicate`, `delete`, `up`, `down`, `skip`, `unskip`, `reorder`), `scene`, `index?` | `{ok, message, select}` (`select` = slide to show afterwards); `skip` removes the scene from `order.txt`, `unskip` appends it; `reorder` inserts the scene at the zero-based slot `index` in the original list |
 | `undo`, `redo` | | `{ok, label}` or `{ok: false, error}` |
 | `present` | `scene?` | `{ok}`; builds out-of-date slides and starts the deck's presenter; with `scene`, builds and presents only that scene |
+| `animation_preview` | `scene` | `{ok}`; builds one scene and sends native playback clips in an event |
 | `export` | `kind` (`pptx` or `key`), `path`, `builds?`, `editable?` | `{ok}`; progress by events |
 | `import` | `src` (`.pptx` or `.key`), `dest` (new folder); needs no open deck | `{ok}`; progress by events |
 | `pages` | `builds?` | `{pages: [png, ...]}` (the exact frame of every slide or build, for PDF export) |
@@ -66,5 +67,6 @@ previews an edit.
 |---|---|
 | `rendered` | `name`: a slide finished re-rendering in the background |
 | `present` | `phase`: `building` (`done`, `total`, `scene`), `playing`, or `error` (`error`); single-scene requests also send `onlyScene` |
+| `animation_preview` | `phase`: `building` (`done`, `total`, `scene`), `ready` (`scene`, `clips: [{path, kind, playbackRate}]`), or `error` (`error`) |
 | `export` | `phase`: `building` (`done`, `total`, `scene`), `keynote`, `done` (`path`), or `error` (`error`) |
 | `import` | `phase`: `building` (`done`, `total`, `scene`), `done` (`deck`, `slides`, `warnings`), or `error` (`error`) |

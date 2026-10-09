@@ -91,8 +91,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Play and share**
 - Built-in full-screen slideshow (Play menu: ⌥⌘P from the current slide, ⌥⌘⇧P from the beginning) with fades,
   progress bar, counter, click/keyboard navigation and blank screen.
-- **Play Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then opens just that
-  scene in Manim Slides with its real animations and builds.
+- **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
+  real animations and builds inside the editor. Use the player controls to pause or scrub, and Previous/Next to
+  move between builds.
 - **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
   top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
   go into the working copy's `slides/` folder, so the original's builds are untouched.
@@ -165,12 +166,11 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   still appear (`self.add`) rather than animating in.
 
 **Presenting and sharing**
-- The built-in player shows stills of each build scaled up from 1280×720, with no animation playback, no presenter
-  display, no notes and no timer.
+- The full-screen slideshow shows stills of each build scaled up from 1280×720, with no presenter display, notes or
+  timer. The selected slide's animations can be previewed inside the editor.
 - Play with Manim Slides builds with `manim-slides render` from the chosen Python's `bin` folder. The first run on a
   deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
   them. Rendering also writes manim's cache into the deck's `../media` folder.
-- Playing only the current slide uses the Manim Slides presenter even when the deck has a custom `present.py`.
 - New or duplicated slides are added to `order.txt` only: decks that keep their own hand-written lists (build
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
@@ -196,7 +196,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 2. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
 3. Per-word text styling; per-element font; non-uniform resize; rotate.
 4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
-5. Presenter display (current + next slide, notes, timer); animated playback in the built-in player; PDF/video
+5. Presenter display (current + next slide, notes, timer); animated playback across the full-screen slideshow; PDF/video
    export at full resolution.
 6. Go to Slide; multi-slide selection; find / replace.
 7. Persistent undo history; crash recovery of the working copy.

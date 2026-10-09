@@ -961,22 +961,97 @@ class Manimble:
         threading.Thread(target=self._present_job, args=(req.get("scene"),), daemon=True).start()
         return {"ok": True}
 
+    def animation_preview(self, req: dict) -> dict:
+        """Build one scene and send its clips to the native editor player."""
+        if getattr(self, "_presenting", False):
+            return {"ok": False, "error": "already building the presentation"}
+        name = req.get("scene")
+        if not name:
+            return {"ok": False, "error": "choose a slide to preview"}
+        try:
+            self.scene(name)
+        except KeyError:
+            return {"ok": False, "error": f"unknown slide: {name}"}
+        self._presenting = True
+        threading.Thread(target=self._animation_preview_job, args=(name,), daemon=True).start()
+        return {"ok": True}
+
+    def _animation_preview_job(self, name: str):
+        emit = self.on_event or (lambda e: None)
+        try:
+            selected = [self.scene(name)]
+            if not self._build_animation_slides(selected, "animation_preview"):
+                return
+            manifest = Path(self.deck) / "slides" / f"{name}.json"
+            data = json.loads(manifest.read_text())
+            clips = []
+            for slide in data.get("slides", []):
+                relative = slide.get("file")
+                if not isinstance(relative, str):
+                    raise ValueError("animation manifest has a clip without a file")
+                path = (Path(self.deck) / relative).resolve()
+                if not path.is_file() or not path.is_relative_to(Path(self.deck).resolve()):
+                    raise ValueError(f"animation clip is missing: {relative}")
+                kind = slide.get("type", "video")
+                if kind not in ("video", "image"):
+                    raise ValueError(f"unsupported animation clip type: {kind}")
+                clips.append({"path": str(path), "kind": kind,
+                              "playbackRate": slide.get("playback_rate", 1.0)})
+            if not clips:
+                raise ValueError(f"{name} has no animation clips to play")
+            emit({"event": "animation_preview", "phase": "ready", "scene": name, "clips": clips})
+        except Exception as exc:                          # noqa: BLE001
+            emit({"event": "animation_preview", "phase": "error", "error": str(exc)})
+        finally:
+            self._presenting = False
+
+    def _build_animation_slides(self, selected: list[dict], event: str) -> bool:
+        emit = self.on_event or (lambda e: None)
+        deck = Path(self.deck)
+        slides_dir = deck / "slides"
+        slides_dir.mkdir(exist_ok=True)
+        stamp = slides_dir / ".manimble-built.json"
+        try:
+            built = json.loads(stamp.read_text())
+        except Exception:
+            built = {}
+        cli = Path(self.python).parent / "manim-slides"
+        if not cli.exists():
+            emit({"event": event, "phase": "error", "error": f"manim-slides not found next to {self.python}"})
+            return False
+        def is_stale(s):
+            if not (slides_dir / f"{s['name']}.json").exists():
+                return True
+            key = self.scene_key(s)
+            have = built.get(s["name"])
+            if have is None:
+                return key != self.baseline_keys.get(s["name"])
+            return have != key
+
+        stale = [s for s in selected if is_stale(s)]
+        log = self.cache_dir / "present.log"
+        for i, s in enumerate(stale):
+            emit({"event": event, "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
+            with open(log, "w") as lf:
+                r = subprocess.run([str(cli), "render", "--disable_caching", "-r", "1280,720", "--media_dir", "../media",
+                                    s["file"], s["name"]], cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
+            if r.returncode != 0:
+                emit({"event": event, "phase": "error", "error": f"Building {s['name']} failed:\n{log.read_text()[-700:]}"})
+                return False
+            built[s["name"]] = self.scene_key(s)
+            stamp.write_text(json.dumps(built))
+        for s in selected:
+            if (slides_dir / f"{s['name']}.json").exists():
+                built.setdefault(s["name"], self.scene_key(s))
+        stamp.write_text(json.dumps(built))
+        return True
+
     def _present_job(self, only_scene: str | None = None):
         emit = self.on_event or (lambda e: None)
         try:
             deck = Path(self.deck)
             slides_dir = deck / "slides"
-            slides_dir.mkdir(exist_ok=True)
-            stamp = slides_dir / ".manimble-built.json"
-            try:
-                built = json.loads(stamp.read_text())
-            except Exception:
-                built = {}
-            bindir = Path(self.python).parent
-            cli = bindir / "manim-slides"
-            if not cli.exists():
-                emit({"event": "present", "phase": "error", "error": f"manim-slides not found next to {self.python}"})
-                return
+            cli = Path(self.python).parent / "manim-slides"
             presenter = deck / "present.py"
             if only_scene is not None or not presenter.exists():
                 qt = subprocess.run([self.python, "-c", "from qtpy.QtCore import Qt; from qtpy.QtMultimedia import QMediaPlayer"],
@@ -985,33 +1060,9 @@ class Manimble:
                     emit({"event": "present", "phase": "error",
                           "error": "Animation playback needs a Qt binding. Re-run install_manimble.sh to install PySide6."})
                     return
-            def is_stale(s):
-                if not (slides_dir / f"{s['name']}.json").exists():
-                    return True
-                key = self.scene_key(s)
-                have = built.get(s["name"])
-                if have is None:                       # built outside Manimble: trusted unless edited since opening
-                    return key != self.baseline_keys.get(s["name"])
-                return have != key
-
             selected = [self.scene(only_scene)] if only_scene else list(self.scenes)
-            stale = [s for s in selected if is_stale(s)]
-            log = self.cache_dir / "present.log"
-            for i, s in enumerate(stale):
-                emit({"event": "present", "phase": "building", "done": i, "total": len(stale), "scene": s["name"], "onlyScene": only_scene})
-                with open(log, "w") as lf:
-                    r = subprocess.run([str(cli), "render", "--disable_caching", "-r", "1280,720", "--media_dir", "../media",
-                                        s["file"], s["name"]], cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
-                if r.returncode != 0:
-                    tail = log.read_text()[-700:]
-                    emit({"event": "present", "phase": "error", "error": f"Building {s['name']} failed:\n{tail}"})
-                    return
-                built[s["name"]] = self.scene_key(s)
-                stamp.write_text(json.dumps(built))
-            for s in selected:                            # slides that were already up to date
-                if (slides_dir / f"{s['name']}.json").exists():
-                    built.setdefault(s["name"], self.scene_key(s))
-            stamp.write_text(json.dumps(built))
+            if not self._build_animation_slides(selected, "present"):
+                return
             if presenter.exists() and only_scene is None:
                 cmd = [self.python, str(presenter)]
             else:

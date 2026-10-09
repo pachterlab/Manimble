@@ -130,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Play from Current Slide", #selector(MainController.playFromCurrent), "p", [.command, .option]),
             item("Play from Beginning", #selector(MainController.playFromBeginning), "p", [.command, .option, .shift]),
             .separator(),
-            item("Play Current Slide’s Animations…", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
+            item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
             item("Play with Manim Slides (full animations)…", #selector(MainController.present), "", []),
         ])
         let win = NSMenu(title: "Window")

@@ -60,6 +60,7 @@ def main():
         "redo": lambda a: need().redo_(),
         "sprite": lambda a: need().sprite(a),
         "present": present,
+        "animation_preview": lambda a: need().animation_preview(a),
         "export": lambda a: need().export(a),
         "insert": lambda a: need().insert(a),
         "insert_sprite": lambda a: need().insert_sprite(a),
