@@ -136,8 +136,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         stepsScroll.drawsBackground = true; stepsScroll.backgroundColor = Theme.canvasBottom
         stepsScroll.heightAnchor.constraint(equalToConstant: 68).isActive = true
         let center = NSView()
+        let stageColumn = NSView()
+        stageColumn.addSubview(stageArea)
+        stageColumn.addSubview(stepsScroll)
+        stageArea.translatesAutoresizingMaskIntoConstraints = false
+        stepsScroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stageArea.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
+            stageArea.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
+            stageArea.topAnchor.constraint(equalTo: stageColumn.topAnchor),
+            stageArea.bottomAnchor.constraint(equalTo: stepsScroll.topAnchor),
+            stepsScroll.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
+            stepsScroll.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
+            stepsScroll.bottomAnchor.constraint(equalTo: stageColumn.bottomAnchor),
+        ])
         stageArea.addSubview(canvas)
-        stageArea.setContentHuggingPriority(.defaultLow, for: .vertical)
         canvas.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             canvas.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor),
@@ -145,10 +158,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             canvas.topAnchor.constraint(equalTo: stageArea.topAnchor),
             canvas.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
         ])
-        let vs = NSStackView(views: [stageArea, stepsScroll]); vs.orientation = .vertical; vs.spacing = 0
         // slides on top, optional terminal below
         let cs = GrabSplitView(); cs.isVertical = false; cs.dividerStyle = .thin
-        cs.addArrangedSubview(vs); cs.addArrangedSubview(terminal)
+        cs.addArrangedSubview(stageColumn); cs.addArrangedSubview(terminal)
         terminal.isHidden = true
         terminal.onHide = { [weak self] in self?.toggleTerminal() }
         centerSplit = cs
