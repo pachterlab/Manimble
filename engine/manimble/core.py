@@ -951,11 +951,17 @@ class Manimble:
         Runs in the background and reports through events: {"event": "present", "phase": ...}."""
         if getattr(self, "_presenting", False):
             return {"ok": False, "error": "already building the presentation"}
+        req = req or {}
+        if req.get("scene"):
+            try:
+                self.scene(req["scene"])
+            except KeyError:
+                return {"ok": False, "error": f"unknown slide: {req['scene']}"}
         self._presenting = True
-        threading.Thread(target=self._present_job, daemon=True).start()
+        threading.Thread(target=self._present_job, args=(req.get("scene"),), daemon=True).start()
         return {"ok": True}
 
-    def _present_job(self):
+    def _present_job(self, only_scene: str | None = None):
         emit = self.on_event or (lambda e: None)
         try:
             deck = Path(self.deck)
@@ -980,10 +986,11 @@ class Manimble:
                     return key != self.baseline_keys.get(s["name"])
                 return have != key
 
-            stale = [s for s in self.scenes if is_stale(s)]
+            selected = [self.scene(only_scene)] if only_scene else list(self.scenes)
+            stale = [s for s in selected if is_stale(s)]
             log = self.cache_dir / "present.log"
             for i, s in enumerate(stale):
-                emit({"event": "present", "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
+                emit({"event": "present", "phase": "building", "done": i, "total": len(stale), "scene": s["name"], "onlyScene": only_scene})
                 with open(log, "w") as lf:
                     r = subprocess.run([str(cli), "render", "--disable_caching", "-r", "1280,720", "--media_dir", "../media",
                                         s["file"], s["name"]], cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
@@ -993,15 +1000,15 @@ class Manimble:
                     return
                 built[s["name"]] = self.scene_key(s)
                 stamp.write_text(json.dumps(built))
-            for s in self.scenes:                         # slides that were already up to date
+            for s in selected:                            # slides that were already up to date
                 if (slides_dir / f"{s['name']}.json").exists():
                     built.setdefault(s["name"], self.scene_key(s))
             stamp.write_text(json.dumps(built))
             presenter = deck / "present.py"
-            if presenter.exists():
+            if presenter.exists() and only_scene is None:
                 cmd = [self.python, str(presenter)]
             else:
-                cmd = [str(cli), "present", "--folder", str(slides_dir)] + [s["name"] for s in self.scenes]
+                cmd = [str(cli), "present", "--folder", str(slides_dir)] + [s["name"] for s in selected]
             plog = open(self.cache_dir / "presenter.log", "w")
             proc = subprocess.Popen(cmd, cwd=self.deck, stdout=plog, stderr=subprocess.STDOUT, start_new_session=True)
             time.sleep(2.5)
@@ -1009,7 +1016,7 @@ class Manimble:
                 emit({"event": "present", "phase": "error",
                       "error": "The presenter exited:\n" + (self.cache_dir / "presenter.log").read_text()[-600:]})
             else:
-                emit({"event": "present", "phase": "playing"})
+                emit({"event": "present", "phase": "playing", "onlyScene": only_scene})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "present", "phase": "error", "error": str(exc)})
         finally:

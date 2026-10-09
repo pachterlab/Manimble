@@ -570,9 +570,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             switch ev["phase"] as? String {
             case "building":
                 let done = (ev["done"] as? Int ?? 0) + 1, total = ev["total"] as? Int ?? 0
-                busyPill.show("Building slides for Manim Slides \(done)/\(total): \(ev["scene"] as? String ?? "")", symbol: nil, tint: nil, spinning: true)
+                let title: String
+                if let onlyScene = ev["onlyScene"] as? String {
+                    title = "Building \(onlyScene)’s animations \(done)/\(total)"
+                } else {
+                    title = "Building slides for Manim Slides \(done)/\(total)"
+                }
+                busyPill.show(title, symbol: nil, tint: nil, spinning: true)
             case "playing":
-                busyPill.hide(); toast("Manim Slides presenter launched")
+                busyPill.hide(); toast((ev["onlyScene"] as? String) == nil ? "Manim Slides presenter launched" : "Playing this slide’s animations")
             default:
                 busyPill.hide(); toast(ev["error"] as? String ?? "presenter failed", error: true)
             }
@@ -1362,6 +1368,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
+    @objc func playCurrentSlideAnimations() {
+        guard let name = sceneName else { return }
+        Task { @MainActor in
+            busyPill.show("Preparing \(name)’s animations…", symbol: nil, tint: nil, spinning: true)
+            let r = try? await engine.call("present", ["scene": name], as: UndoResult.self)
+            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not play this slide", error: true) }
+        }
+    }
+
     // MARK: Play (built-in slideshow)
 
     @objc func playFromBeginning() { play(fromCurrent: false) }
@@ -1486,6 +1501,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(playFromCurrent), #selector(insertTextPressed), #selector(insertFormulaPressed), #selector(insertTablePressed),
              #selector(insertImagePressed), #selector(insertShapePressed(_:)):
             return sceneName != nil && player == nil
+        case #selector(playCurrentSlideAnimations): return sceneName != nil && sourceDraft == nil && player == nil
         case #selector(toggleTerminal):
             item.title = terminal.isHidden ? "Show Terminal" : "Hide Terminal"; return workspace != nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil
