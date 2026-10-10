@@ -64,6 +64,17 @@ class WorkerProc:
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
 
+    def restart(self):
+        """Stop the process after its current request; the next request starts a fresh one (re-reading manim.cfg)."""
+        with self.lock:
+            if self.proc and self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+            self.proc = None
+
 
 # ------------------------------------------------------------------- state
 
@@ -142,6 +153,8 @@ class Manimble:
                 if p.is_file():
                     st = p.stat()
                     parts.append((str(p), st.st_mtime_ns, st.st_size))
+        cfg = os.path.join(self.deck, "manim.cfg")
+        parts.append(("manim.cfg", os.path.getmtime(cfg) if os.path.exists(cfg) else 0, 0))
         parts.append(("order", os.path.getmtime(os.path.join(self.deck, "order.txt")) if os.path.exists(os.path.join(self.deck, "order.txt")) else 0, 0))
         self._sig, self._sig_at = tuple(parts), now
         return self._sig
@@ -182,6 +195,9 @@ class Manimble:
                     # another scene module: only its non-scene code could matter, and scenes don't import it
                     continue
                 h.update(data)
+        cfg = Path(self.deck) / "manim.cfg"
+        if cfg.is_file():
+            h.update(cfg.read_bytes())          # background colour, resolution, ...
         assets = Path(self.deck).parent / "assets"
         if assets.is_dir():
             for p in sorted(assets.rglob("*")):
@@ -475,6 +491,13 @@ class Manimble:
         for rel, pair in written.items():
             self.project.write(rel, pair[which])
         self._sig_at = 0          # file changed: drop the cached fingerprint
+        if "manim.cfg" in written:
+            self._restart_workers()
+
+    def _restart_workers(self):
+        """manim reads manim.cfg once, when a worker imports it."""
+        for w in (self.edit_worker, self.render_worker, self.aux_worker):
+            w.restart()
 
     def edit(self, req: dict) -> dict:
         with self.edit_lock:
@@ -934,6 +957,132 @@ class Manimble:
             self.enqueue_all()
             n = len(targets)
             return {"ok": True, "message": label + (f" on {n} slides" if n > 1 else ""), "changed": self.last_changed}
+
+    # -------------------------------------------------------- dark mode
+    def dark_mode(self, req: dict) -> dict:
+        """Write the dark-mode colour flip (mode "dark") or inverted colours (mode "invert") into the deck,
+        as one undo step.
+
+        1. every colour the mode changes that is written in the source (and manim.cfg's background) is mapped;
+        2. every slide is re-rendered, and objects still showing their old colour (a default,
+           e.g. Text without color=) get an explicit color= with the mapped value."""
+        from . import darkmode as dm
+        from .srcedit import insert_kwarg, locate
+        emit = self.on_event or (lambda e: None)
+        current = req.get("current")
+        mode = req.get("mode", "dark")
+        if mode not in ("dark", "invert"):
+            return {"ok": False, "error": f"unknown colour mode {mode}"}
+        named = {}
+        if mode == "invert":
+            named = self.aux_worker.request({"cmd": "colors"}).get("colors") or {}
+        with self.edit_lock:
+            self.refresh_scenes()
+            names = [s["name"] for s in self.scenes]
+            total = 2 * len(names)
+
+            def prog(i, name):
+                emit({"event": "darkmode", "phase": "building", "done": i, "total": total, "scene": name, "mode": mode})
+
+            before = {}
+            for i, n in enumerate(names):
+                prog(i, n)
+                rec = self.fresh_record(n)
+                if "data" in rec:
+                    before[n] = rec["data"]["objects"]
+            edits, _ = dm.plan_literals(self.project, self.deck, mode, named)
+            written = {}
+            try:
+                if edits:
+                    written = self.project.apply(edits)
+                    self._sig_at = 0
+                    if "manim.cfg" in written:
+                        self._restart_workers()
+            except Exception as exc:                           # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+
+            def undo_all(why: str) -> dict:
+                self._restore(written, 0)
+                self.refresh_scenes()
+                self.enqueue_all()
+                return {"ok": False, "error": why}
+
+            # objects whose neutral colour did not follow (a default): give them an explicit color=
+            inserts: dict = {}
+            skipped = 0
+            broken = []
+            self.refresh_scenes()
+            for i, n in enumerate(names):
+                prog(len(names) + i, n)
+                rec = self.render_now(n, interactive=True)
+                if "error" in rec:
+                    if n in before:
+                        broken.append(n)
+                    continue
+                old = before.get(n, {})
+                for oid, o in rec["data"]["objects"].items():
+                    p = old.get(oid)
+                    c = (o.get("color") or "").upper()
+                    if (not p or p["kind"] != o["kind"] or o["kind"] not in ("text", "tex", "shape", "line", "table")
+                            or p["frames"][-1]["file"] != o["frames"][-1]["file"]
+                            or p["frames"][-1]["pos"][0] != o["frames"][-1]["pos"][0] or not c or not dm.HEX.fullmatch(c)
+                            or not dm.changes(c, mode) or (p.get("color") or "").upper() != c):
+                        continue
+                    lit = py_str(dm.map_hex(c, mode))
+                    if o["kind"] == "table":
+                        # a table's lines and cells take their colours from these two configs
+                        ts = [locate(self.project, o["frames"], 0, k, None, resolve_globals=False)
+                              for k in ("line_config", "element_to_mobject_config")]
+                        if any(t.kind != "missing" for t in ts) or ts[0].call is not ts[1].call:
+                            skipped += 1
+                            continue
+                        t = ts[0]
+                        e = insert_kwarg(t.src, t.call, "line_config", f'{{"color": {lit}}}')
+                        e.text += f', element_to_mobject_config={{"color": {lit}}}'
+                    else:
+                        t = locate(self.project, o["frames"], 0, "color", None, resolve_globals=False)
+                        if t.kind != "missing":
+                            skipped += 1                       # computed, or set in a way we cannot flip
+                            continue
+                        e = insert_kwarg(t.src, t.call, t.param or "color", lit)
+                    inserts.setdefault((e.rel, e.start), (e, n))
+            if broken:
+                return undo_all(("Dark mode" if mode == "dark" else "Inverted colours") + " was not applied: these slides stop rendering with it: " + ", ".join(broken))
+            added = 0
+            if inserts:
+                try:
+                    w2 = self.project.apply([e for e, _ in inserts.values()])
+                    self._sig_at = 0
+                except Exception as exc:                       # noqa: BLE001
+                    w2 = None
+                    skipped += len(inserts)
+                    print(f"dark mode: could not insert colours: {exc}", file=sys.stderr)
+                if w2:
+                    self.refresh_scenes()
+                    failed = [n for n in sorted({n for _, n in inserts.values()})
+                              if "error" in self.render_now(n, interactive=True)]
+                    if failed:
+                        self._restore(w2, 0)
+                        self._sig_at = 0
+                        skipped += len(inserts)
+                    else:
+                        added = len(inserts)
+                        for rel, (b, a) in w2.items():
+                            written[rel] = (written[rel][0], a) if rel in written else (b, a)
+            if not written:
+                return {"ok": True, "message": "no change"}
+            what = "dark mode" if mode == "dark" else "inverted colours"
+            self._commit("apply " + what, written)
+            self.refresh_scenes()
+            if current:
+                self.enqueue(current, front=True)
+            self.enqueue_all()
+            msg = f"{what} written to the deck: {len(edits)} colours changed"
+            if added:
+                msg += f", {added} default colours set"
+            if skipped:
+                msg += f"; {skipped} computed colours left as they are"
+            return {"ok": True, "message": msg, "changed": self.last_changed}
 
     def pages(self, req: dict) -> dict:
         """Frame images for exporting: every build or just the last build of each slide."""

@@ -75,8 +75,7 @@ final class SlidePlayer: NSObject {
 
     private func image(_ path: String) -> CGImage? {
         if let c = cache[path] { return c }
-        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        guard let img = DarkMode.cgImage(path: path) else { return nil }
         if cache.count > 12 { cache.removeAll() }
         cache[path] = img
         return img

@@ -86,6 +86,25 @@ fragment float4 fs_tex(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], 
     return t.sample(s, in.uv) * u.color.a;
 }
 
+// Dark mode: lightness of near-neutral colours mirrored, hue kept (see DarkMode.swift; chroma thresholds in u.pad).
+float3 darkmap(float3 c, float2 th) {
+    float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+    float w = 1.0 - smoothstep(th.x, th.y, mx - mn);
+    return clamp(c + w * (1.0 - mx - mn), 0.0, 1.0);
+}
+fragment float4 fs_tex_dark(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U &u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 p = t.sample(s, in.uv);
+    if (p.a <= 0.0) return float4(0.0);
+    return float4(darkmap(p.rgb / p.a, u.pad) * p.a, p.a) * u.color.a;
+}
+
+fragment float4 fs_tex_invert(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U &u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 p = t.sample(s, in.uv);
+    return float4(p.a - p.rgb, p.a) * u.color.a;          // premultiplied 1 - c
+}
+
 fragment float4 fs_solid(VOut in [[stage_in]], constant U &u [[buffer(0)]]) {
     return float4(u.color.rgb * u.color.a, u.color.a);
 }
@@ -122,6 +141,8 @@ enum Handle: Int { case nw, ne, sw, se }
 final class CanvasView: MTKView {
     private var queue: MTLCommandQueue!
     private var texPipe: MTLRenderPipelineState!
+    private var darkPipe: MTLRenderPipelineState!
+    private var invertPipe: MTLRenderPipelineState!
     private var solidPipe: MTLRenderPipelineState!
     private var linePipe: MTLRenderPipelineState!
     private var gradPipe: MTLRenderPipelineState!
@@ -139,6 +160,9 @@ final class CanvasView: MTKView {
     var hover: Int?
     var overrides: [Int: Override] = [:] { didSet { needsDisplay2() } }
     var showObjects = false { didSet { needsDisplay2() } }
+    /// Dark mode / inverted colours (nothing is written): the slide is composited from backdrop + sprites, each colour-mapped.
+    var colorView = ColorView.normal { didSet { needsDisplay2() } }
+    var darkImages = true { didSet { needsDisplay2() } }
     /// Live endpoint edits of lines/arrows: oid -> (sx, sy, ex, ey) in frame px.
     var lineOverrides: [Int: [Double]] = [:] { didSet { needsDisplay2() } }
     /// A just-inserted element shown at once, before the real render arrives.
@@ -201,6 +225,8 @@ final class CanvasView: MTKView {
             return try! dev.makeRenderPipelineState(descriptor: d)
         }
         texPipe = make("fs_tex")
+        darkPipe = make("fs_tex_dark")
+        invertPipe = make("fs_tex_invert")
         solidPipe = make("fs_solid")
         linePipe = make("fs_solid", vertex: "vs_line")
         gradPipe = make("fs_gradient2", vertex: "vs_geo")
@@ -409,9 +435,11 @@ final class CanvasView: MTKView {
     private func encodeContent(_ enc: MTLRenderCommandEncoder) {
         let frame = SIMD2<Float>(Float(frameSize.width), Float(frameSize.height))
 
-        func drawTex(_ t: MTLTexture, _ x: Double, _ y: Double, _ w: Double, _ h: Double, alpha: Float = 1) {
-            var u = Uniforms(rect: SIMD4(Float(x), Float(y), Float(w), Float(h)), color: SIMD4(1, 1, 1, alpha), frame: frame)
-            enc.setRenderPipelineState(texPipe)
+        let view = colorView, dark = view != .normal
+        func drawTex(_ t: MTLTexture, _ x: Double, _ y: Double, _ w: Double, _ h: Double, alpha: Float = 1, map: Bool = true) {
+            var u = Uniforms(rect: SIMD4(Float(x), Float(y), Float(w), Float(h)), color: SIMD4(1, 1, 1, alpha), frame: frame,
+                             pad: SIMD2(DarkMode.lo, DarkMode.hi))
+            enc.setRenderPipelineState(!dark || !map ? texPipe : view == .invert ? invertPipe : darkPipe)
             enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
             enc.setFragmentTexture(t, index: 0)
@@ -426,13 +454,16 @@ final class CanvasView: MTKView {
         }
 
         if let stop = stop {
-            if overrides.isEmpty && lineOverrides.isEmpty {
+            // the exact frame has object edges blended into the background, so dark mode maps each layer on its own
+            // (inverting is linear, but the same path keeps "leave images alone" working)
+            if overrides.isEmpty && lineOverrides.isEmpty && !dark {
                 if let t = texture(path: stop.png) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
             } else {
                 if let t = texture(path: stop.bg) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
                 for sp in stop.sprites {
                     if lineOverrides[sp.oid] != nil { continue }
                     let o = overrides[sp.oid]
+                    let map = darkImages || sceneObjects[String(sp.oid)]?.kind != "image"
                     if let o = o, let rep = o.replacement, let b = stop.box(of: sp.oid) {
                         let cx = b.cx + o.dx, cy = b.cy + o.dy
                         drawTex(rep.tex, cx - rep.w * o.scale / 2, cy - rep.h * o.scale / 2, rep.w * o.scale, rep.h * o.scale)
@@ -443,16 +474,17 @@ final class CanvasView: MTKView {
                         let b = stop.box(of: sp.oid) ?? Box(x0: sp.x, y0: sp.y, x1: sp.x + sp.w, y1: sp.y + sp.h)
                         let cx = b.cx, cy = b.cy
                         let nx = cx + o.dx + (sp.x - cx) * o.scale, ny = cy + o.dy + (sp.y - cy) * o.scale
-                        drawTex(t, nx, ny, sp.w * o.scale, sp.h * o.scale)
+                        drawTex(t, nx, ny, sp.w * o.scale, sp.h * o.scale, map: map)
                     } else {
-                        drawTex(t, sp.x, sp.y, sp.w, sp.h)
+                        drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map)
                     }
                 }
             }
             if let g = ghost { drawTex(g.tex, g.cx - g.w / 2, g.cy - g.h / 2, g.w, g.h) }
             for (oid, p) in lineOverrides {
                 let stroke = max(2.0, stop.lines?[String(oid)]?[4] ?? 3)
-                let c = NSColor(hex: sceneObjects[String(oid)]?.color ?? "#FFFFFF")
+                var c = NSColor(hex: sceneObjects[String(oid)]?.color ?? "#FFFFFF")
+                if dark { c = DarkMode.map(c) }
                 var u = Uniforms(rect: SIMD4(Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3])),
                                  color: SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), 1),
                                  frame: frame, pad: SIMD2(Float(stroke), 0))

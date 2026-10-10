@@ -66,6 +66,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.onZoomChange = { [weak self] in self?.syncZoomPopup() }
         canvas.onDelete = { [weak self] oid in self?.deleteSelected(oid) }
         canvas.onContextMenu = { [weak self] in self?.canvasMenu() }
+        canvas.colorView = DarkMode.mode; canvas.darkImages = DarkMode.images
         window.center()
         window.makeKeyAndOrderFront(nil)
     }
@@ -267,7 +268,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let pending = pendingDeck {
             pendingDeck = nil
             open(deck: pending)
-        } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] {
+        } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] {
             open(deck: d)
         } else {
             let last = UserDefaults.standard.string(forKey: "lastDeck")
@@ -478,6 +479,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
             return
         }
+        if ev["event"] as? String == "darkmode", ev["phase"] as? String == "building" {
+            let done = (ev["done"] as? Int ?? 0) + 1, total = ev["total"] as? Int ?? 0
+            let what = ev["mode"] as? String == "invert" ? "Inverting colours" : "Applying dark mode"
+            busyPill.show("\(what) \(done)/\(total)…", symbol: nil, tint: nil, spinning: true)
+            return
+        }
         if ev["event"] as? String == "export" {
             switch ev["phase"] as? String {
             case "building":
@@ -582,6 +589,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"] != nil, !testRan { testRan = true; termTest() }
         if let tcase = ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMULA"], !testRan { testRan = true; formulaTest(tcase) }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] != nil, !testRan { testRan = true; backgroundTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] != nil, !testRan { testRan = true; darkModeTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -717,8 +725,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let cell = (tv.makeView(withIdentifier: SlideCell.id, owner: nil) as? SlideCell) ?? SlideCell()
         var img: NSImage?
         if let t = s.thumb {
-            img = thumbCache.object(forKey: t as NSString)
-            if img == nil, let i = NSImage(contentsOfFile: t) { thumbCache.setObject(i, forKey: t as NSString); img = i }
+            let key = (DarkMode.mode.rawValue + ":" + t) as NSString
+            img = thumbCache.object(forKey: key)
+            if img == nil, let i = DarkMode.image(path: t) { thumbCache.setObject(i, forKey: key); img = i }
         }
         cell.configure(number: row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName)
         _ = tv
@@ -1276,6 +1285,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(toggleTerminal):
             item.title = terminal.isHidden ? "Show Terminal" : "Hide Terminal"; return workspace != nil
         case #selector(newTerminal), #selector(splitTerminal): return workspace != nil
+        case #selector(toggleDarkMode): item.state = DarkMode.mode == .dark ? .on : .off; return true
+        case #selector(toggleInvertColors): item.state = DarkMode.mode == .invert ? .on : .off; return true
+        case #selector(toggleDarkImages): item.state = DarkMode.images ? .on : .off; return DarkMode.isOn
+        case #selector(applyDarkMode), #selector(applyInvertColors): return state?.scenes.isEmpty == false && player == nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil
         case #selector(deleteSlide): return sceneName != nil && (state?.scenes.count ?? 0) > 1 && player == nil
         case #selector(undo): return state?.canUndo ?? true

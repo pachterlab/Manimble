@@ -704,6 +704,11 @@ def main():
                 res = sprite(req)
             elif req["cmd"] == "latex":
                 res = latex(req)
+            elif req["cmd"] == "colors":
+                # manim's named colours (WHITE, BLUE_C, ORANGE, ...) as #RRGGBB
+                import manim.utils.color as mc
+                res = {"colors": {k: v.to_hex().upper()[:7] for k, v in vars(mc).items()
+                                  if k.isupper() and isinstance(v, mc.ManimColor)}}
             elif req["cmd"] == "ping":
                 res = {"ok": True}
             else:

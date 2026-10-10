@@ -113,9 +113,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Smaller", #selector(MainController.formatSmaller), "-", [.command, .option]),
             .separator(),
             item("Background…", #selector(MainController.formatBackground), "", []),
+            .separator(),
+            item("Apply Dark Mode to Deck…", #selector(MainController.applyDarkMode), "", []),
+            item("Apply Inverted Colors to Deck…", #selector(MainController.applyInvertColors), "", []),
         ])
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j"),
+            .separator(),
+            item("Dark Mode", #selector(MainController.toggleDarkMode), "d", [.command, .control, .shift]),
+            item("Invert Colors", #selector(MainController.toggleInvertColors), "i", [.command, .control, .shift]),
+            item("Recolor Images Too", #selector(MainController.toggleDarkImages), "", []),
             .separator(),
             item("Zoom In", #selector(MainController.zoomIn), "="),
             item("Zoom Out", #selector(MainController.zoomOut), "-"),

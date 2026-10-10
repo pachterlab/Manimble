@@ -35,6 +35,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `import` | `src` (`.pptx` or `.key`), `dest` (new folder); needs no open deck | `{ok}`; progress by events |
 | `pages` | `builds?` | `{pages: [png, ...]}` (the exact frame of every slide or build, for PDF export) |
 | `background` | `op` (`get`, `set`, `reset`), `scene`, `all?` (every slide), and for `set`: `mode` (`color` or `image`), `color?` (`#RRGGBB`), `file?` (picture in the deck folder), `transparency` (0–1) | `get`: `{mode, color, image, transparency, default}`; otherwise `{ok, message, changed}` or `{ok: false, error}` |
+| `darkmode` | `mode` (`dark` or `invert`), `current?` (slide to re-render first) | `{ok, message, changed}` or `{ok: false, error}`; writes the dark-mode colour flip or the inverted colours into the deck as one undo step, progress by events |
 | `deck_pages` | | `{slides: [{scene, pages: [png, ...], error?}]}` (for a slideshow) |
 
 ### `scene` result
@@ -67,4 +68,5 @@ previews an edit.
 | `rendered` | `name`: a slide finished re-rendering in the background |
 | `present` | `phase`: `building` (`done`, `total`, `scene`), `playing`, or `error` (`error`) |
 | `export` | `phase`: `building` (`done`, `total`, `scene`), `keynote`, `done` (`path`), or `error` (`error`) |
+| `darkmode` | `phase`: `building` (`done`, `total`, `scene`, `mode`) |
 | `import` | `phase`: `building` (`done`, `total`, `scene`), `done` (`deck`, `slides`, `warnings`), or `error` (`error`) |

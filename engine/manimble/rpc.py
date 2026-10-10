@@ -66,6 +66,7 @@ def main():
         "slide": lambda a: need().slide_op(a),
         "deck_pages": lambda a: need().deck_pages(a),
         "background": lambda a: need().background(a),
+        "darkmode": lambda a: need().dark_mode(a),
     }
     def import_job(a):
         from . import importer

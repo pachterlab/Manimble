@@ -90,7 +90,7 @@ final class StepButton: NSView {
         layer?.borderWidth = active ? 2 : 1
         layer?.borderColor = (active ? Theme.accent : NSColor(white: 1, alpha: 0.14)).cgColor
         layer?.cornerRadius = 6; layer?.masksToBounds = true
-        let iv = NSImageView(image: NSImage(contentsOfFile: path) ?? NSImage())
+        let iv = NSImageView(image: DarkMode.image(path: path) ?? NSImage())
         iv.imageScaling = .scaleAxesIndependently
         iv.frame = bounds; iv.autoresizingMask = [.width, .height]
         iv.alphaValue = active ? 1 : 0.78

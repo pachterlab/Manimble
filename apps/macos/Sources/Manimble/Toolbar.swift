@@ -11,6 +11,7 @@ private extension NSToolbarItem.Identifier {
     static let zoom = NSToolbarItem.Identifier("zoom")
     static let share = NSToolbarItem.Identifier("share")
     static let terminal = NSToolbarItem.Identifier("terminal")
+    static let dark = NSToolbarItem.Identifier("dark")
 }
 
 private let zoomLevels: [(String, CGFloat?)] = [
@@ -27,7 +28,7 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.insTable, .insText, .insFormula, .insShape, .insImage, .flexibleSpace, .zoom, .space, .terminal, .share]
+        [.insTable, .insText, .insFormula, .insShape, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(t) }
 
@@ -44,6 +45,12 @@ extension MainController: NSToolbarDelegate {
             let i = NSToolbarItem(itemIdentifier: id)
             i.label = "Terminal"; i.paletteLabel = "Terminal"; i.toolTip = "Show or hide the terminal (⌥⌘T)"
             i.image = symbol("terminal", "Terminal"); i.target = self; i.action = #selector(toggleTerminal)
+            return i
+        case .dark:
+            let i = NSToolbarItem(itemIdentifier: id)
+            i.label = "Dark Mode"; i.paletteLabel = "Dark Mode"
+            i.toolTip = "Show slides with whites and blacks swapped (view only; Format ▸ Apply Dark Mode to Deck writes it)"
+            i.image = symbol(DarkMode.mode == .dark ? "moon.fill" : "moon", "Dark Mode"); i.target = self; i.action = #selector(toggleDarkMode)
             return i
         case .insTable: return button(id, "Table", "tablecells", #selector(insertTablePressed))
         case .insText: return button(id, "Text", "textformat", #selector(insertTextPressed))

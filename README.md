@@ -80,6 +80,16 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   (stretched to fill the slide), a transparency slider with a live preview, and Apply / Apply to All / Reset
   Background. It is written as one marked line at the top of `construct()` (`self.camera.background_color = ...` or
   a full-frame `ImageMobject` at the back); transparency blends with the deck's `manim.cfg` background colour.
+- Dark mode (View ▸ Dark Mode, ⌃⇧⌘D, or the moon in the toolbar): near-white and near-black colours are shown
+  swapped (lightness mirrored, hue kept, so `WHITE` ↔ `BLACK`, `GRAY_B` ↔ `GRAY_D`); saturated colours are untouched.
+  It is view-only and applies to the canvas, thumbnails and the built-in slideshow; each object is mapped on its own
+  GPU layer, so edges stay clean. View ▸ Recolor Images Too turns it off for pictures. Format ▸ Apply Dark Mode
+  to Deck… writes the same flip into your code as one undoable step: neutral colour literals and grey names are swapped,
+  `manim.cfg`'s background too, and objects drawn in a default colour get an explicit `color=` (tables get
+  `line_config`/`element_to_mobject_config`). Every slide is re-rendered twice, so it takes about a second per slide.
+- Invert Colors (View ▸ Invert Colors, ⌃⇧⌘I): the classic display invert, every colour becomes its complement
+  (orange ↔ blue, white ↔ black). Also view-only, with Format ▸ Apply Inverted Colors to Deck… to write it the same way
+  (manim's colour names such as `ORANGE` become the hex of their complement).
 - Slide list with thumbnails, builds strip for every `next_slide()` stop, ⌘↑/⌘↓ and ⌘[ ⌘] navigation.
 - Slide menu: New, Duplicate, Delete, Move Up/Down (edits the scene class and `order.txt`, fully undoable).
 - Python source pane with syntax colours, highlighted changed/selected lines, always-visible scroll bars.
@@ -104,8 +114,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 
 **Import** (File ▸ Import ▸ PowerPoint / Keynote)
 - Turns a `.pptx` (or a Keynote `.key`, read through Keynote) into a new Manim Slides deck in a folder you choose,
-  then opens it. One scene per slide; text boxes become `Text(...)` (font, size, colour, bold/italic, alignment, long
-  lines wrapped to the box), pictures are saved to `assets/` and become `ImageMobject(...)`, rectangles, ellipses,
+  then opens it. One scene per slide; text boxes become `Text(...)` (font, size, colour, bold/italic down to the word,
+  alignment, lines wrapped to the box with the real font metrics, paragraphs stacked with their own line and
+  paragraph spacing), pictures are saved to `assets/` and become `ImageMobject(...)`, rectangles, ellipses,
   rounded rectangles, triangles and lines become manim shapes with their fill and outline, tables become `Table(...)`,
   speaker notes are kept as comments, slide background colours are kept. Every element is one line in the scene, so
   it is editable in Manimble like anything else.
@@ -135,8 +146,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 ## Known issues and limitations
 
 **Import**
-- Animations, transitions, gradient/picture backgrounds, charts, SmartArt, bullets and per-run formatting inside one
-  paragraph are not imported; unusual autoshapes become rectangles (with a warning). Text is positioned by its box,
+- Animations, transitions, gradient/picture backgrounds, charts, SmartArt, bullets and per-run colours or sizes inside
+  one paragraph are not imported; unusual autoshapes become rectangles (with a warning). Text is positioned by its box,
   so wrapping and line breaks can differ from PowerPoint. Slides that are not 16:9 are stretched onto a 16:9 frame.
 
 **Export**
@@ -161,6 +172,13 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Table editing needs literal table data; cells are rendered as math.
 - Images cannot be replaced, cropped or re-linked from the UI.
 - Drawing order is approximated when text sits between filled shapes; the canvas is exact when idle.
+
+**Dark mode and inverted colours**
+- The view-only modes composite the backdrop and per-object sprites, so drawing order is approximate like while
+  editing, and anything not tracked as an object (plots, bulk dots) is mapped as part of the backdrop. Exports, PDFs and
+  Play with Manim Slides show the real colours.
+- Applying them to the deck does not change pictures, colours computed in code, per-word colours (`t2c`) or gradients,
+  so the result can differ from the view-only mode there (images in particular).
 
 **Animations**
 - Animations are not editable. Existing `self.play(...)` calls run normally but cannot be added, removed or re-timed
@@ -187,7 +205,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - The app is ad-hoc signed, not notarised.
 - Scene renders still take 0.4–1 s; brand-new LaTeX adds roughly half a second for TeX.
 - macOS only. There are no automated tests; the app has headless self-test hooks (`MANIMBLE_SELFTEST`,
-  `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_BG`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
+  `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_BG`, `MANIMBLE_TEST_DARK`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
   checks.
 
 ## Roadmap (missing, roughly in order of value)
