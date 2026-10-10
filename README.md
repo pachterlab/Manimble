@@ -15,7 +15,7 @@ open "$HOME/Applications/Manimble.app"  # File ▸ Open Deck… (try examples/he
 Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
   [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), creates a Python environment in
-  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides, Pillow,
+  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides with PySide6, Pillow,
   python-pptx, FFmpeg, and MacTeX when they are missing.
 - Keynote is needed only for Keynote import and export.
 
@@ -92,7 +92,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   (manim's colour names such as `ORANGE` become the hex of their complement).
 - Slide list with thumbnails, builds strip for every `next_slide()` stop, ⌘↑/⌘↓ and ⌘[ ⌘] navigation.
 - Slide menu: New, Duplicate, Delete, Move Up/Down (edits the scene class and `order.txt`, fully undoable).
-- Python source pane with syntax colours, highlighted changed/selected lines, always-visible scroll bars.
+- Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
+  skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
+- Drag a slide in the navigator to reorder the show; the change is saved to `order.txt` and can be undone.
+- Python source pane with syntax colours, highlighted changed/selected lines, and always-visible scroll bars. Click the
+  code to edit that scene class, then click outside to update the slide. Syntax errors leave the draft in the editor;
+  render errors keep the code in the working copy and appear above the editor while the last good frame remains visible.
 - Working copy with **Save to Original**, **Revert**, an "edited" indicator, and a prompt on close/quit; the render
   cache lives outside your deck.
 - Undo/redo (⌘Z / ⇧⌘Z) for every edit while the app is open.
@@ -100,6 +105,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Play and share**
 - Built-in full-screen slideshow (Play menu: ⌥⌘P from the current slide, ⌥⌘⇧P from the beginning) with fades,
   progress bar, counter, click/keyboard navigation and blank screen.
+- **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
+  real animations and builds inside the editor. Each build pauses at its end; click the slide or press → to play the
+  next build. Use the player controls to pause or scrub, and ← to go back.
 - **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
   top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
   go into the working copy's `slides/` folder, so the original's builds are untouched.
@@ -166,7 +174,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Changing a shared constant (or a formula whose parts the code selects by name with `get_part_by_tex`) can break
   other slides. Only the slide on screen is re-rendered, so the breakage shows later as an error badge. A "re-render
   the other slides that use this constant and warn" check is not built.
-- Text produced by f-strings or other computation is read-only.
+- Text produced by f-strings or other computation cannot be retyped on the canvas; edit its Python code in the source pane.
 - Delete only works for elements inserted with the toolbar. Elements that were already in your code must be removed
   in the source.
 - Table editing needs literal table data; cells are rendered as math.
@@ -181,12 +189,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   so the result can differ from the view-only mode there (images in particular).
 
 **Animations**
-- Animations are not editable. Existing `self.play(...)` calls run normally but cannot be added, removed or re-timed
-  from the UI. Inserted elements simply appear (`self.add`) rather than animating in.
+- Animations have no direct editing controls. You can edit `self.play(...)` calls in the Python pane; inserted elements
+  still appear (`self.add`) rather than animating in.
 
 **Presenting and sharing**
-- The built-in player shows stills of each build scaled up from 1280×720, with no animation playback, no presenter
-  display, no notes and no timer.
+- The full-screen slideshow shows stills of each build scaled up from 1280×720, with no presenter display, notes or
+  timer. The selected slide's animations can be previewed inside the editor.
 - Play with Manim Slides builds with `manim-slides render` from the chosen Python's `bin` folder. The first run on a
   deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
   them. Rendering also writes manim's cache into the deck's `../media` folder.
@@ -194,7 +202,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
   refer to files Manimble has not seen; render every slide before packaging for sharing.
-- Scenes not listed in `order.txt` are hidden, with no toggle to show them.
+- Restored slides are appended to the show; use Move Slide Up/Down to choose their final position.
 
 **App and environment**
 - Undo history is kept in memory and lost on quit (the working copy is deleted on close, so use Save).
@@ -212,18 +220,17 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 
 1. **Animations panel**: list a build's `self.play(...)` calls, add simple ones to the selected object (fade, write,
    create, grow, move, scale, indicate), reorder, delete, set duration, and preview a build as a short clip.
-2. Skip Slide (hide from the show without deleting) and a View toggle for unused slides.
-3. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
-4. Per-word text styling; per-element font; non-uniform resize; rotate.
-5. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
-6. Presenter display (current + next slide, notes, timer); animated playback in the built-in player; PDF/video
+2. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
+3. Per-word text styling; per-element font; non-uniform resize; rotate.
+4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
+5. Presenter display (current + next slide, notes, timer); animated playback across the full-screen slideshow; PDF/video
    export at full resolution.
-7. Slide-navigator drag-and-drop reordering; Go to Slide; multi-slide selection; find / replace.
-8. Persistent undo history; crash recovery of the working copy.
-9. Slide transitions, themes / master slides, and a theme picker for new decks.
-10. Keep build scripts and progress tables in sync when slides are added, moved or deleted.
-11. Image tools: replace, crop, mask; SVG and PDF insertion.
-12. Packaging: notarisation and an automated test suite.
+6. Go to Slide; multi-slide selection; find / replace.
+7. Persistent undo history; crash recovery of the working copy.
+8. Slide transitions, themes / master slides, and a theme picker for new decks.
+9. Keep build scripts and progress tables in sync when slides are added, moved or deleted.
+10. Image tools: replace, crop, mask; SVG and PDF insertion.
+11. Packaging: notarisation and an automated test suite.
 
 ## License
 

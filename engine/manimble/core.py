@@ -126,14 +126,15 @@ class Manimble:
         listed = rows
         if os.path.exists(order_file):
             with open(order_file, encoding="utf-8") as fh:
-                names = set(fh.read().split())
-            listed = [r for r in rows if r["name"] in names]     # classes not in order.txt are not part of the talk
+                names = fh.read().split()
+            by_name = {r["name"]: r for r in rows}
+            listed = [by_name[n] for n in dict.fromkeys(names) if n in by_name]
         with self.lock:
             self.all_scenes = rows
             self.scenes = listed
 
     def scene(self, name: str) -> dict:
-        for s in self.scenes:
+        for s in self.all_scenes:
             if s["name"] == name:
                 return s
         raise KeyError(name)
@@ -363,7 +364,7 @@ class Manimble:
     def api_state(self, current: str | None = None) -> dict:
         self.refresh_scenes()
         # the slide on screen was changed behind our back (e.g. edited by Claude): re-render it right away
-        if current and current in {x["name"] for x in self.scenes} and self.status(current) in ("pending", "stale") \
+        if current and current in {x["name"] for x in self.all_scenes} and self.status(current) in ("pending", "stale") \
                 and current not in self.rendering and current not in getattr(self, "_kicked", set()):
             self._kicked = getattr(self, "_kicked", set()) | {current}
 
@@ -375,17 +376,23 @@ class Manimble:
                 finally:
                     self._kicked.discard(name)
             threading.Thread(target=kick, daemon=True).start()
-        out = []
-        for s in self.scenes:
-            st = self.status(s["name"])
-            r = self.results.get(s["name"])
-            item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st}
-            if r and "data" in r:
-                item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
-                item["stops"] = len(r["data"]["stops"])
-            if r and "error" in r and st == "error":
-                item["error"] = r["error"]
-            out.append(item)
+        def summaries(scenes):
+            out = []
+            for s in scenes:
+                st = self.status(s["name"])
+                r = self.results.get(s["name"])
+                item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st}
+                if r and "data" in r:
+                    item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
+                    item["stops"] = len(r["data"]["stops"])
+                if r and "error" in r and st == "error":
+                    item["error"] = r["error"]
+                out.append(item)
+            return out
+        ordered = {s["name"] for s in self.scenes}
+        unused = [s for s in self.all_scenes if s["name"] not in ordered]
+        out = summaries(self.scenes)
+        unused_out = summaries(unused)
         for s in self.scenes:
             if self.status(s["name"]) in ("pending", "stale"):
                 self.enqueue(s["name"])
@@ -393,6 +400,7 @@ class Manimble:
             "deck": os.path.basename(os.path.dirname(self.deck)) + "/" + os.path.basename(self.deck),
             "path": self.deck,
             "scenes": out,
+            "unusedScenes": unused_out,
             "canUndo": bool(self.history), "canRedo": bool(self.redo),
             "undoLabel": self.history[-1]["label"] if self.history else "",
             "hasPresent": os.path.exists(os.path.join(self.deck, "present.sh")),
@@ -413,7 +421,7 @@ class Manimble:
         if not rec:
             return {"name": name, "status": self.status(name)}
         if "error" in rec:
-            return {"name": name, "status": "error", "error": rec["error"]}
+            return {"name": name, "status": "error", "error": rec["error"], "source": self.api_source(name)}
         data = rec["data"]
         fw, fh = data["frame"]
         pw, ph = data["size"]
@@ -460,12 +468,46 @@ class Manimble:
         s = self.scene(name)
         self.refresh_scenes()
         s = self.scene(name)
-        lines = self.project.read(s["file"]).decode("utf-8").split("\n")
+        src = self.project.src(s["file"])
+        cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+        a, b = src.span(cls)
         return {
             "file": s["file"], "start": s["line"], "end": s["end"],
-            "text": "\n".join(lines[s["line"] - 1: s["end"]]),
+            "text": src.data[a:b].decode("utf-8"),
             "changed": self.last_changed if self.last_changed.get("file") == s["file"] else None,
         }
+
+    def edit_source(self, req: dict) -> dict:
+        """Replace one scene class, leaving the surrounding module untouched."""
+        from .srcedit import Edit
+        with self.edit_lock:
+            self.refresh_scenes()
+            name = req["scene"]
+            source = self.api_source(name)
+            if req.get("file") != source["file"] or req.get("expected") != source["text"]:
+                return {"ok": False, "error": "Source changed since editing began. Copy your draft, then reload the slide."}
+            replacement = req["text"]
+            if replacement == source["text"]:
+                return {"ok": True, "message": "no change"}
+            src = self.project.src(source["file"])
+            cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+            a, b = src.span(cls)
+            data = src.data[:a] + replacement.encode("utf-8") + src.data[b:]
+            try:
+                tree = ast.parse(data, filename=source["file"])
+            except SyntaxError as exc:
+                return {"ok": False, "error": f"{source['file']}:{exc.lineno}: {exc.msg}"}
+            if not any(isinstance(n, ast.ClassDef) and n.name == name and
+                       any(isinstance(m, ast.FunctionDef) and m.name == "construct" for m in n.body)
+                       for n in tree.body):
+                return {"ok": False, "error": f"Keep class {name} and its construct() method in this code box."}
+            written = self.project.apply([Edit(source["file"], a, b, replacement)])
+            self._sig_at = 0
+            self._commit("edit Python source", written)
+            self.refresh_scenes()
+            rec = self.render_now(name, interactive=True, force=True)
+            self.enqueue_all()
+            return {"ok": True, "changed": self.last_changed, "error": rec.get("error")}
 
     # -------------------------------------------------------- API: edit
     def _commit(self, label: str, written: dict):
@@ -659,7 +701,7 @@ class Manimble:
         return Edit("order.txt", 0, len(old), " ".join(names) + "\n")
 
     def slide_op(self, req: dict) -> dict:
-        """New / duplicate / delete / move a slide (a scene class + its place in order.txt)."""
+        """Edit a scene class or its membership in the show's order.txt."""
         from .srcedit import Edit
         with self.edit_lock:
             self.refresh_scenes()
@@ -717,11 +759,37 @@ class Manimble:
                     while a >= 2 and src.data[a - 1:a] == b"\n" and src.data[a - 2:a - 1] == b"\n":
                         a -= 1
                     edits.append(Edit(src.rel, a, b, ""))
-                    i = names.index(name)
+                    i = names.index(name) if name in names else -1
                     rest = [n for n in names if n != name]
-                    edits.append(self._order_edit(rest))
+                    if name in names:
+                        edits.append(self._order_edit(rest))
                     label = "delete slide"
+                    select = names[i + 1] if i >= 0 and i + 1 < len(names) else (names[i - 1] if i > 0 else (names[0] if names else None))
+                elif op == "skip":
+                    if name not in names:
+                        return {"ok": False, "error": "slide is already skipped"}
+                    i = names.index(name)
+                    edits.append(self._order_edit([n for n in names if n != name]))
+                    label = "skip slide"
                     select = names[i + 1] if i + 1 < len(names) else (names[i - 1] if i > 0 else None)
+                elif op == "unskip":
+                    if name in names:
+                        return {"ok": False, "error": "slide is already in the show"}
+                    edits.append(self._order_edit(names + [name]))
+                    label = "restore slide"
+                elif op == "reorder":
+                    if name not in names:
+                        return {"ok": False, "error": "only slides in the show can be reordered"}
+                    destination = req.get("index")
+                    if not isinstance(destination, int) or isinstance(destination, bool) or not 0 <= destination <= len(names):
+                        return {"ok": False, "error": "invalid slide destination"}
+                    source = names.index(name)
+                    if destination in (source, source + 1):
+                        return {"ok": True, "message": "slide is already there", "select": name}
+                    names.pop(source)
+                    names.insert(destination - (1 if source < destination else 0), name)
+                    edits.append(self._order_edit(names))
+                    label = "move slide"
                 elif op in ("up", "down"):
                     i = names.index(name)
                     j = i - 1 if op == "up" else i + 1
@@ -1160,57 +1228,122 @@ class Manimble:
         Runs in the background and reports through events: {"event": "present", "phase": ...}."""
         if getattr(self, "_presenting", False):
             return {"ok": False, "error": "already building the presentation"}
+        req = req or {}
+        if req.get("scene"):
+            try:
+                self.scene(req["scene"])
+            except KeyError:
+                return {"ok": False, "error": f"unknown slide: {req['scene']}"}
         self._presenting = True
-        threading.Thread(target=self._present_job, daemon=True).start()
+        threading.Thread(target=self._present_job, args=(req.get("scene"),), daemon=True).start()
         return {"ok": True}
 
-    def _present_job(self):
+    def animation_preview(self, req: dict) -> dict:
+        """Build one scene and send its clips to the native editor player."""
+        if getattr(self, "_presenting", False):
+            return {"ok": False, "error": "already building the presentation"}
+        name = req.get("scene")
+        if not name:
+            return {"ok": False, "error": "choose a slide to preview"}
+        try:
+            self.scene(name)
+        except KeyError:
+            return {"ok": False, "error": f"unknown slide: {name}"}
+        self._presenting = True
+        threading.Thread(target=self._animation_preview_job, args=(name,), daemon=True).start()
+        return {"ok": True}
+
+    def _animation_preview_job(self, name: str):
+        emit = self.on_event or (lambda e: None)
+        try:
+            selected = [self.scene(name)]
+            if not self._build_animation_slides(selected, "animation_preview"):
+                return
+            manifest = Path(self.deck) / "slides" / f"{name}.json"
+            data = json.loads(manifest.read_text())
+            clips = []
+            for slide in data.get("slides", []):
+                relative = slide.get("file")
+                if not isinstance(relative, str):
+                    raise ValueError("animation manifest has a clip without a file")
+                path = (Path(self.deck) / relative).resolve()
+                if not path.is_file() or not path.is_relative_to(Path(self.deck).resolve()):
+                    raise ValueError(f"animation clip is missing: {relative}")
+                kind = slide.get("type", "video")
+                if kind not in ("video", "image"):
+                    raise ValueError(f"unsupported animation clip type: {kind}")
+                clips.append({"path": str(path), "kind": kind,
+                              "playbackRate": slide.get("playback_rate", 1.0)})
+            if not clips:
+                raise ValueError(f"{name} has no animation clips to play")
+            emit({"event": "animation_preview", "phase": "ready", "scene": name, "clips": clips})
+        except Exception as exc:                          # noqa: BLE001
+            emit({"event": "animation_preview", "phase": "error", "error": str(exc)})
+        finally:
+            self._presenting = False
+
+    def _build_animation_slides(self, selected: list[dict], event: str) -> bool:
+        emit = self.on_event or (lambda e: None)
+        deck = Path(self.deck)
+        slides_dir = deck / "slides"
+        slides_dir.mkdir(exist_ok=True)
+        stamp = slides_dir / ".manimble-built.json"
+        try:
+            built = json.loads(stamp.read_text())
+        except Exception:
+            built = {}
+        cli = Path(self.python).parent / "manim-slides"
+        if not cli.exists():
+            emit({"event": event, "phase": "error", "error": f"manim-slides not found next to {self.python}"})
+            return False
+        def is_stale(s):
+            if not (slides_dir / f"{s['name']}.json").exists():
+                return True
+            key = self.scene_key(s)
+            have = built.get(s["name"])
+            if have is None:
+                return key != self.baseline_keys.get(s["name"])
+            return have != key
+
+        stale = [s for s in selected if is_stale(s)]
+        log = self.cache_dir / "present.log"
+        for i, s in enumerate(stale):
+            emit({"event": event, "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
+            with open(log, "w") as lf:
+                r = subprocess.run([str(cli), "render", "--disable_caching", "-r", "1280,720", "--media_dir", "../media",
+                                    s["file"], s["name"]], cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
+            if r.returncode != 0:
+                emit({"event": event, "phase": "error", "error": f"Building {s['name']} failed:\n{log.read_text()[-700:]}"})
+                return False
+            built[s["name"]] = self.scene_key(s)
+            stamp.write_text(json.dumps(built))
+        for s in selected:
+            if (slides_dir / f"{s['name']}.json").exists():
+                built.setdefault(s["name"], self.scene_key(s))
+        stamp.write_text(json.dumps(built))
+        return True
+
+    def _present_job(self, only_scene: str | None = None):
         emit = self.on_event or (lambda e: None)
         try:
             deck = Path(self.deck)
             slides_dir = deck / "slides"
-            slides_dir.mkdir(exist_ok=True)
-            stamp = slides_dir / ".manimble-built.json"
-            try:
-                built = json.loads(stamp.read_text())
-            except Exception:
-                built = {}
-            bindir = Path(self.python).parent
-            cli = bindir / "manim-slides"
-            if not cli.exists():
-                emit({"event": "present", "phase": "error", "error": f"manim-slides not found next to {self.python}"})
-                return
-            def is_stale(s):
-                if not (slides_dir / f"{s['name']}.json").exists():
-                    return True
-                key = self.scene_key(s)
-                have = built.get(s["name"])
-                if have is None:                       # built outside Manimble: trusted unless edited since opening
-                    return key != self.baseline_keys.get(s["name"])
-                return have != key
-
-            stale = [s for s in self.scenes if is_stale(s)]
-            log = self.cache_dir / "present.log"
-            for i, s in enumerate(stale):
-                emit({"event": "present", "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
-                with open(log, "w") as lf:
-                    r = subprocess.run([str(cli), "render", "--disable_caching", "-r", "1280,720", "--media_dir", "../media",
-                                        s["file"], s["name"]], cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
-                if r.returncode != 0:
-                    tail = log.read_text()[-700:]
-                    emit({"event": "present", "phase": "error", "error": f"Building {s['name']} failed:\n{tail}"})
-                    return
-                built[s["name"]] = self.scene_key(s)
-                stamp.write_text(json.dumps(built))
-            for s in self.scenes:                         # slides that were already up to date
-                if (slides_dir / f"{s['name']}.json").exists():
-                    built.setdefault(s["name"], self.scene_key(s))
-            stamp.write_text(json.dumps(built))
+            cli = Path(self.python).parent / "manim-slides"
             presenter = deck / "present.py"
-            if presenter.exists():
+            if only_scene is not None or not presenter.exists():
+                qt = subprocess.run([self.python, "-c", "from qtpy.QtCore import Qt; from qtpy.QtMultimedia import QMediaPlayer"],
+                                    cwd=self.deck, capture_output=True, text=True)
+                if qt.returncode != 0:
+                    emit({"event": "present", "phase": "error",
+                          "error": "Animation playback needs a Qt binding. Re-run install_manimble.sh to install PySide6."})
+                    return
+            selected = [self.scene(only_scene)] if only_scene else list(self.scenes)
+            if not self._build_animation_slides(selected, "present"):
+                return
+            if presenter.exists() and only_scene is None:
                 cmd = [self.python, str(presenter)]
             else:
-                cmd = [str(cli), "present", "--folder", str(slides_dir)] + [s["name"] for s in self.scenes]
+                cmd = [str(cli), "present", "--folder", str(slides_dir)] + [s["name"] for s in selected]
             plog = open(self.cache_dir / "presenter.log", "w")
             proc = subprocess.Popen(cmd, cwd=self.deck, stdout=plog, stderr=subprocess.STDOUT, start_new_session=True)
             time.sleep(2.5)
@@ -1218,7 +1351,7 @@ class Manimble:
                 emit({"event": "present", "phase": "error",
                       "error": "The presenter exited:\n" + (self.cache_dir / "presenter.log").read_text()[-600:]})
             else:
-                emit({"event": "present", "phase": "playing"})
+                emit({"event": "present", "phase": "playing", "onlyScene": only_scene})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "present", "phase": "error", "error": str(exc)})
         finally:

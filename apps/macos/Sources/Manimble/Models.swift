@@ -14,6 +14,7 @@ struct StateInfo: Decodable {
     var deck: String
     var path: String
     var scenes: [SceneSummary]
+    var unusedScenes: [SceneSummary]
     var canUndo: Bool
     var canRedo: Bool
     var undoLabel: String
@@ -88,6 +89,13 @@ struct EditResult: Decodable {
     var message: String?
     var error: String?
     var siblings: Int?
+    var changed: ChangedLines?
+}
+
+struct SourceEditResult: Decodable {
+    var ok: Bool
+    var message: String?
+    var error: String?
     var changed: ChangedLines?
 }
 
