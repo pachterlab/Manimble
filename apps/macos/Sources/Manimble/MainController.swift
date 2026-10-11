@@ -399,7 +399,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let panel = NSSavePanel()
         panel.title = "Package Project for Sharing"
         panel.message = "Create one portable .manimble file that includes the deck and its checked dependencies."
-        panel.nameFieldStringValue = ws.projectName + ".manimble"
+        panel.nameFieldStringValue = ws.projectName
         if let projectType = UTType(filenameExtension: "manimble") { panel.allowedContentTypes = [projectType] }
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, var destination = panel.url else { return }

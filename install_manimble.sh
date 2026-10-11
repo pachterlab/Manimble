@@ -45,3 +45,6 @@ ditto "$ROOT/apps/macos/Manimble.app" "$APP_DEST"
 xattr -cr "$APP_DEST"
 codesign --force --deep --sign - "$APP_DEST" >/dev/null
 echo "Manimble is installed at $APP_DEST"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "$ROOT/manimbler" "$HOME/.local/bin/manimbler"
+echo "manimbler is installed at $HOME/.local/bin/manimbler"

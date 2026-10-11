@@ -30,6 +30,30 @@ otherwise every scene class is listed.
 `~/Applications/Manimble.app` carries the engine and uses the installed Python environment. Rerun
 `install_manimble.sh` after pulling changes.
 
+## Command-line tools
+
+`manimbler` inspects, extracts, and converts portable `.manimble` projects. The installer places it at
+`~/.local/bin/manimbler`; it can also be run as `./manimbler` from this repository.
+
+```bash
+manimbler --check deck.manimble
+manimbler --info deck.manimble
+manimbler --extract deck.manimble --output deck-unpacked
+manimbler --convert deck.manimble --output talk.mp4
+manimbler --convert deck.manimble --slides 1-3,7 --output excerpt.mp4
+manimbler --convert deck.manimble --to pdf --output handout.pdf
+manimbler --convert deck.manimble --to html --output presentation.html
+```
+
+`--check` verifies the archive and its referenced media. `--info` shows slide order, build counts, package sizes, and
+estimated MP4 running time. `--extract` creates an editable project directory, defaulting to the package name without
+`.manimble`. Conversion follows `order.txt`; `--slides` accepts 1-based numbers, ranges, and scene names, and keeps
+their deck order. The output defaults to the package name with the requested format's extension. MP4 conversion plays
+each build once at its recorded playback rate and holds its final frame for two seconds; use `--hold 0` for no pauses
+or `--fps` to change the frame rate. MP4 output has no audio. PDF and HTML export use the installed Manim Slides
+environment. Keep the generated HTML alongside its `_assets` directory when sharing it. Use `--force` to replace
+existing conversion output.
+
 The repository is organised so other front ends can share the same engine: the Python engine in [`engine/`](engine) does
 everything that involves manim and your source code and talks a small JSON protocol ([`docs/protocol.md`](docs/protocol.md));
 the macOS app in [`apps/macos`](apps/macos) is one front end. A Windows front end is not started
@@ -98,9 +122,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
   go into the working copy's `slides/` folder, so the original's builds are untouched.
 - File ▸ Save Project Copy… writes an editable, portable project folder. File ▸ Package for Sharing… creates one
-  `.manimble` file that can be transferred and opened in Manimble. Both scan files opened while scenes render,
-  preserve project-relative paths, and report missing or out-of-project dependencies. The Share menu stays focused
-  on PDFs and presentation formats.
+  `.manimble` file that can be transferred and opened in Manimble. Both include existing Manim Slides builds and media,
+  scan files opened while scenes render, preserve project-relative paths, and report missing or out-of-project
+  dependencies. The Share menu stays focused on PDFs and presentation formats.
 - **Export to PowerPoint (.pptx) and Keynote (.key)** (File ▸ Export To, and the Share menu). One slide per build or
   per slide. *Editable* mode keeps text as real text boxes (font, size, colour, bold/italic) over a picture of
   everything else; *Pictures only* gives the exact rendered frames. Keynote export builds the .pptx and has Keynote

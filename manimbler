@@ -1,0 +1,487 @@
+#!/usr/bin/env python3
+"""Command-line tools for portable Manimble projects."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import zipfile
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class ConversionError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class Clip:
+    scene: str
+    build: int
+    archive_path: str
+    reverse_path: str | None
+    kind: str
+    playback_rate: float
+
+
+@dataclass(frozen=True)
+class Project:
+    root: str
+    deck: str
+    scenes: list[str]
+    manifest: dict
+
+
+def _relative_path(value: object, description: str) -> str:
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
+        raise ConversionError(f"Invalid {description}: {value!r}")
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts) or ":" in parts[0]:
+        raise ConversionError(f"Invalid {description}: {value!r}")
+    return value
+
+
+def _project(archive: zipfile.ZipFile) -> Project:
+    names = set(archive.namelist())
+    manifests = [name for name in names if name.endswith("/manimble-project.json")
+                 and not name.startswith("__MACOSX/")]
+    if len(manifests) != 1:
+        raise ConversionError("Expected one Manimble project manifest in the archive")
+    manifest_name = manifests[0]
+    try:
+        manifest = json.loads(archive.read(manifest_name))
+    except (ValueError, UnicodeError) as exc:
+        raise ConversionError("The Manimble project manifest is invalid") from exc
+    if not isinstance(manifest, dict) or manifest.get("format") != "manimble-project" or manifest.get("version") != 1:
+        raise ConversionError("Unsupported Manimble project format")
+    deck_path = _relative_path(manifest.get("deckPath"), "deck path")
+    root = _relative_path(manifest_name.rsplit("/", 1)[0], "project root")
+    deck = f"{root}/{deck_path}/"
+    order_name = deck + "order.txt"
+    if order_name in names:
+        try:
+            scenes = archive.read(order_name).decode("utf-8").split()
+        except UnicodeError as exc:
+            raise ConversionError("The deck's order.txt is not UTF-8") from exc
+    else:
+        prefix = deck + "slides/"
+        scenes = sorted(name[len(prefix):-5] for name in names
+                        if name.startswith(prefix) and name.endswith(".json")
+                        and "/" not in name[len(prefix):])
+    if not scenes:
+        raise ConversionError("No slides found in the package")
+    for scene in scenes:
+        if "/" in scene:
+            raise ConversionError(f"Invalid slide name: {scene!r}")
+        _relative_path(scene, "slide name")
+    return Project(root, deck, scenes, manifest)
+
+
+def _select_scenes(project: Project, selection: str | None) -> list[str]:
+    if selection is None:
+        return project.scenes
+    selected: set[int] = set()
+    for token in selection.split(","):
+        token = token.strip()
+        if not token:
+            raise ConversionError("--slides contains an empty item")
+        if token.isdecimal():
+            first = last = int(token)
+        elif "-" in token and all(part.isdecimal() for part in token.split("-", 1)):
+            first, last = map(int, token.split("-", 1))
+        elif token in project.scenes:
+            selected.update(i for i, scene in enumerate(project.scenes, 1) if scene == token)
+            continue
+        else:
+            raise ConversionError(f"Unknown slide selection: {token!r}")
+        if first < 1 or last < first or last > len(project.scenes):
+            raise ConversionError(f"Slide range {token!r} is outside 1-{len(project.scenes)}")
+        selected.update(range(first, last + 1))
+    return [scene for index, scene in enumerate(project.scenes, 1) if index in selected]
+
+
+def _slide_clips(archive: zipfile.ZipFile, project: Project, scenes: list[str],
+                 *, require_reverse: bool = False) -> tuple[list[Clip], tuple[int, int]]:
+    names = set(archive.namelist())
+
+    clips: list[Clip] = []
+    resolution: tuple[int, int] | None = None
+    for scene in scenes:
+        scene_name = project.deck + f"slides/{scene}.json"
+        if scene_name not in names:
+            raise ConversionError(f"Missing rendered slide {scene!r}; build the deck before packaging it")
+        try:
+            data = json.loads(archive.read(scene_name))
+        except (ValueError, UnicodeError) as exc:
+            raise ConversionError(f"Invalid slide manifest for {scene!r}") from exc
+        if not isinstance(data, dict):
+            raise ConversionError(f"Invalid slide manifest for {scene!r}")
+        size = data.get("resolution")
+        if not isinstance(size, list) or len(size) != 2 or any(
+            type(v) is not int or v <= 0 for v in size
+        ):
+            raise ConversionError(f"Invalid resolution in slide {scene!r}")
+        if resolution is None:
+            resolution = (size[0] + size[0] % 2, size[1] + size[1] % 2)
+        builds = data.get("slides")
+        if not isinstance(builds, list) or not builds:
+            raise ConversionError(f"Slide {scene!r} has no rendered builds")
+        for number, build in enumerate(builds, 1):
+            if not isinstance(build, dict) or build.get("type") not in ("video", "image"):
+                raise ConversionError(f"Slide {scene!r}, build {number} has an unsupported media type")
+            filename = _relative_path(build.get("file"), "build video path")
+            archive_path = project.deck + filename
+            if archive_path not in names:
+                raise ConversionError(f"Missing media for {scene!r}, build {number}: {filename}")
+            reverse = build.get("rev_file")
+            reverse_path = project.deck + _relative_path(reverse, "reverse video path") if reverse else None
+            if require_reverse and (reverse_path is None or reverse_path not in names):
+                raise ConversionError(f"Missing reverse media for {scene!r}, build {number}")
+            rate = build.get("playback_rate", 1)
+            if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate <= 0:
+                raise ConversionError(f"Invalid playback rate for {scene!r}, build {number}")
+            clips.append(Clip(scene, number, archive_path, reverse_path,
+                              build["type"], float(rate)))
+    assert resolution is not None
+    return clips, resolution
+
+
+def _output_ready(source: Path, destination: Path, overwrite: bool) -> None:
+    if source.resolve() == destination.resolve():
+        raise ConversionError("Input and output paths must differ")
+    if destination.exists() and not overwrite:
+        raise ConversionError(f"Output already exists: {destination} (use --force to replace it)")
+    if not destination.parent.is_dir():
+        raise ConversionError(f"Output directory does not exist: {destination.parent}")
+
+
+def _open_package(source: Path) -> zipfile.ZipFile:
+    if not source.is_file():
+        raise ConversionError(f"Package not found: {source}")
+    if source.suffix.lower() != ".manimble":
+        raise ConversionError("Input must be a .manimble file")
+    try:
+        return zipfile.ZipFile(source)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ConversionError(f"Cannot read Manimble package: {exc}") from exc
+
+
+def convert(source: Path, destination: Path, *, slides: str | None = None,
+            hold: float = 2.0, fps: int = 30, overwrite: bool = False) -> tuple[int, int]:
+    _output_ready(source, destination, overwrite)
+    if not math.isfinite(hold) or hold < 0:
+        raise ConversionError("--hold must be a nonnegative number of seconds")
+    if fps <= 0:
+        raise ConversionError("--fps must be positive")
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ConversionError("ffmpeg is required; install it and put it on PATH")
+
+    archive = _open_package(source)
+    with archive, tempfile.TemporaryDirectory(prefix=".manimbler-", dir=destination.parent) as temporary:
+        project = _project(archive)
+        scenes = _select_scenes(project, slides)
+        clips, (width, height) = _slide_clips(archive, project, scenes)
+        work = Path(temporary)
+        segments: list[str] = []
+        for index, clip in enumerate(clips, 1):
+            input_path = work / f"source-{index:04d}{Path(clip.archive_path).suffix}"
+            segment_name = f"segment-{index:04d}.mp4"
+            with archive.open(clip.archive_path) as packed, input_path.open("wb") as extracted:
+                shutil.copyfileobj(packed, extracted)
+            filters = [f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                       f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+                       "setsar=1", "format=yuv420p"]
+            command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+            if clip.kind == "image":
+                command += ["-loop", "1", "-framerate", str(fps), "-i", str(input_path),
+                            "-t", str(max(hold, 1 / fps))]
+            else:
+                command += ["-i", str(input_path)]
+                filters = [f"setpts=(PTS-STARTPTS)/{clip.playback_rate}", f"fps={fps}"] + filters
+                if hold:
+                    filters.append(f"tpad=stop_mode=clone:stop_duration={hold}")
+            command += ["-vf", ",".join(filters), "-an", "-c:v", "libx264",
+                        "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                        "-video_track_timescale", str(fps * 1000), segment_name]
+            _run(command, cwd=work, context=f"rendering {clip.scene}, build {clip.build}")
+            input_path.unlink()
+            segments.append(segment_name)
+            if index == 1 or index == len(clips) or index % 10 == 0:
+                print(f"Converted {index}/{len(clips)} builds", file=sys.stderr)
+
+        listing = work / "segments.ffconcat"
+        listing.write_text("ffconcat version 1.0\n" + "".join(f"file '{name}'\n" for name in segments))
+        movie = work / "movie.mp4"
+        _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+              "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy",
+              "-movflags", "+faststart", str(movie)], cwd=work, context="joining builds")
+        os.replace(movie, destination)
+        return len(clips), len(set(clip.scene for clip in clips))
+
+
+def _run(command: list[str], *, cwd: Path, context: str) -> None:
+    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+    if result.returncode:
+        detail = "\n".join(result.stderr.strip().splitlines()[-5:]) or "command failed"
+        raise ConversionError(f"Error {context}: {detail}")
+
+
+def _validate_archive(archive: zipfile.ZipFile) -> None:
+    seen: set[str] = set()
+    for member in archive.infolist():
+        name = member.filename.rstrip("/")
+        _relative_path(name, "archive entry")
+        if name in seen:
+            raise ConversionError(f"Duplicate archive entry: {name}")
+        seen.add(name)
+        if stat.S_IFMT(member.external_attr >> 16) == stat.S_IFLNK:
+            raise ConversionError(f"Archive contains a symbolic link: {name}")
+    bad = archive.testzip()
+    if bad:
+        raise ConversionError(f"Damaged archive entry: {bad}")
+
+
+def check(source: Path) -> tuple[Project, list[Clip]]:
+    with _open_package(source) as archive:
+        _validate_archive(archive)
+        project = _project(archive)
+        clips, _ = _slide_clips(archive, project, project.scenes, require_reverse=True)
+        names = set(archive.namelist())
+        dependencies = project.manifest.get("dependencies", [])
+        if not isinstance(dependencies, list):
+            raise ConversionError("Invalid dependency list in project manifest")
+        for dependency in dependencies:
+            relative = _relative_path(dependency, "dependency path")
+            if f"{project.root}/{relative}" not in names:
+                raise ConversionError(f"Missing project dependency: {relative}")
+        return project, clips
+
+
+def _human_size(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
+        size /= 1024
+    raise AssertionError("unreachable")
+
+
+def _clip_duration(archive: zipfile.ZipFile, clip: Clip, ffprobe: str, temporary: Path) -> float:
+    if clip.kind == "image":
+        return 0.0
+    path = temporary / ("probe" + Path(clip.archive_path).suffix)
+    with archive.open(clip.archive_path) as packed, path.open("wb") as extracted:
+        shutil.copyfileobj(packed, extracted)
+    result = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration",
+                             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                            capture_output=True, text=True)
+    path.unlink()
+    if result.returncode:
+        raise ConversionError(f"Cannot read duration of {clip.scene}, build {clip.build}")
+    try:
+        return float(result.stdout.strip()) / clip.playback_rate
+    except ValueError as exc:
+        raise ConversionError(f"Cannot read duration of {clip.scene}, build {clip.build}") from exc
+
+
+def info(source: Path, *, hold: float = 2.0) -> None:
+    project, clips = check(source)
+    if not math.isfinite(hold) or hold < 0:
+        raise ConversionError("--hold must be a nonnegative number of seconds")
+    with _open_package(source) as archive:
+        sizes = Counter()
+        for member in archive.infolist():
+            if member.is_dir() or member.filename.startswith("__MACOSX/"):
+                continue
+            name = member.filename
+            category = ("slides" if name.startswith(project.deck + "slides/") else
+                        "media" if name.startswith(project.deck + "media/") else
+                        "other")
+            sizes[category] += member.file_size
+        ffprobe = shutil.which("ffprobe")
+        animation = None
+        if ffprobe:
+            with tempfile.TemporaryDirectory(prefix="manimbler-info-") as temporary:
+                animation = sum(_clip_duration(archive, clip, ffprobe, Path(temporary)) for clip in clips)
+    counts = Counter(clip.scene for clip in clips)
+    print(f"Project: {project.manifest.get('projectName', project.root)}")
+    print(f"Slides: {len(project.scenes)}; builds: {len(clips)}")
+    print(f"Archive: {_human_size(source.stat().st_size)}")
+    print("Contents: " + ", ".join(f"{key} {_human_size(sizes[key])}"
+                                    for key in ("slides", "media", "other")))
+    if animation is not None:
+        print(f"Animation time: {animation:.1f} s")
+        print(f"Estimated MP4 time with {hold:g} s holds: {animation + len(clips) * hold:.1f} s")
+    else:
+        print("Animation time: unavailable (ffprobe not found)")
+    print("Slide order:")
+    for index, scene in enumerate(project.scenes, 1):
+        print(f"  {index:>2}. {scene} ({counts[scene]} builds)")
+
+
+def extract(source: Path, destination: Path) -> Path:
+    _output_ready(source, destination, overwrite=False)
+    with _open_package(source) as archive:
+        _validate_archive(archive)
+        project = _project(archive)
+        prefix = project.root + "/"
+        with tempfile.TemporaryDirectory(prefix=".manimbler-", dir=destination.parent) as temporary:
+            stage = Path(temporary) / "project"
+            stage.mkdir()
+            for member in archive.infolist():
+                if not member.filename.startswith(prefix):
+                    continue
+                relative = member.filename[len(prefix):].rstrip("/")
+                if not relative:
+                    continue
+                target = stage.joinpath(*relative.split("/"))
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as packed, target.open("wb") as unpacked:
+                        shutil.copyfileobj(packed, unpacked)
+                    mode = (member.external_attr >> 16) & 0o777
+                    if mode:
+                        target.chmod(mode)
+            if not (stage / project.manifest["deckPath"]).is_dir():
+                raise ConversionError("The package deck folder is missing")
+            os.replace(stage, destination)
+    return destination
+
+
+def _manim_slides_command() -> str:
+    candidates = [shutil.which("manim-slides"),
+                  str(Path(sys.executable).parent / "manim-slides"),
+                  str(Path.home() / "Library/Application Support/Manimble/python/bin/manim-slides"),
+                  str(Path(__file__).resolve().parent / ".venv/bin/manim-slides")]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise ConversionError("Manim Slides is required for PDF/HTML export; install Manimble first")
+
+
+def _publish(files: list[tuple[Path, Path]], work: Path, overwrite: bool) -> None:
+    backups: list[tuple[Path, Path]] = []
+    moved: list[Path] = []
+    try:
+        for index, (_, target) in enumerate(files):
+            if target.exists():
+                if not overwrite:
+                    raise ConversionError(f"Output already exists: {target} (use --force to replace it)")
+                backup = work / f"previous-{index}"
+                os.replace(target, backup)
+                backups.append((backup, target))
+        for source, target in files:
+            os.replace(source, target)
+            moved.append(target)
+    except Exception:
+        for target in reversed(moved):
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        for backup, target in reversed(backups):
+            os.replace(backup, target)
+        raise
+
+
+def export(source: Path, destination: Path, *, kind: str, slides: str | None,
+           overwrite: bool) -> tuple[int, int]:
+    _output_ready(source, destination, overwrite)
+    command = _manim_slides_command()
+    with _open_package(source) as archive, tempfile.TemporaryDirectory(
+        prefix=".manimbler-", dir=destination.parent
+    ) as temporary:
+        project = _project(archive)
+        scenes = _select_scenes(project, slides)
+        clips, _ = _slide_clips(archive, project, scenes, require_reverse=True)
+        work = Path(temporary)
+        slide_dir = work / "deck/slides"
+        needed = {project.deck + f"slides/{scene}.json" for scene in scenes}
+        needed.update(clip.archive_path for clip in clips)
+        needed.update(clip.reverse_path for clip in clips if clip.reverse_path)
+        for name in needed:
+            path = work / "deck" / name[len(project.deck):]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(name) as packed, path.open("wb") as unpacked:
+                shutil.copyfileobj(packed, unpacked)
+        staged = work / destination.name
+        _run([command, "convert", "--folder", str(slide_dir), "--to", kind,
+              *scenes, str(staged)], cwd=work, context=f"exporting {kind.upper()}")
+        if not staged.is_file():
+            raise ConversionError(f"Manim Slides did not create the {kind.upper()} file")
+        files = [(staged, destination)]
+        if kind == "html":
+            assets = work / (destination.stem + "_assets")
+            if assets.is_dir():
+                files.insert(0, (assets, destination.with_name(assets.name)))
+        _publish(files, work, overwrite)
+        return len(clips), len(scenes)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Tools for .manimble project files")
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--convert", metavar="FILE", type=Path,
+                         help="convert a .manimble project to MP4, PDF, or HTML")
+    actions.add_argument("--check", metavar="FILE", type=Path,
+                         help="check package integrity and all referenced files")
+    actions.add_argument("--info", metavar="FILE", type=Path,
+                         help="show slides, builds, size, and running time")
+    actions.add_argument("--extract", metavar="FILE", type=Path,
+                         help="unpack the project into a directory")
+    parser.add_argument("--to", choices=("mp4", "pdf", "html"),
+                        help="conversion format (default: MP4 or output extension)")
+    parser.add_argument("-o", "--output", type=Path, help="output file or extraction directory")
+    parser.add_argument("--slides", metavar="LIST",
+                        help="convert selected slides by number, range, or name (e.g. 1-3,7)")
+    parser.add_argument("--hold", type=float, default=2.0,
+                        help="seconds to hold each build in MP4 (default: 2)")
+    parser.add_argument("--fps", type=int, default=30, help="output frame rate (default: 30)")
+    parser.add_argument("--force", action="store_true", help="replace existing conversion output")
+    args = parser.parse_args(argv)
+    source = (args.convert or args.check or args.info or args.extract).expanduser()
+    if args.convert is None and (args.to or args.slides or args.force):
+        parser.error("--to, --slides, and --force require --convert")
+    if args.convert is None and args.output and args.extract is None:
+        parser.error("--output requires --convert or --extract")
+    try:
+        if args.check:
+            project, clips = check(source)
+            print(f"OK: {source} ({len(project.scenes)} slides, {len(clips)} builds; all files intact)")
+        elif args.info:
+            info(source, hold=args.hold)
+        elif args.extract:
+            destination = (args.output or source.with_suffix("")).expanduser()
+            print(f"Extracted {extract(source, destination)}")
+        else:
+            kind = args.to or (args.output.suffix.lower()[1:] if args.output else "mp4")
+            if kind not in ("mp4", "pdf", "html"):
+                parser.error("conversion format must be mp4, pdf, or html")
+            destination = (args.output or source.with_suffix("." + kind)).expanduser()
+            if destination.suffix.lower() != "." + kind:
+                parser.error(f"output must have a .{kind} extension")
+            if kind == "mp4":
+                builds, scenes = convert(source, destination, slides=args.slides,
+                                         hold=args.hold, fps=args.fps, overwrite=args.force)
+            else:
+                builds, scenes = export(source, destination, kind=kind,
+                                        slides=args.slides, overwrite=args.force)
+            print(f"Wrote {destination} ({scenes} slides, {builds} builds)")
+    except (ConversionError, OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+        print(f"manimbler: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
