@@ -63,7 +63,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Editing on the slide**
 - Select, move (drag, arrow keys, ⇧ for larger steps) and resize (corner handles, scales about the centre) text,
   formulas, images, shapes, lines/arrows and tables. Numeric X / Y / width / height in the inspector.
-- Text: retype, font family, bold, italic, size (field + stepper), colour.
+- Text: retype in a multi-line box (↵ new line, ⌘↵ or click away to apply, esc to revert; bold/colour ranges follow
+  the words they cover), font family, bold, italic, size (field + stepper), colour.
 - Formulas: LaTeX sheet with a live preview compiled by your real TeX; applies to a shared constant
   (e.g. a `FORMULA` defined once and used on several slides) everywhere, or to this slide only.
 - Lines and arrows: drag either end (⇧ snaps the angle to 15°).
@@ -122,9 +123,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 
 **Import** (File ▸ Import ▸ PowerPoint / Keynote)
 - Turns a `.pptx` (or a Keynote `.key`, read through Keynote) into a new Manim Slides deck in a folder you choose,
-  then opens it. One scene per slide; text boxes become `Text(...)` (font, size, colour, bold/italic down to the word,
-  alignment, lines wrapped to the box with the real font metrics, paragraphs stacked with their own line and
-  paragraph spacing), pictures are saved to `assets/` and become `ImageMobject(...)`, rectangles, ellipses,
+  then opens it. One scene per slide; each text box becomes one `Text(...)` (font, size, colour and bold/italic down to
+  the word, alignment, lines wrapped to the box with the real font metrics and PowerPoint's line spacing), pictures are saved to `assets/` and become `ImageMobject(...)`, rectangles, ellipses,
   rounded rectangles, triangles and lines become manim shapes with their fill and outline, tables become `Table(...)`,
   speaker notes are kept as comments, slide background colours are kept. Every element is one line in the scene, so
   it is editable in Manimble like anything else.
@@ -156,7 +156,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Import**
 - Animations, transitions, gradient/picture backgrounds, charts, SmartArt, bullets and per-run colours or sizes inside
   one paragraph are not imported; unusual autoshapes become rectangles (with a warning). Text is positioned by its box,
-  so wrapping and line breaks can differ from PowerPoint. Slides that are not 16:9 are stretched onto a 16:9 frame.
+  so wrapping and line breaks can differ from PowerPoint. Space between paragraphs is dropped (a manim `Text` has
+  even line spacing), and a paragraph with a different size, or a centred or right-aligned paragraph, becomes its own
+  `Text` because a `Text` has one size and left-aligns its lines. Slides that are not 16:9 are stretched onto a 16:9 frame.
 
 **Export**
 - PowerPoint/Keynote files contain pictures for formulas, shapes, lines, tables, images and plots; only plain text is

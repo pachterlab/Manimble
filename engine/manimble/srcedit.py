@@ -444,7 +444,11 @@ class Planner:
         raw = bool(re.match(r"^[rR]", old_src.lstrip("(").lstrip()))
         lit = py_tex(new, raw or obj["kind"] == "tex") if obj["kind"] == "tex" else py_str(new)
         a, b = src.span(node)
-        return [Edit(src.rel, a, b, lit)]
+        edits = [Edit(src.rel, a, b, lit)]
+        call = src.parent.get(node)
+        if obj["kind"] == "text" and isinstance(call, ast.Call) and call.args and call.args[0] is node:
+            edits += _shift_text_ranges(src, call, node.value, new)
+        return edits
 
     # ------------------------------------------------------ simple args
     def plan_arg(self, obj: dict, name: str, literal: str, outermost: bool = False) -> list[Edit]:
@@ -752,3 +756,41 @@ def insert_kwarg(src: Src, call: ast.Call, name: str, literal: str) -> Edit:
         return Edit(src.rel, pos, pos, f"{name}={literal}")
     pos = src.off(last.end_lineno, last.end_col_offset)
     return Edit(src.rel, pos, pos, f", {name}={literal}")
+
+
+_RANGE_KEY = re.compile(r"^\[(-?\d*):(-?\d*)\]$")
+
+
+def _shift_text_ranges(src: Src, call: ast.Call, old: str, new: str) -> list[Edit]:
+    """Keep Text(..., t2c / t2w / t2s / t2f / t2g = {"[i:j]": ...}) ranges on the same characters after the text is
+    retyped: positions are mapped through the old -> new diff, and a range whose text was deleted is dropped."""
+    import difflib
+    pos = [None] * (len(old) + 1)        # old index -> new index (None inside replaced text)
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1 + 1):
+                pos[i1 + k] = j1 + k
+        else:
+            pos[i1], pos[i2] = j1, j2
+    edits = []
+    for kw in call.keywords:
+        if kw.arg not in ("t2c", "t2w", "t2s", "t2f", "t2g") or not isinstance(kw.value, ast.Dict):
+            continue
+        items, changed = [], False
+        for k, v in zip(kw.value.keys, kw.value.values):
+            m = _RANGE_KEY.match(k.value) if isinstance(k, ast.Constant) and isinstance(k.value, str) else None
+            if m is None:
+                items.append(src.text(k) + ": " + src.text(v))
+                continue
+            i = int(m.group(1) or 0) % (len(old) + 1)
+            j = int(m.group(2)) % (len(old) + 1) if m.group(2) else len(old)
+            a = next((pos[x] for x in range(i, j + 1) if pos[x] is not None), None)
+            b = next((pos[x] for x in range(j, i - 1, -1) if pos[x] is not None), None)
+            changed = True
+            if a is None or b is None or b <= a:
+                continue
+            items.append(py_str(f"[{a}:{b}]") + ": " + src.text(v))
+        if changed:
+            s, e = src.span(kw.value)
+            edits.append(Edit(src.rel, s, e, "{" + ", ".join(items) + "}"))
+    return edits

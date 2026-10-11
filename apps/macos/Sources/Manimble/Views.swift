@@ -39,6 +39,83 @@ final class SourceCodeView: NSTextView {
     }
 }
 
+/// Multi-line text box for a Text object: Return starts a new line, ⌘↵ (or leaving the box) applies,
+/// Esc restores the current text. Grows with its content up to `maxLines`, then scrolls.
+final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
+    private final class Editor: NSTextView {
+        var onCommit: (() -> Void)?
+        var onCancel: (() -> Void)?
+        var onBlur: (() -> Void)?
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               event.charactersIgnoringModifiers == "\r" { onCommit?(); return true }
+            return super.performKeyEquivalent(with: event)
+        }
+        override func cancelOperation(_ sender: Any?) { onCancel?() }
+        override func resignFirstResponder() -> Bool {
+            let accepted = super.resignFirstResponder()
+            if accepted { onBlur?() }
+            return accepted
+        }
+    }
+
+    private let editor = Editor()
+    private var original: String
+    private var heightConstraint: NSLayoutConstraint!
+    private let maxLines: Int
+    var onCommit: ((String) -> Void)?
+
+    var stringValue: String { editor.string }
+
+    init(string: String, maxLines: Int = 14) {
+        original = string; self.maxLines = maxLines
+        super.init(frame: .zero)
+        editor.font = Theme.font(13)
+        editor.isRichText = false; editor.allowsUndo = true
+        editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false; editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.textContainerInset = NSSize(width: 2, height: 4)
+        editor.minSize = .zero; editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false
+        editor.autoresizingMask = [.width]; editor.textContainer?.widthTracksTextView = true
+        editor.string = string; editor.delegate = self
+        editor.onCommit = { [weak self] in self?.commit() }
+        editor.onBlur = { [weak self] in self?.commit() }
+        editor.onCancel = { [weak self] in
+            guard let self = self else { return }
+            self.editor.string = self.original; self.fit()
+            self.window?.makeFirstResponder(nil)
+        }
+        documentView = editor
+        hasVerticalScroller = true; autohidesScrollers = true; borderType = .bezelBorder
+        heightConstraint = heightAnchor.constraint(equalToConstant: 24); heightConstraint.isActive = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() { super.layout(); fit() }
+
+    func textDidChange(_ notification: Notification) { fit() }
+
+    /// Focus the box and select all of its text.
+    func beginEditing() { window?.makeFirstResponder(editor); editor.selectAll(nil) }
+
+    private func commit() {
+        let v = editor.string
+        guard v != original else { return }
+        original = v
+        onCommit?(v)
+    }
+
+    private func fit() {
+        guard let lm = editor.layoutManager, let tc = editor.textContainer else { return }
+        lm.ensureLayout(for: tc)
+        let line = lm.defaultLineHeight(for: editor.font ?? Theme.font(13))
+        let used = max(lm.usedRect(for: tc).height, line)
+        let h = min(used, line * CGFloat(maxLines)) + editor.textContainerInset.height * 2 + 4
+        if abs(heightConstraint.constant - h) > 0.5 { heightConstraint.constant = h }
+    }
+}
+
 extension NSColor {
     convenience init(hex: String) {
         var h = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
