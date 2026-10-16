@@ -298,11 +298,11 @@ extension MainController {
             presenterView()
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if let p = presenter {
-                log("presenter: pages=\(p.player.pages.count) index=\(p.player.index) visibleAudience=\(p.player.window.isVisible)")
-                p.player.next()
+                log("presenter: pages=\(p.source.pageCount) index=\(p.source.pageIndex) visibleAudience=\(p.source.window.isVisible)")
+                p.source.next()
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 shot(p.window, "presenter.png")
-                p.player.exit()
+                p.source.exit()
             } else { log("presenter: none") }
             try? await Task.sleep(nanoseconds: 300_000_000)
             log("after exit: presenter=\(presenter == nil ? "nil" : "alive")")
@@ -385,7 +385,7 @@ extension MainController {
     // MARK: presenter view
 
     @objc func presenterView() {
-        guard player == nil, presenter == nil else { return }
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
         closeAnimationPreview()
         Task { @MainActor in
             busyText = "Preparing presenter view…"

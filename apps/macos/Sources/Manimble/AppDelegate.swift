@@ -225,7 +225,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Presenter View (notes, next slide, timer)", #selector(MainController.presenterView), "p", [.command, .control]),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
-            item("Play with Manim Slides (full animations)…", #selector(MainController.present), "", []),
+            item("Play with Animations from Current Slide", #selector(MainController.presentFromCurrent), "a", [.command, .option]),
+            item("Play with Animations from Beginning", #selector(MainController.presentFromBeginning), "a", [.command, .option, .shift]),
+            item("Presenter View with Animations", #selector(MainController.presenterViewAnimated), "a", [.command, .control]),
         ])
         let win = NSMenu(title: "Window")
         win.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))

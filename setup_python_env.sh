@@ -24,9 +24,21 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   brew install ffmpeg
 fi
 
-if ! command -v latex >/dev/null 2>&1 || ! command -v dvisvgm >/dev/null 2>&1; then
-  brew install --cask mactex-no-gui
+# LaTeX for formulas: BasicTeX (~400 MB with the packages below) rather than the full MacTeX (several GB).
+# The packages are what manim's TeX templates use (its Chinese `ctex` template excepted); an existing TeX
+# installation that already has them, such as MacTeX, is left alone.
+TEX_PACKAGES=(standalone preview babel-english doublestroke dvisvgm everysel fundus-calligra mathastext physics
+  ragged2e relsize rsfs setspace tipa wasy wasysym xcolor xkeyval cbfonts-fd jknapltx microtype multitoc prelim2e
+  count1to frcursive)
+if ! command -v latex >/dev/null 2>&1; then
+  brew install --cask basictex
   export PATH="/Library/TeX/texbin:$PATH"
+fi
+if ! command -v dvisvgm >/dev/null 2>&1 || ! kpsewhich standalone.cls preview.sty english.ldf dsfont.sty >/dev/null 2>&1; then
+  echo "Adding the LaTeX packages manim needs (asks for your password: TeX lives in a system folder)."
+  # a fresh BasicTeX refuses to install packages until tlmgr has updated itself
+  sudo tlmgr update --self
+  sudo tlmgr install "${TEX_PACKAGES[@]}"
 fi
 
 PY_ENV="$HOME/Library/Application Support/Manimble/python"

@@ -1809,9 +1809,11 @@ class Manimble:
 
     # --------------------------------------------------- Manim Slides presenter
     def present(self, req: dict | None = None) -> dict:
-        """Build whatever slides are out of date, then launch the deck's presenter.
+        """Build whatever slides are out of date, then hand their clips to the app's native animated player.
 
-        Runs in the background and reports through events: {"event": "present", "phase": ...}."""
+        Runs in the background and reports through events: {"event": "present", "phase": ...}; the last one is
+        {"phase": "ready", "slides": [...], "sections": [...], "links": {...}}. Needs manim and manim_slides in the
+        Python environment, but not Qt: nothing here imports the Manim Slides presenter."""
         if getattr(self, "_presenting", False):
             return {"ok": False, "error": "already building the presentation"}
         req = req or {}
@@ -1878,10 +1880,6 @@ class Manimble:
             built = json.loads(stamp.read_text())
         except Exception:
             built = {}
-        cli = Path(self.python).parent / "manim-slides"
-        if not cli.exists():
-            emit({"event": event, "phase": "error", "error": f"manim-slides not found next to {self.python}"})
-            return False
         def is_stale(s):
             if not (slides_dir / f"{s['name']}.json").exists():
                 return True
@@ -1896,8 +1894,10 @@ class Manimble:
         for i, s in enumerate(stale):
             emit({"event": event, "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
             with open(log, "w") as lf:
-                r = subprocess.run([str(cli), "render", "--disable_caching", "-r", "1280,720", "--media_dir", "../media",
-                                    s["file"], s["name"]], cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
+                # what `manim-slides render` runs, without going through its CLI
+                r = subprocess.run([self.python, "-m", "manim", "render", "--disable_caching", "-r", "1280,720",
+                                    "--media_dir", "../media", s["file"], s["name"]],
+                                   cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
             if r.returncode != 0:
                 emit({"event": event, "phase": "error", "error": f"Building {s['name']} failed:\n{log.read_text()[-700:]}"})
                 return False
@@ -1912,36 +1912,75 @@ class Manimble:
     def _present_job(self, only_scene: str | None = None):
         emit = self.on_event or (lambda e: None)
         try:
-            deck = Path(self.deck)
-            slides_dir = deck / "slides"
-            cli = Path(self.python).parent / "manim-slides"
-            presenter = deck / "present.py"
-            if only_scene is not None or not presenter.exists():
-                qt = subprocess.run([self.python, "-c", "from qtpy.QtCore import Qt; from qtpy.QtMultimedia import QMediaPlayer"],
-                                    cwd=self.deck, capture_output=True, text=True)
-                if qt.returncode != 0:
-                    emit({"event": "present", "phase": "error",
-                          "error": "Animation playback needs a Qt binding. Re-run install_manimble.sh to install PySide6."})
-                    return
             selected = [self.scene(only_scene)] if only_scene else list(self.visible_scenes())
             if not self._build_animation_slides(selected, "present"):
                 return
-            if presenter.exists() and only_scene is None:
-                cmd = [self.python, str(presenter)]
-            else:
-                cmd = [str(cli), "present", "--folder", str(slides_dir)] + [s["name"] for s in selected]
-            plog = open(self.cache_dir / "presenter.log", "w")
-            proc = subprocess.Popen(cmd, cwd=self.deck, stdout=plog, stderr=subprocess.STDOUT, start_new_session=True)
-            time.sleep(2.5)
-            if proc.poll() not in (None, 0):
-                emit({"event": "present", "phase": "error",
-                      "error": "The presenter exited:\n" + (self.cache_dir / "presenter.log").read_text()[-600:]})
-            else:
-                emit({"event": "present", "phase": "playing", "onlyScene": only_scene})
+            emit({"event": "present", "phase": "ready", "onlyScene": only_scene,
+                  "slides": self._present_slides(selected), **self._present_extras()})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "present", "phase": "error", "error": str(exc)})
         finally:
             self._presenting = False
 
+    def _present_slides(self, selected: list[dict]) -> list[dict]:
+        """The built clips of the selected scenes, in show order, for the native player. `sceneIndex` is the
+        scene's place in order.txt (what chapters and link regions refer to), `number` its place in this show."""
+        deck = Path(self.deck).resolve()
+        order = [s["name"] for s in self.scenes]
+        out = []
+        for number, s in enumerate(selected):
+            data = json.loads((deck / "slides" / f"{s['name']}.json").read_text())
+            scene_notes = self._notes_of(s["name"])
+            for k, slide in enumerate(data.get("slides", [])):
+                kind = slide.get("type", "video")
+                if kind not in ("video", "image"):
+                    raise ValueError(f"unsupported animation clip type: {kind}")
+                def resolve(rel):
+                    if not isinstance(rel, str):
+                        return None
+                    path = (deck / rel).resolve()        # Manim Slides writes paths relative to the deck folder
+                    if not path.is_file() or not path.is_relative_to(deck):
+                        raise ValueError(f"animation clip is missing: {rel}")
+                    return str(path)
+                out.append({
+                    "scene": s["name"], "sceneIndex": order.index(s["name"]) if s["name"] in order else number,
+                    "number": number, "index": k, "count": len(data["slides"]), "kind": kind,
+                    "file": resolve(slide.get("src") if kind == "image" else slide.get("file")),
+                    "revFile": resolve(slide.get("rev_file")) if kind == "video" else None,
+                    "loop": bool(slide.get("loop")), "autoNext": bool(slide.get("auto_next")),
+                    "rate": float(slide.get("playback_rate") or 1.0),
+                    "revRate": float(slide.get("reversed_playback_rate") or 1.0),
+                    "notes": slide.get("notes") or scene_notes,
+                })
+        return out
+
+    def _present_extras(self) -> dict:
+        """Chapter jumps and clickable link regions for the animated player.
+
+        Read from the deck's present.json ({"sections": [scene indices], "links": {scene index: [[x0, x1, y0, y1,
+        url], ...]}}, coordinates as fractions of the slide, y from the top; scene indices count order.txt). Without
+        one, the SECTION_SCENE_INDICES and REFERENCE_LINKS constants of a custom present.py are used, evaluated on
+        their own so the Qt presenter it imports is never loaded."""
+        deck = Path(self.deck)
+        sections, links = [], {}
+        try:
+            if (deck / "present.json").exists():
+                d = json.loads((deck / "present.json").read_text())
+                sections, links = d.get("sections", []), d.get("links", {})
+            elif (deck / "present.py").exists():
+                tree = ast.parse((deck / "present.py").read_text())
+                ns: dict = {}
+                for node in tree.body:
+                    if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                            and node.targets[0].id in ("SECTION_SCENE_INDICES", "REFERENCE_LINKS")):
+                        code = compile(ast.Expression(node.value), "present.py", "eval")
+                        ns[node.targets[0].id] = eval(code, {"__builtins__": {}, "range": range})   # noqa: S307
+                sections = list(ns.get("SECTION_SCENE_INDICES", ()))
+                links = ns.get("REFERENCE_LINKS", {})
+        except Exception:                                 # noqa: BLE001
+            sections, links = [], {}
+        n = len(self.scenes)
+        return {"sections": [int(i) for i in sections if 0 <= int(i) < n],
+                "links": {str(k): [list(r) for r in v] for k, v in links.items()}}
 
 # -------------------------------------------------------------------- HTTP

@@ -22,8 +22,12 @@ right-click ▸ Open (or `xattr -cr ~/Applications/Manimble.app`) to get past Ga
 Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
   [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), creates a Python environment in
-  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides with PySide6, Pillow,
-  python-pptx, FFmpeg, and MacTeX when they are missing.
+  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides (no Qt / PySide6: Manimble plays animations itself), Pillow,
+  python-pptx and FFmpeg when they are missing. For formulas it installs
+  [BasicTeX](https://www.tug.org/mactex/morepackages.html) plus the LaTeX packages manim uses (about 400 MB, against
+  several GB for the full MacTeX), and asks for your password once because TeX lives in a system folder. An
+  existing TeX installation such as MacTeX is used as it is. A deck that needs another LaTeX package can add it with
+  `sudo tlmgr install <package>` (manim's Chinese `ctex` template, for instance, needs `ctex`).
 - Keynote is needed only for Keynote import and export.
 
 On launch Manimble checks `$MANIMBLE_PYTHON`, your saved choice, its installed Python environment, a checkout-local
@@ -206,9 +210,20 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
   real animations and builds inside the editor. Each build pauses at its end; click the slide or press → to play the
   next build. Use the player controls to pause or scrub, and ← to go back.
-- **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
-  top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
-  go into the working copy's `slides/` folder, so the original's builds are untouched.
+- **Play with Animations** (Play menu: ⌥⌘A from the current slide, ⌥⌘⇧A from the beginning): builds any slides
+  whose code changed since they were last built (progress in the top-right pill), then plays the real animations
+  full-screen in a native player (AVFoundation), so no Qt presenter is needed. Builds go into the working copy's
+  `slides/` folder, so the original's builds are untouched. Keys: → / ↓ / return / click next, ← / ↑ / right-click
+  previous (shown at its end), space play/pause, R replay, V reverse, N next slide, 1–9 jump to a chapter, B blank,
+  P progress, Home/End, esc / Q end. Loops, auto-next and playback rates from `next_slide(...)` are honoured, and
+  dark mode / inverted colours apply as in the slideshow. **Presenter View with Animations** (Play menu, ⌃⌘A) is
+  the same Presenter View over the animated show: the current slide plays live (mirroring the audience display, with
+  a playing / paused / build-done badge), the next panel shows how the next build ends, and notes, counter, clock and
+  timer work as above; with one display it is a rehearsal view. Chapters and clickable link regions come from the deck's `present.json`
+  (`{"sections": [scene indices], "links": {"<scene index>": [[x0, x1, y0, y1, url], ...]}}`, fractions of the
+  slide, y from the top, scene indices counting `order.txt`) or, without one, the `SECTION_SCENE_INDICES` /
+  `REFERENCE_LINKS` constants of a custom `present.py`; clicking the bottom 6% of the slide jumps to the chapter
+  under the pointer.
 - File ▸ Export To ▸ Python (whole deck in one file)… writes the deck as a single `.py`: helper modules inlined, the
   slides in show order, a `SLIDES` list at the end. (The deck's own `.py` files are already the editable source that
   every edit is written to; this is a one-file copy for sharing, best kept in the deck folder so relative paths work.)
@@ -306,9 +321,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Presenting and sharing**
 - The full-screen slideshow shows stills of each build scaled up from 1280×720, with no presenter display, notes or
   timer. The selected slide's animations can be previewed inside the editor.
-- Play with Manim Slides builds with `manim-slides render` from the chosen Python's `bin` folder. The first run on a
-  deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
-  them. Manimble's own renders keep manim's Text/TeX cache under `~/Library/Application Support/Manimble/cache`; presenting and exporting run manim-slides, which writes the deck's `../media` folder.
+- Play with Animations and the animation preview build with `python -m manim render` (what `manim-slides render`
+  runs) in the chosen Python. The first run on a deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
+  them. Manimble's own renders keep manim's Text/TeX cache under `~/Library/Application Support/Manimble/cache`; presenting and exporting render through manim-slides' `Slide`, which writes the deck's `../media` folder.
+- The animated player shows no pointer cursor over link regions, and V replays forwards when Manim Slides did not
+  write a separate reversed clip. In Presenter View, R resets the timer, so replaying a build is done with ← then →.
+  Presenter View with Animations is untested on a real second display (checked as a one-display rehearsal).
 - New or duplicated slides are added to `order.txt` only: decks that keep their own hand-written lists (build
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
@@ -337,8 +355,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 2. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
 3. Per-word text styling; per-element font; justified and wrapped text (`MarkupText`); rotation by dragging.
 4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
-5. Presenter display (current + next slide, notes, timer); animated playback across the full-screen slideshow; PDF/video
-   export at full resolution.
+5. PDF/video export at full resolution.
 6. Go to Slide; multi-slide selection; find / replace.
 7. Persistent undo history; crash recovery of the working copy.
 8. Slide transitions, themes / master slides, and a theme picker for new decks.
