@@ -52,7 +52,10 @@ from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Came
 from manim import Paragraph, BackgroundRectangle, VMobject  # noqa: E402
 from manim import (FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,  # noqa: E402
                    GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform,
-                   TransformFromCopy, AnimationGroup, LaggedStart)
+                   TransformFromCopy, AnimationGroup, LaggedStart, Transform, MoveToTarget,
+                   Indicate, Flash, Circumscribe, Wiggle, FocusOn)
+from manim.animation.transform import _MethodAnimation  # noqa: E402
+from manim.animation.transform_matching_parts import TransformMatchingAbstractBase  # noqa: E402
 from manim.utils.family import extract_mobject_family_members  # noqa: E402
 from manim.utils.iterables import list_update  # noqa: E402
 from manim.mobject.mobject import _AnimationBuilder  # noqa: E402
@@ -373,18 +376,24 @@ class Slide(Scene):
         return super().play(*a, **k)
 
     def _fast_play(self, anims):
-        """Jump straight to the end state of simple animations (no begin()/deep copies).
+        """Jump straight to the end state of the animations (no begin()/deep copies/interpolation).
 
-        Only for animation types whose end state is just "mobject added / removed / replaced";
-        anything else (Transform, .animate, updaters ...) goes through the real pipeline."""
+        Covered: animations whose end state is "mobject added / removed / replaced", `.animate` and
+        MoveToTarget (the mobject takes its prepared target), Transform (the mobject takes the target's
+        shape), the TransformMatching family (source out, target in) and indications that leave the
+        slide as it was. Anything else (updaters, Homotopy, custom animations ...) goes through the real
+        pipeline, which deep-copies every mobject it animates and is the slow part of a re-render."""
         flat = []
 
         def walk(x):
-            if isinstance(x, (AnimationGroup, LaggedStart)):
+            if isinstance(x, _AnimationBuilder):
+                x = x.build()              # `m.animate.shift(...)` arrives unbuilt; play() would build it the same way
+            if type(x) in SIMPLE_ANIMS or type(x) in TARGET_ANIMS or type(x) is Transform \
+                    or type(x) in NOOP_ANIMS or isinstance(x, TransformMatchingAbstractBase):
+                flat.append(x)
+            elif isinstance(x, (AnimationGroup, LaggedStart)):
                 for c in x.animations:
                     walk(c)
-            elif type(x) in SIMPLE_ANIMS:
-                flat.append(x)
             else:
                 raise _NotSimple
 
@@ -399,15 +408,36 @@ class Slide(Scene):
         for a in flat:
             if a.mobject.updaters:
                 return False
+            if type(a) in TARGET_ANIMS and getattr(a.mobject, "target", None) is None:
+                return False
         for a in flat:
-            if a.is_introducer():
+            if type(a) in SIMPLE_ANIMS and a.is_introducer():
                 self.add(a.mobject)
-        self.add_mobjects_from_animations(flat)
+        # what manim's play() adds before animating; the TransformMatching group of pieces is removed again
+        self.add_mobjects_from_animations([a for a in flat if not isinstance(a, TransformMatchingAbstractBase)
+                                           and type(a) not in NOOP_ANIMS])
         for a in flat:
-            if a.is_remover():
-                self.remove(a.mobject)
-            if getattr(a, "replace_mobject_with_target_in_scene", False):
-                self.replace(a.mobject, a.target_mobject)
+            if type(a) in TARGET_ANIMS:
+                # manim's _MethodAnimation.finish(): the methods for their side effects, then the target's geometry
+                for item in getattr(a, "methods", ()):
+                    item.method.__func__(a.mobject, *item.args, **item.kwargs)
+                a.mobject.become(a.mobject.target)
+            elif type(a) is Transform:
+                target = a.target_mobject
+                # become() aligns both structures; keep the real target untouched like Transform.begin() does
+                a.mobject.become(target if _same_shape(a.mobject, target) else target.copy())
+                if a.replace_mobject_with_target_in_scene:
+                    self.replace(a.mobject, target)
+            elif isinstance(a, TransformMatchingAbstractBase):
+                self.remove(*a.to_remove)
+                self.add(a.to_add)
+            elif type(a) in NOOP_ANIMS:
+                pass
+            else:
+                if a.is_remover():
+                    self.remove(a.mobject)
+                if getattr(a, "replace_mobject_with_target_in_scene", False):
+                    self.replace(a.mobject, a.target_mobject)
         return True
 
     def wait(self, *a, **k):
@@ -533,6 +563,15 @@ class _NotSimple(Exception):
 REAL_PLAY = bool(os.environ.get("MANIMBLE_REAL_PLAY"))
 SIMPLE_ANIMS = {FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,
                 GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform}
+TARGET_ANIMS = {_MethodAnimation, MoveToTarget}        # the mobject ends up as its prepared .target
+NOOP_ANIMS = {Indicate, Flash, Circumscribe, Wiggle, FocusOn}   # there-and-back / self-removing effects
+
+
+def _same_shape(a, b) -> bool:
+    """True when become() can copy b's points into a without inserting submobjects into either."""
+    if a.has_points() != b.has_points() or len(a.submobjects) != len(b.submobjects):
+        return False
+    return all(_same_shape(x, y) for x, y in zip(a.submobjects, b.submobjects))
 
 fake = types.ModuleType("manim_slides")
 fake.Slide = Slide
@@ -541,10 +580,18 @@ sys.modules["manim_slides"] = fake
 
 # ------------------------------------------------------------------ runner
 
+_realpaths: dict = {}
+
+
 def purge_project_modules():
     for name, mod in list(sys.modules.items()):
         fn = getattr(mod, "__file__", None)
-        if fn and in_project(os.path.realpath(fn)):
+        if not fn:
+            continue
+        real = _realpaths.get(fn)        # resolving ~1200 installed modules each render costs 60 ms
+        if real is None:
+            real = _realpaths[fn] = os.path.realpath(fn)
+        if in_project(real):
             del sys.modules[name]
     importlib.invalidate_caches()
 

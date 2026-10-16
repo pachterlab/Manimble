@@ -21,7 +21,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 
 | cmd | arguments | result |
 |---|---|---|
-| `open` | `deck` (folder with the scene `.py` files), `cache?` (cache folder, default `<deck>/.manimble`) | `{ok: true}` |
+| `open` | `deck` (folder with the scene `.py` files), `cache?` (cache folder, default `<deck>/.manimble`; renders and the workers' manim Text/TeX cache live there, so it should outlive the working copy) | `{ok: true}` |
 | `state` | `current?` (slide on screen; re-rendered first if its source changed) | `{deck, path, scenes: [{name, file, line, status, hidden, thumb?, stops?, error?}], unusedScenes: [same summary], canUndo, canRedo, undoLabel, hasPresent}`; `scenes` follows `order.txt` and `unusedScenes` contains scene classes outside it; `status` is `ready`, `rendering`, `queued`, `stale`, `pending` or `error` |
 | `scene` | `name` | see below; renders the slide if needed and waits |
 | `edit` | `scene`, `stop`, `oid`, `op`, plus op arguments | `{ok, message?, siblings?, changed?: {file, ranges}}` or `{ok: false, error}` |

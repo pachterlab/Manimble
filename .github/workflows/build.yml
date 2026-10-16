@@ -1,0 +1,12 @@
+# Builds the macOS app on every push and PR, so a change can't quietly break the build.
+name: build
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: apps/macos/build_app.sh

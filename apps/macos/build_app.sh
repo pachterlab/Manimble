@@ -21,6 +21,7 @@ swift build -c release \
   --cache-path "$ROOT/.build/swift-cache" \
   --config-path "$ROOT/.build/swift-config" \
   --security-path "$ROOT/.build/swift-security"
+VERSION="$(cat "$ROOT/../../VERSION")"
 APP="$ROOT/Manimble.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -38,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleExecutable</key><string>Manimble</string>
 <key>CFBundleIconFile</key><string>manimble</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>0.2.0</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>$VERSION</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Manimble uses Keynote to import and export Keynote files.</string>

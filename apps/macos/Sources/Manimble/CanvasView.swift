@@ -212,6 +212,17 @@ final class CanvasView: MTKView {
     private var dragOID: Int?
     private var dragHandle: Handle?
     private var dragBox: Box?
+    private var dragBase = (dx: 0.0, dy: 0.0)   // the object's previewed offset when this drag began (moves still rendering)
+    /// The object being dragged right now, if any.
+    var dragging: Int? { dragOID }
+
+    /// A fresh render now shows part of this object's previewed offset: keep previewing only the rest.
+    func settle(_ oid: Int, shownDx: Double, shownDy: Double) {
+        guard var o = overrides[oid] else { return }
+        o.dx -= shownDx; o.dy -= shownDy
+        overrides[oid] = o
+        if dragOID == oid { dragBase = (dragBase.dx - shownDx, dragBase.dy - shownDy) }
+    }
     private var tracking: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { true }
@@ -685,7 +696,10 @@ final class CanvasView: MTKView {
         }
         let oid = hit(p)
         if oid != selection { selection = oid; onSelect?(oid) }
-        if let oid = oid { dragStart = p; dragOID = oid; dragHandle = nil; dragBox = currentBox(oid) }
+        if let oid = oid {
+            dragStart = p; dragOID = oid; dragHandle = nil; dragBox = currentBox(oid)
+            dragBase = overrides[oid].map { ($0.dx, $0.dy) } ?? (0, 0)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -743,7 +757,7 @@ final class CanvasView: MTKView {
             if snapEnabled && !event.modifierFlags.contains(.option) {
                 (dx, dy, guides) = snapDelta(oid, b, dx, dy)
             } else if !guides.isEmpty { guides = [] }
-            o.dx = dx; o.dy = dy
+            o.dx = dragBase.dx + dx; o.dy = dragBase.dy + dy
         }
         overrides[oid] = o
     }
@@ -810,12 +824,16 @@ final class CanvasView: MTKView {
             if hypot(e[0] - o[0], e[1] - o[1]) + hypot(e[2] - o[2], e[3] - o[3]) > 1 { onEndpoints?(oid, e) } else { lineOverrides[oid] = nil }
             return
         }
-        guard let oid = dragOID, let o = overrides[oid] else { return }
+        guard let oid = dragOID, var o = overrides[oid] else { return }
+        let idle = o.dx == 0 && o.dy == 0 && o.replacement == nil      // nothing else of this object is still previewed
         if dragHandle != nil {
-            if abs(o.scale - 1) > 0.002 { onResize?(oid, o.scale) } else { overrides[oid] = nil }
-        } else if abs(o.dx) + abs(o.dy) >= 1 {
-            onMove?(oid, o.dx, o.dy)
-        } else { overrides[oid] = nil }
+            if abs(o.scale - 1) > 0.002 { onResize?(oid, o.scale) } else if idle { overrides[oid] = nil }
+        } else {
+            let dx = o.dx - dragBase.dx, dy = o.dy - dragBase.dy      // this drag alone; earlier moves are already on their way
+            if abs(dx) + abs(dy) >= 1 { onMove?(oid, dx, dy) }
+            else if dragBase.dx == 0 && dragBase.dy == 0 && o.scale == 1 && o.replacement == nil { overrides[oid] = nil }
+            else { o.dx = dragBase.dx; o.dy = dragBase.dy; overrides[oid] = o }
+        }
     }
 
     /// Ramer-Douglas-Peucker: the fewest points that keep the stroke within `tolerance` frame pixels.

@@ -27,12 +27,15 @@ HERE = Path(__file__).resolve().parent
 class WorkerProc:
     """A long-lived manim process speaking JSON lines."""
 
-    def __init__(self, python: str, deck: str, worker_name: str):
+    def __init__(self, python: str, deck: str, worker_name: str, media_root: Path | None = None):
         self.python, self.deck = python, deck
         # Manim caches generated Text/TeX SVGs by content under media_dir.
         # Independent workers rendering different slides concurrently can
         # otherwise delete each other's temporary SVGs while parsing them.
-        self.media_dir = str(Path(deck).parent / "media" / "manimble" / worker_name)
+        # The cache lives with the deck's render cache so it outlives the working copy: a fresh
+        # directory means every formula goes through LaTeX again before the first edit of each slide.
+        root = media_root if media_root is not None else Path(deck).parent / "media" / "manimble"
+        self.media_dir = str(root / worker_name)
         self.lock = threading.Lock()
         self.proc = None
 
@@ -92,13 +95,14 @@ class Manimble:
         self.cache_dir = Path(cache) if cache else Path(self.deck) / ".manimble"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         (self.cache_dir / ".gitignore").write_text("*\n")
-        self.render_worker = WorkerProc(python, self.deck, "background")
-        self.aux_worker = WorkerProc(python, self.deck, "auxiliary")
+        media_root = self.cache_dir / "media"
+        self.render_worker = WorkerProc(python, self.deck, "background", media_root)
+        self.aux_worker = WorkerProc(python, self.deck, "auxiliary", media_root)
         self.on_event = None
         self.lock = threading.RLock()           # guards the tables below
         self.edit_lock = threading.RLock()      # serialises edits
         self.scene_locks: dict = {}             # one render per scene at a time
-        self.edit_worker = WorkerProc(python, self.deck, "interactive")   # edits never wait behind background renders
+        self.edit_worker = WorkerProc(python, self.deck, "interactive", media_root)   # edits never wait behind background renders
         self.scenes: list[dict] = []            # ordered scene descriptors (the slides of the talk)
         self.all_scenes: list[dict] = []        # every scene class found, including ones not in order.txt
         self.results: dict[str, dict] = {}      # name -> {"key","dir","data"} or {"error"}

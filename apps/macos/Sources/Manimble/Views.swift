@@ -145,6 +145,19 @@ extension NSColor {
 final class SlideTable: NSTableView {
     var onDelete: (() -> Void)?
     var onMenu: ((Int) -> NSMenu?)?
+    /// Called when the already-selected slide is clicked again (toggles its builds list).
+    var onReclick: ((Int) -> Void)?
+    private var clickedSelected = false
+    override func mouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        clickedSelected = row >= 0 && row == selectedRow
+        super.mouseDown(with: event)
+    }
+    /// The table's action fires after a click that was not a drag; a reclick of the selected row toggles.
+    @objc func rowClicked(_ sender: Any?) {
+        guard clickedSelected, clickedRow >= 0, clickedRow == selectedRow else { return }
+        onReclick?(clickedRow)
+    }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 51 || event.keyCode == 117, selectedRow >= 0 { onDelete?(); return }
         super.keyDown(with: event)
@@ -153,6 +166,10 @@ final class SlideTable: NSTableView {
         let row = self.row(at: convert(event.locationInWindow, from: nil))
         if row >= 0, row != selectedRow { selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         return onMenu?(row)
+    }
+    /// Let clicks reach the nested build panels instead of being swallowed by row selection.
+    override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool {
+        responder is BuildPanel || super.validateProposedFirstResponder(responder, for: event)
     }
 }
 
@@ -170,6 +187,25 @@ final class SlideCell: NSTableCellView {
     private let ring = NSView()
     private let name = NSTextField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
+    /// Nested list of the slide's builds, shown under the selected slide only.
+    private let builds = NSStackView()
+    var onBuild: ((Int) -> Void)?
+
+    /// Horizontal space around the thumbnail (number column + margins) and the extra indent of the builds list.
+    static let thumbInset: CGFloat = 2 + 20 + 8 + 12
+    static let buildIndent: CGFloat = 16
+    static let buildSpacing: CGFloat = 6
+    static let baseHeight: CGFloat = 108
+
+    /// Row height for a slide at the given column width, with `builds` nested panels under it (0 = collapsed).
+    static func rowHeight(columnWidth: CGFloat, builds n: Int) -> CGFloat {
+        guard n > 0 else { return baseHeight }
+        let thumbW = max(40, columnWidth - thumbInset)
+        let top = max(baseHeight, 6 + (thumbW * 9 / 16).rounded() + 4 + 13 + buildSpacing)
+        let bw = max(32, thumbW - buildIndent)
+        let bh = (bw * 9 / 16).rounded()
+        return top + CGFloat(n) * (bh + buildSpacing) + 2
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -185,7 +221,12 @@ final class SlideCell: NSTableCellView {
         ring.layer?.shadowRadius = 4; ring.layer?.shadowOffset = CGSize(width: 0, height: -1.5)
         name.font = Theme.font(10); name.textColor = .secondaryLabelColor; name.lineBreakMode = .byTruncatingTail
         badge.font = Theme.font(10, .medium); badge.textColor = .tertiaryLabelColor; badge.alignment = .right
-        for v in [num, ring, thumb, name, badge] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+        // the badge keeps its full text ("3 builds ▾"); a long slide name truncates instead
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        builds.orientation = .vertical; builds.alignment = .leading; builds.spacing = SlideCell.buildSpacing
+        builds.setHuggingPriority(.required, for: .vertical)
+        for v in [num, ring, thumb, name, badge, builds] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             num.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2), num.widthAnchor.constraint(equalToConstant: 20),
             num.topAnchor.constraint(equalTo: topAnchor, constant: 8),
@@ -198,13 +239,16 @@ final class SlideCell: NSTableCellView {
             name.leadingAnchor.constraint(equalTo: thumb.leadingAnchor, constant: 2), name.topAnchor.constraint(equalTo: thumb.bottomAnchor, constant: 4),
             name.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -4),
             badge.trailingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: -2), badge.centerYAnchor.constraint(equalTo: name.centerYAnchor),
+            builds.leadingAnchor.constraint(equalTo: thumb.leadingAnchor, constant: SlideCell.buildIndent),
+            builds.trailingAnchor.constraint(equalTo: thumb.trailingAnchor),
+            builds.topAnchor.constraint(equalTo: name.bottomAnchor, constant: SlideCell.buildSpacing),
         ])
         // keep the ring behind the thumbnail
         addSubview(ring, positioned: .below, relativeTo: thumb)
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(number: Int, name n: String, image: NSImage?, status: String, stops: Int, active: Bool, unused: Bool = false, hidden: Bool = false) {
+    func configure(number: Int, name n: String, image: NSImage?, status: String, stops: Int, active: Bool, unused: Bool = false, hidden: Bool = false, expanded: Bool? = nil) {
         if hidden, !unused {
             num.attributedStringValue = NSAttributedString(string: String(number), attributes: [.strikethroughStyle: NSUnderlineStyle.single.rawValue, .font: Theme.font(11, .medium)])
         } else {
@@ -214,8 +258,21 @@ final class SlideCell: NSTableCellView {
         name.textColor = status == "error" ? .systemRed : (active ? .labelColor : .secondaryLabelColor)
         thumb.image = image
         thumb.alphaValue = hidden ? 0.4 : 1
-        badge.stringValue = unused ? "unused" : hidden ? "hidden" : (stops > 1 ? "\(stops) builds" : (image == nil && status != "error" ? "…" : ""))
+        let chevron = expanded.map { $0 ? " ▾" : " ▸" } ?? ""
+        badge.stringValue = unused ? "unused" : hidden ? "hidden" : (stops > 1 ? "\(stops) builds" + chevron : (image == nil && status != "error" ? "…" : ""))
         setActive(active)
+        setBuilds([], active: -1)
+    }
+
+    /// Show the slide's builds as small indented panels under the thumbnail (empty list collapses them).
+    func setBuilds(_ images: [NSImage?], active: Int) {
+        builds.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        builds.isHidden = images.isEmpty
+        for (i, img) in images.enumerated() {
+            let panel = BuildPanel(image: img, index: i, active: i == active) { [weak self] in self?.onBuild?(i) }
+            builds.addArrangedSubview(panel)
+            panel.widthAnchor.constraint(equalTo: builds.widthAnchor).isActive = true
+        }
     }
 
     func setActive(_ on: Bool) {
@@ -224,6 +281,43 @@ final class SlideCell: NSTableCellView {
         num.textColor = on ? Theme.accent : .tertiaryLabelColor
         name.textColor = on ? .labelColor : .secondaryLabelColor
     }
+}
+
+/// One build of the selected slide, nested under it in the navigator: a smaller 16:9 panel with its number.
+final class BuildPanel: NSView {
+    private let handler: () -> Void
+    init(image: NSImage?, index: Int, active: Bool, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 5; layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.borderWidth = active ? 2 : 1
+        layer?.borderColor = (active ? Theme.accent : NSColor.tertiaryLabelColor.withAlphaComponent(0.35)).cgColor
+        let iv = NSImageView(image: image ?? NSImage())
+        iv.imageScaling = .scaleProportionallyUpOrDown
+        iv.alphaValue = active ? 1 : 0.72
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iv)
+        let l = NSTextField(labelWithString: String(index + 1)); l.font = Theme.font(9, .bold); l.textColor = .white; l.alignment = .center
+        l.wantsLayer = true; l.layer?.backgroundColor = NSColor(white: 0, alpha: 0.55).cgColor; l.layer?.cornerRadius = 3
+        l.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(l)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalTo: widthAnchor, multiplier: 9.0 / 16.0),
+            iv.leadingAnchor.constraint(equalTo: leadingAnchor), iv.trailingAnchor.constraint(equalTo: trailingAnchor),
+            iv.topAnchor.constraint(equalTo: topAnchor), iv.bottomAnchor.constraint(equalTo: bottomAnchor),
+            l.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4), l.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            l.widthAnchor.constraint(equalToConstant: 14), l.heightAnchor.constraint(equalToConstant: 12),
+        ])
+        toolTip = "Build \(index + 1)"
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var acceptsFirstResponder: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+    override func mouseDown(with event: NSEvent) { handler() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
 /// Small build thumbnail in the steps strip.

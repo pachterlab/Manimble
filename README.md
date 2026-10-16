@@ -7,10 +7,17 @@ Python source, and you can watch the lines change in the built-in code pane.
 ## Run it
 
 ```bash
-git clone <this repository> && cd manimble
+git clone https://github.com/pachterlab/Manimble.git && cd Manimble
 ./install_manimble.sh   # installs dependencies and builds the app
 open "$HOME/Applications/Manimble.app"  # File ▸ Open Deck… (try examples/hello/deck)
 ```
+
+Prefer not to build from source? Download `Manimble-macOS.zip` from the
+[latest release](https://github.com/pachterlab/Manimble/releases/latest), unzip it into
+`~/Applications`, then `git clone` the repository above (for the engine and examples) and run
+`./setup_python_env.sh` instead of `install_manimble.sh` to install the Python/Manim/TeX
+dependencies without needing Xcode. The app is ad-hoc signed, so the first launch needs
+right-click ▸ Open (or `xattr -cr ~/Applications/Manimble.app`) to get past Gatekeeper.
 
 Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
@@ -301,7 +308,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   timer. The selected slide's animations can be previewed inside the editor.
 - Play with Manim Slides builds with `manim-slides render` from the chosen Python's `bin` folder. The first run on a
   deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
-  them. Rendering also writes manim's cache into the deck's `../media` folder.
+  them. Manimble's own renders keep manim's Text/TeX cache under `~/Library/Application Support/Manimble/cache`; presenting and exporting run manim-slides, which writes the deck's `../media` folder.
 - New or duplicated slides are added to `order.txt` only: decks that keep their own hand-written lists (build
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
@@ -314,8 +321,11 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   from a crash are not recovered.
 - The terminals restart (ending any running `claude` sessions) when you open a different deck, and does not remember
   its scrollback between launches. Claude edits the working copy, so use Save to Original afterwards.
-- The app is ad-hoc signed, not notarised.
-- Scene renders still take 0.4–1 s; brand-new LaTeX adds roughly half a second for TeX.
+- The app is ad-hoc signed, not notarised (the release workflow supports notarization once a
+  Developer ID is configured; see `.github/workflows/release.yml`).
+- Re-rendering a slide after an edit takes 0.2–0.8 s (every object is re-created by manim; a slide with 40 formulas
+  sits at the top of that range). LaTeX results are cached per deck under the render cache in
+  `~/Library/Application Support/Manimble/cache`, so a brand-new formula costs about half a second once.
 - macOS only. There are no automated tests; the app has headless self-test hooks (`MANIMBLE_SELFTEST`,
   `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_BG`, `MANIMBLE_TEST_DARK`, `MANIMBLE_TEST_FORMAT`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
   checks.
@@ -334,7 +344,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 8. Slide transitions, themes / master slides, and a theme picker for new decks.
 9. Keep build scripts and progress tables in sync when slides are added, moved or deleted.
 10. Image tools: replace, crop, mask; SVG and PDF insertion.
-11. Packaging: notarisation and an automated test suite.
+11. Packaging: a Developer ID for notarisation, and an automated test suite.
 
 ## License
 
@@ -349,6 +359,11 @@ docs/protocol.md         the engine's JSON-lines protocol
 apps/macos/              the macOS app: Package.swift, Sources/Manimble (AppKit, Metal, SwiftTerm),
                          build_app.sh, assets/Manimble.icns, tools/make_icon.py
 install_manimble.sh      installs dependencies and builds ~/Applications/Manimble.app
+setup_python_env.sh      installs just the Python/Manim/TeX dependencies (used by install_manimble.sh,
+                         and standalone for a downloaded prebuilt Manimble.app)
+VERSION                  the app's version; the release workflow checks it against the git tag
+.github/workflows/       CI build on every push, and the tag-triggered release that publishes
+                         Manimble-macOS.zip to GitHub Releases
 apps/windows/            placeholder with notes for a future Windows front end
 examples/hello/deck/     a tiny deck to try Manimble on
 LICENSE                  BSD 2-Clause

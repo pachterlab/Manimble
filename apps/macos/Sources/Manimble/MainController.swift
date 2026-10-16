@@ -118,10 +118,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.intercellSpacing = NSSize(width: 0, height: 0)
         table.headerView = nil
-        table.rowHeight = 108
+        table.rowHeight = SlideCell.baseHeight
         table.dataSource = self; table.delegate = self
         table.onDelete = { [weak self] in self?.deleteSlide() }
         table.onMenu = { [weak self] row in self?.navigatorMenu(row: row) }
+        table.target = table; table.action = #selector(SlideTable.rowClicked(_:))
+        table.onReclick = { [weak self] _ in self?.toggleBuildsList() }
         table.registerForDraggedTypes([slideDragType])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.style = .plain
@@ -142,6 +144,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: side, queue: .main) { [weak self, weak side] _ in
             guard let side = side, let self = self else { return }
             self.table.tableColumns.first?.width = side.contentSize.width
+            self.noteBuildsRowHeight()
         }
 
         // centre: canvas + builds
@@ -769,12 +772,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if name != sceneName { closeAnimationPreview() }
         sceneName = name; stopIndex = 0; selection = nil
         refreshRings()
+        refreshBuildRows()
         canvas.overrides = [:]; canvas.lineOverrides = [:]; canvas.selection = nil
         if let i = navigatorScenes.firstIndex(where: { $0.name == name }) { selectRow(i) }
         await loadScene(name, keepStop: false)
     }
 
-    func loadScene(_ name: String, keepStop: Bool) async {
+    /// `keepOverrides`: an edit's own render landing; previews of other objects (a drag in progress, moves still
+    /// queued) stay, and the caller settles the edited object's.
+    func loadScene(_ name: String, keepStop: Bool, keepOverrides: Bool = false) async {
         busy += 1
         defer { busy -= 1 }
         guard let sc = try? await engine.call("scene", ["name": name], as: SceneData.self), name == sceneName else { return }
@@ -787,6 +793,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             toast("Slide failed to render: " + (sc.error ?? "unknown error").split(separator: "\n").suffix(3).joined(separator: " "), error: true)
             renderSource()
             showSourceError(sc.error ?? "scene not ready")
+            rebuildSteps()
             rebuildInspector()
             return
         }
@@ -796,7 +803,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         stopIndex = keepStop ? min(stopIndex, sc.stops!.count - 1) : 0
         if let sel = selection, sc.objects?[String(sel)] == nil { selection = nil }
         applyStop()
-        canvas.overrides = [:]; canvas.lineOverrides = [:]
+        if !keepOverrides { canvas.overrides = [:]; canvas.lineOverrides = [:] }
         if ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] != nil { selfTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLAY"] != nil, !testRan { testRan = true; playTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"] != nil, !testRan { testRan = true; termTest() }
@@ -947,8 +954,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             if img == nil, let i = DarkMode.image(path: t) { thumbCache.setObject(i, forKey: key); img = i }
         }
         let unused = row >= (state?.scenes.count ?? 0)
-        cell.configure(number: unused ? 0 : row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName, unused: unused, hidden: s.hidden == true)
-        _ = tv
+        let expanded: Bool? = s.name == sceneName && hasBuildsList ? !collapsedBuilds.contains(s.name) : nil
+        cell.configure(number: unused ? 0 : row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName, unused: unused, hidden: s.hidden == true, expanded: expanded)
+        cell.onBuild = { [weak self] i in self?.goToStop(i) }
+        if row == buildsRow { cell.setBuilds(buildImages(), active: stopIndex) }
         return cell
     }
 
@@ -958,7 +967,80 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func fitSidebarColumn() {
         guard let side = sideScroll, let col = table.tableColumns.first else { return }
         let w = max(120, side.contentSize.width)
-        if abs(col.width - w) > 0.5 { col.width = w }
+        if abs(col.width - w) > 0.5 { col.width = w; noteBuildsRowHeight() }
+    }
+
+    // MARK: builds nested under the selected slide
+
+    /// Slides whose builds list the user folded away by clicking the selected slide again.
+    private var collapsedBuilds = Set<String>()
+
+    /// Whether the selected slide has a builds list at all (more than one build, scene loaded).
+    private var hasBuildsList: Bool {
+        guard let n = sceneName, let sc = scene, sc.name == n else { return false }
+        return (sc.stops?.count ?? 0) > 1
+    }
+
+    /// Row of the selected slide when its builds are listed under it.
+    var buildsRow: Int? {
+        guard hasBuildsList, let n = sceneName, !collapsedBuilds.contains(n) else { return nil }
+        return navigatorScenes.firstIndex(where: { $0.name == n })
+    }
+    private var shownBuildsRow: Int?
+
+    /// Fold or unfold the builds list under the selected slide (a click on the selected slide).
+    func toggleBuildsList() {
+        guard hasBuildsList, let n = sceneName else { return }
+        if collapsedBuilds.contains(n) { collapsedBuilds.remove(n) } else { collapsedBuilds.insert(n) }
+        if let r = navigatorScenes.firstIndex(where: { $0.name == n }) { shownBuildsRow = shownBuildsRow ?? r }
+        refreshBuildRows()
+    }
+
+    func tableView(_ tv: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard row == buildsRow, let n = scene?.stops?.count else { return SlideCell.baseHeight }
+        return SlideCell.rowHeight(columnWidth: tv.tableColumns.first?.width ?? 220, builds: n)
+    }
+
+    /// Images for the builds listed under the selected slide (nil while a thumbnail is still rendering).
+    func buildImages() -> [NSImage?] {
+        guard let stops = scene?.stops, stops.count > 1 else { return [] }
+        return stops.map { st in
+            let key = (DarkMode.mode.rawValue + ":" + st.png) as NSString
+            if let i = thumbCache.object(forKey: key) { return i }
+            guard let i = DarkMode.image(path: st.png) else { return nil }
+            thumbCache.setObject(i, forKey: key); return i
+        }
+    }
+
+    /// Expand the builds list under the selected slide, collapse it under the previous one, and mark the current build.
+    func refreshBuildRows() {
+        var rows = IndexSet()
+        if let o = shownBuildsRow { rows.insert(o) }
+        if let n = buildsRow { rows.insert(n) }
+        shownBuildsRow = buildsRow
+        rows = IndexSet(rows.filter { navigatorScenes.indices.contains($0) })
+        guard !rows.isEmpty else { return }
+        table.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integer: 0))
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            table.noteHeightOfRows(withIndexesChanged: rows)
+        }
+        if let n = buildsRow { table.scrollRowToVisible(n) }
+    }
+
+    /// The sidebar changed width: the nested panels scale with it, so re-measure the expanded row.
+    func noteBuildsRowHeight() {
+        guard let r = buildsRow, navigatorScenes.indices.contains(r) else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: r))
+        }
+    }
+
+    /// Show build `i` of the current slide.
+    func goToStop(_ i: Int) {
+        guard let n = scene?.stops?.count, (0..<n).contains(i) else { return }
+        stopIndex = i; canvas.overrides = [:]; canvas.lineOverrides = [:]; applyStop(); rebuildSteps(); rebuildInspector()
     }
 
     func refreshRings() {
@@ -1006,14 +1088,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func rebuildSteps() {
         stepsBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        refreshBuildRows()
         guard let stops = scene?.stops, stops.count > 1 else { return }
         let l = NSTextField(labelWithString: "BUILDS"); l.textColor = NSColor(white: 1, alpha: 0.45); l.font = Theme.font(10, .semibold)
         stepsBar.addArrangedSubview(l)
         for (i, st) in stops.enumerated() {
-            let b = StepButton(path: st.png, index: i, active: i == stopIndex) { [weak self] in
-                guard let self = self else { return }
-                self.stopIndex = i; self.canvas.overrides = [:]; self.canvas.lineOverrides = [:]; self.applyStop(); self.rebuildSteps(); self.rebuildInspector()
-            }
+            let b = StepButton(path: st.png, index: i, active: i == stopIndex) { [weak self] in self?.goToStop(i) }
             stepsBar.addArrangedSubview(b)
         }
     }
@@ -1219,14 +1299,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func runEdit(_ req: [String: Any]) async {
-        guard let name = sceneName else { return }
+        guard let name = (req["scene"] as? String) ?? sceneName else { return }
+        let oid = req["oid"] as? Int
+        let before = sceneName == name ? canvas.stop : nil
         busy += 1
         var r = req; r["scene"] = name; r["stop"] = stopIndex
         var result: EditResult?
         var failure: String?
         do { result = try await engine.call("edit", r, as: EditResult.self) } catch { failure = "\(error)" }
         busy -= 1
+        var ok = false
         if let res = result, res.ok == true {
+            ok = true
             lastChanged = res.changed
             var msg = res.message == "no change" ? "No change" : "Saved · \(res.message ?? "")"
             if let n = res.siblings { msg += " (\(n) similar objects share this line; all moved)" }
@@ -1235,12 +1319,37 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             toast(failure ?? result?.error ?? "edit failed", error: true)
             lastChanged = nil
         }
-        await loadScene(name, keepStop: true)
+        // the render lands under whatever the user is doing now: only the edited object's preview is settled
+        await loadScene(name, keepStop: true, keepOverrides: true)
+        if let oid = oid, sceneName == name { settlePreview(name, oid, ok: ok, before: before) }
         await reloadState()
     }
 
+    /// Moves committed while an earlier render was still running, by "scene:oid": one edit sends their total.
+    var pendingMoves: [String: (dx: Double, dy: Double)] = [:]
+
     func commitMove(_ oid: Int, _ dx: Double, _ dy: Double) {
-        submit { [weak self] in await self?.runEdit(["op": "move", "oid": oid, "dx": dx, "dy": dy]) }
+        guard let scene = sceneName else { return }
+        let key = "\(scene):\(oid)"
+        if let p = pendingMoves[key] { pendingMoves[key] = (p.dx + dx, p.dy + dy); return }   // one render for the series
+        pendingMoves[key] = (dx, dy)
+        submit { [weak self] in
+            guard let self = self, let p = self.pendingMoves.removeValue(forKey: key) else { return }
+            await self.runEdit(["op": "move", "oid": oid, "dx": p.dx, "dy": p.dy, "scene": scene])
+        }
+    }
+
+    /// After an edit the fresh render is the truth for that object, so its preview goes away. While more of its
+    /// moves are queued or it is being dragged, it keeps previewing only what the slide does not show yet.
+    func settlePreview(_ scene: String, _ oid: Int, ok: Bool, before: StopInfo?) {
+        canvas.lineOverrides[oid] = nil
+        let live = pendingMoves["\(scene):\(oid)"] != nil || canvas.dragging == oid
+        guard ok, live, let a = before?.box(of: oid), let b = canvas.stop?.box(of: oid) else {
+            canvas.overrides[oid] = nil
+            if !ok { pendingMoves["\(scene):\(oid)"] = nil }
+            return
+        }
+        canvas.settle(oid, shownDx: b.cx - a.cx, shownDy: b.cy - a.cy)
     }
     func commitEndpoints(_ oid: Int, _ e: [Double]) {
         submit { [weak self] in await self?.runEdit(["op": "endpoints", "oid": oid, "sx": e[0], "sy": e[1], "ex": e[2], "ey": e[3]]) }
@@ -1253,7 +1362,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func nudgeObject(_ oid: Int, _ dx: Double, _ dy: Double) {
         nudge.dx += dx; nudge.dy += dy
         var o = canvas.overrides[oid] ?? Override()
-        o.dx = nudge.dx; o.dy = nudge.dy
+        o.dx += dx; o.dy += dy                 // on top of whatever is still previewed (moves not yet rendered)
         canvas.overrides[oid] = o
         nudgeWork?.cancel()
         let w = DispatchWorkItem { [weak self] in
@@ -1782,10 +1891,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     @objc func prevStop() { moveStop(-1) }
     @objc func nextStop() { moveStop(1) }
-    func moveStop(_ d: Int) {
-        guard let n = scene?.stops?.count, (0..<n).contains(stopIndex + d) else { return }
-        stopIndex += d; canvas.overrides = [:]; canvas.lineOverrides = [:]; applyStop(); rebuildSteps(); rebuildInspector()
-    }
+    func moveStop(_ d: Int) { goToStop(stopIndex + d) }
 
     var toastWork: DispatchWorkItem?
     func toast(_ s: String, error: Bool = false) {
