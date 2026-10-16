@@ -35,6 +35,7 @@ fi
 "$PY_ENV/bin/python" -m pip install --upgrade pip
 "$PY_ENV/bin/python" -m pip install -r "$ROOT/engine/requirements.txt"
 
+"$ROOT/apps/macos/tools/make_signing_identity.sh"
 "$ROOT/apps/macos/build_app.sh"
 APP_DEST="$HOME/Applications/Manimble.app"
 mkdir -p "$HOME/Applications"

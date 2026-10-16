@@ -9,13 +9,11 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
-import textwrap
 from pathlib import Path
 
 FW, FH = 14.222222222222221, 8.0          # manim frame in units; 1280 x 720 px
 DEFAULT_FONT = "Helvetica Neue"          # used when the presentation does not name a font
 PT_PER_FONT_SIZE = 0.945                  # same calibration as the exporter
-PX_PER_FONT_SIZE = 1.26                   # em size in px (1280 px frame) per manim font_size
 
 
 def keynote_to_pptx(key_path: str, pptx_path: str) -> dict:
@@ -68,6 +66,113 @@ def _num(x: float, nd: int = 3) -> str:
     return "0" if s in ("", "-0") else s
 
 
+_FONT_DIRS = ("/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts",
+              str(Path.home() / "Library" / "Fonts"))
+_font_cache: dict = {}
+
+
+def _font(family: str, bold: bool, italic: bool):
+    """PIL font (at 1000 px per em) for measuring text the way PowerPoint wraps it, or None if not installed."""
+    key = (family.lower(), bold, italic)
+    if key in _font_cache:
+        return _font_cache[key]
+    want = ("bold " if bold else "") + ("italic" if italic else "")
+    want = want.strip() or "regular"
+    stem = family.lower().replace(" ", "")
+    found = None
+    try:
+        from PIL import ImageFont
+        faces = []
+        for d in _FONT_DIRS:
+            p = Path(d)
+            if not p.is_dir():
+                continue
+            for f in p.iterdir():
+                if f.suffix.lower() in (".ttf", ".ttc", ".otf") and f.stem.lower().replace(" ", "").startswith(stem):
+                    for i in range(64):
+                        try:
+                            ft = ImageFont.truetype(str(f), 1000, index=i)
+                        except Exception:                       # noqa: BLE001
+                            break
+                        fam, style = ft.getname()
+                        if (fam or "").lower() == family.lower():
+                            faces.append(((style or "").lower().replace("oblique", "italic"), ft))
+        found = next((ft for style, ft in faces if style == want), None)
+        if found is None and faces:
+            found = next((ft for style, ft in faces if style == "regular"), faces[0][1])
+    except Exception:                                           # noqa: BLE001
+        found = None
+    _font_cache[key] = found
+    return found
+
+
+def _wrap(text: str, styles: list, width_em: float, measure) -> tuple[str, list]:
+    """Greedy word wrap to width_em (in ems of the font size), like PowerPoint: break at spaces, and inside a word
+    only when the word alone is wider than the box. styles[i] is the style of text[i] and is kept aligned with the
+    result. measure(segment, style) -> ems."""
+    def width(i, j):
+        w, k = 0.0, i
+        while k < j:
+            m = k
+            while m < j and styles[m] == styles[k]:
+                m += 1
+            w += measure(text[k:m], styles[k])
+            k = m
+        return w
+
+    out = list(text)
+    start, last_space = 0, -1
+    for i, ch in enumerate(text + "\n"):
+        if ch not in " \n":
+            continue
+        if last_space > start and width(start, i) > width_em:
+            out[last_space] = "\n"
+            start = last_space + 1
+        if ch == "\n":
+            start, last_space = i + 1, -1
+        else:
+            last_space = i
+    # words wider than the box are broken between characters
+    res, res_styles = [], []
+    start = 0
+    for i in range(len(out) + 1):
+        if i < len(out) and out[i] != "\n":
+            continue
+        if width(start, i) > width_em:
+            line_w = 0.0
+            for k in range(start, i):
+                cw = measure(out[k], styles[k])
+                if line_w > 0 and line_w + cw > width_em and out[k] != " ":
+                    res.append("\n")
+                    res_styles.append(styles[k])
+                    line_w = 0.0
+                line_w += cw
+                res.append(out[k])
+                res_styles.append(styles[k])
+        else:
+            res += out[start:i]
+            res_styles += styles[start:i]
+        if i < len(out):
+            res.append("\n")
+            res_styles.append(styles[i])
+        start = i + 1
+    return "".join(res), res_styles
+
+
+def _runs(para):
+    """[(text, font)] for the runs, fields and line breaks of a paragraph (font None for a break)."""
+    from pptx.text.text import _Run
+    out = []
+    for child in para._p:
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag in ("r", "fld"):
+            r = _Run(child, para)
+            out.append((r.text, r.font))
+        elif tag == "br":
+            out.append(("\n", None))
+    return out
+
+
 def import_presentation(src: str, dest: str, progress=None) -> dict:
     """Create dest/deck (+ dest/assets) from the presentation. Returns {"ok", "deck", "slides", "warnings"}."""
     try:
@@ -75,6 +180,7 @@ def import_presentation(src: str, dest: str, progress=None) -> dict:
         from pptx.enum.shapes import MSO_SHAPE_TYPE, MSO_SHAPE
         from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
         from pptx.enum.dml import MSO_FILL
+        from pptx.oxml.ns import qn
     except ImportError:
         return {"ok": False, "error": "python-pptx is not installed in the Python environment Manimble uses "
                                       "(pip install python-pptx)."}
@@ -230,53 +336,178 @@ def import_presentation(src: str, dest: str, progress=None) -> dict:
         # ----------------------------------------------------------------- text
         if has_text:
             tf = shape.text_frame
-            paras = [p for p in tf.paragraphs if "".join(r.text for r in p.runs).strip() != ""]
+            paras = [p for p in tf.paragraphs if p.text.strip() != ""]
             if not paras:
                 return
+            body_pr = tf._txBody.bodyPr
+
+            def inset(attr, default):
+                v = body_pr.get(attr)
+                return int(v) if v is not None else default
+
+            l_in, r_in = inset("lIns", 91440), inset("rIns", 91440)
+            t_in, b_in = inset("tIns", 45720), inset("bIns", 45720)
+            font_scale, spacing_scale = 1.0, 1.0
+            autofit = body_pr.find(qn("a:normAutofit"))
+            if autofit is not None:
+                font_scale = int(autofit.get("fontScale", 100000)) / 100000
+                spacing_scale = 1 - int(autofit.get("lnSpcReduction", 0)) / 100000
+            wrap_text = body_pr.get("wrap") != "none"
             anchor = tf.vertical_anchor
-            for pi, para in enumerate(paras):
-                text = "".join(r.text for r in para.runs).replace("\x0b", "\n").strip()
-                run = next((r for r in para.runs if r.text.strip()), para.runs[0])
-                f = run.font
+
+            # Lay the paragraphs out the way PowerPoint does: each wrapped to the box width, stacked top-down with
+            # their own line height and spacing. Heights are in manim units.
+            laid = []
+            for para in paras:
+                runs = _runs(para)
+                f = next((fnt for t, fnt in runs if fnt is not None and t.strip()), para.font)
                 size_pt = f.size.pt if f.size is not None else (44 if getattr(shape, "is_placeholder", False)
                                                                  and "TITLE" in str(shape.placeholder_format.type) else 20)
+                size_pt *= font_scale
                 fs = max(6.0, size_pt * s_ref / PT_PER_FONT_SIZE)
                 color = _rgb_hex(f.color) if f.color is not None and f.color.type is not None else None
                 color = color or default_text
                 font = f.name or DEFAULT_FONT
-                bold = bool(f.bold)
-                italic = bool(f.italic)
-                # wrap to the box width like PowerPoint would
-                em_px = fs * PX_PER_FONT_SIZE
-                chars = max(8, int((width * px_per_emu) / (0.5 * em_px)))
-                wrapped = "\n".join(textwrap.fill(line, chars) if len(line) > chars else line for line in text.split("\n"))
+                # per-character (bold, italic); characters without a run (line breaks) take the paragraph's
+                # main style
+                raw, styles = "", []
+                for t, fnt in runs:
+                    t = t.replace("\x0b", "\n").replace("\v", "\n")
+                    st = (bool(fnt.bold), bool(fnt.italic)) if fnt is not None else None
+                    raw += t
+                    styles += [st] * len(t)
+                lead = len(raw) - len(raw.lstrip())
+                text = raw.strip()
+                styles = styles[lead:lead + len(text)]
+                counts: dict = {}
+                for ch, st in zip(text, styles):
+                    if st is not None and not ch.isspace():
+                        counts[st] = counts.get(st, 0) + 1
+                bold, italic = max(counts, key=counts.get) if counts else (False, False)
+                styles = [st or (bold, italic) for st in styles]
+
+                def measure(seg, st, font=font):
+                    ft = _font(font, *st)
+                    return ft.getlength(seg) / 1000 if ft is not None else len(seg) * (0.55 if st[0] else 0.5)
+
+                pil = _font(font, bold, italic)
+                if wrap_text:
+                    text, styles = _wrap(text, styles, (width - l_in - r_in) / 12700 / size_pt, measure)
+                text_lines = text.split("\n")
+
+                if pil is not None:
+                    ascent, descent = pil.getmetrics()
+                    line_em = (ascent + descent) / 1000
+                    descent_em, cap_em = descent / 1000, (ascent - pil.getbbox("H")[1]) / 1000
+                else:
+                    line_em, descent_em, cap_em = 1.2, 0.21, 0.72
+                ls = para.line_spacing
+                if isinstance(ls, float):
+                    pitch = uw(ls * spacing_scale * line_em * size_pt * 12700)
+                elif ls is not None:
+                    pitch = uw(ls * spacing_scale)
+                else:
+                    pitch = uw(spacing_scale * line_em * size_pt * 12700)
+                laid.append({"text": text, "styles": styles, "n_lines": len(text_lines), "fs": fs, "color": color,
+                             "font": font, "pitch": pitch, "align": para.alignment,
+                             # from the top of the first line to the top of its capitals: the baseline sits a
+                             # descent above the bottom of the line
+                             "cap_drop": pitch - uw((descent_em + cap_em) * size_pt * 12700),
+                             "before": uw(para.space_before or 0), "after": uw(para.space_after or 0)})
+
+            # One Text per text box, as in PowerPoint. Paragraphs are joined by line breaks; colour, bold and italic
+            # that differ from the box's main style become t2c / t2w / t2s ranges. manim's Text has one size and
+            # left-aligns its lines, so paragraphs of another size, or centred / right-aligned paragraphs, start
+            # their own Text.
+            def left_aligned(p):
+                return p["align"] in (None, PP_ALIGN.LEFT, PP_ALIGN.JUSTIFY)
+
+            groups = []
+            for p in laid:
+                g = groups[-1] if groups else None
+                if (g and left_aligned(p) and left_aligned(g[0]) and p["fs"] == g[0]["fs"]
+                        and p["font"] == g[0]["font"]):
+                    g.append(p)
+                else:
+                    groups.append([p])
+
+            def group_height(g):
+                # paragraph spacing inside one Text cannot be expressed, so lines follow each other evenly
+                return sum(p["n_lines"] for p in g) * g[0]["pitch"]
+
+            total = sum(group_height(g) for g in groups)
+            total += sum(g[0]["before"] for g in groups[1:]) + sum(g[-1]["after"] for g in groups[:-1])
+            box_top, box_bottom = uy(top + t_in), uy(top + height - b_in)
+            y_top_anchored = anchor == MSO_ANCHOR.TOP or (anchor is None and len(paras) > 1)
+            if y_top_anchored:
+                y = box_top
+            elif anchor == MSO_ANCHOR.BOTTOM:
+                y = box_bottom + total
+            else:
+                y = (box_top + box_bottom) / 2 + total / 2
+            x_left, x_right = ux(left + l_in), ux(left + width - r_in)
+            for gi, g in enumerate(groups):
+                if gi:
+                    y -= g[0]["before"]
+                block_h = group_height(g)
+                ty = y - block_h / 2
+                y -= block_h + g[-1]["after"]
+                text = "\n".join(p["text"] for p in g)
+                styles, colors = [], []
+                for pi, p in enumerate(g):
+                    styles += p["styles"] + ([p["styles"][-1]] if pi < len(g) - 1 else [])
+                    colors += [p["color"]] * (len(p["text"]) + (1 if pi < len(g) - 1 else 0))
+
+                def main(values):
+                    counts: dict = {}
+                    for ch, v in zip(text, values):
+                        if not ch.isspace():
+                            counts[v] = counts.get(v, 0) + 1
+                    return max(counts, key=counts.get)
+
+                def ranges(values, base):
+                    out, i = [], 0
+                    while i < len(text):
+                        j = i
+                        while j < len(text) and values[j] == values[i]:
+                            j += 1
+                        if values[i] != base and text[i:j].strip():
+                            out.append((i, j, values[i]))
+                        i = j
+                    return out
+
+                color = main(colors)
+                bold = main([st[0] for st in styles])
+                italic = main([st[1] for st in styles])
+                n_lines = text.count("\n") + 1
+                fs = g[0]["fs"]
                 kw = [f"font_size={_num(fs, 1)}", f'color="{color}"']
-                if font:
-                    kw.append(f'font="{font}"')
+                if g[0]["font"]:
+                    kw.append(f'font="{g[0]["font"]}"')
                 if bold:
                     kw.append('weight="BOLD"')
                 if italic:
                     kw.append('slant="ITALIC"')
-                align = para.alignment
-                # place: one paragraph per Text; stack paragraphs top-down inside the box
-                n = len(paras)
-                n_lines = wrapped.count("\n") + 1
-                line_h = em_px * 1.25 / 1280 * FW
-                block_h = n_lines * line_h
-                if n == 1:
-                    ty = cy
-                    if anchor == MSO_ANCHOR.TOP:
-                        ty = uy(top) - block_h / 2 - 0.05
-                    elif anchor == MSO_ANCHOR.BOTTOM:
-                        ty = uy(top + height) + block_h / 2 + 0.05
-                else:
-                    ty = uy(top) - (pi + 0.5) * line_h * 1.2 - 0.05
-                pos = f".move_to(({_num(cx)}, {_num(ty)}, 0))"
-                if align == PP_ALIGN.LEFT or align is None and n > 1:
-                    pos += f".align_to(({_num(ux(left) + 0.08)}, 0, 0), LEFT)"
+                t2c = ranges(colors, color)
+                t2w = [(i, j, "BOLD" if v else "NORMAL") for i, j, v in ranges([st[0] for st in styles], bold)]
+                t2s = [(i, j, "ITALIC" if v else "NORMAL") for i, j, v in ranges([st[1] for st in styles], italic)]
+                for key, rs in (("t2c", t2c), ("t2w", t2w), ("t2s", t2s)):
+                    if rs:
+                        kw.append(f"{key}={{" + ", ".join(f'"[{i}:{j}]": "{v}"' for i, j, v in rs) + "}")
+                if n_lines > 1:
+                    # manim's line pitch is font_size * (1 + line_spacing) / 96 units
+                    kw.append(f"line_spacing={_num(g[0]['pitch'] * 96 / fs - 1, 2)}")
+                align = g[0]["align"]
+                pos = f".move_to(({_num((x_left + x_right) / 2)}, {_num(ty)}, 0))"
+                if gi == 0 and y_top_anchored:
+                    # pin the top of the text to the top of the box: no height estimate involved
+                    pos = (f".move_to(({_num((x_left + x_right) / 2)}, 0, 0))"
+                           f".align_to((0, {_num(box_top - g[0]['cap_drop'])}, 0), UP)")
+                if align == PP_ALIGN.LEFT or align is None and len(paras) > 1:
+                    pos += f".align_to(({_num(x_left)}, 0, 0), LEFT)"
                 elif align == PP_ALIGN.RIGHT:
-                    pos += f".align_to(({_num(ux(left + width) - 0.08)}, 0, 0), RIGHT)"
-                lines.append(f'self.add(Text({wrapped!r}, {", ".join(kw)}){pos}{rot_code})  # manimble')
+                    pos += f".align_to(({_num(x_right)}, 0, 0), RIGHT)"
+                lines.append(f'self.add(Text({text!r}, {", ".join(kw)}){pos}{rot_code})  # manimble')
 
     for si, slide in enumerate(prs.slides, start=1):
         if progress:

@@ -45,5 +45,13 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>NSAppleEventsUsageDescription</key><string>Manimble uses Keynote to import and export Keynote files.</string>
 </dict></plist>
 PL
-codesign -s - --force "$APP" >/dev/null 2>&1 || true
+# Sign with a stable local identity when one exists (tools/make_signing_identity.sh).
+# macOS ties folder-access grants (Desktop, Documents, ...) to the signature;
+# an ad-hoc signature changes on every build, so each rebuild would re-prompt.
+SIGN_ID="${MANIMBLE_SIGN_IDENTITY:-Manimble Local Signing}"
+if security find-identity -p codesigning | grep -q "\"$SIGN_ID\""; then
+  codesign -s "$SIGN_ID" --force "$APP" >/dev/null 2>&1 || codesign -s - --force "$APP" >/dev/null 2>&1 || true
+else
+  codesign -s - --force "$APP" >/dev/null 2>&1 || true
+fi
 echo "built $APP"

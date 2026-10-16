@@ -54,6 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exportMenu.addItem(item("PowerPoint (.pptx)…", #selector(MainController.exportPowerPoint), "", []))
         exportMenu.addItem(item("Keynote (.key)…", #selector(MainController.exportKeynote), "", []))
         exportMenu.addItem(item("PDF…", #selector(MainController.exportPDFPressed), "", []))
+        exportMenu.addItem(.separator())
+        exportMenu.addItem(item("Python (whole deck in one file)…", #selector(MainController.exportPythonPressed), "", []))
         let exportItem = NSMenuItem(title: "Export To", action: nil, keyEquivalent: ""); exportItem.submenu = exportMenu
         add("File", [
             item("Open Deck or Project…", #selector(MainController.openDeck), "o"),
@@ -78,24 +80,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
         ])
         let shapes = NSMenu(title: "Shape")
-        for (title, kind) in [("Rectangle", "rectangle"), ("Rounded Rectangle", "rounded"), ("Circle", "circle"),
-                              ("Triangle", "triangle"), ("Line", "line"), ("Arrow", "arrow")] {
+        for (title, kind) in [("Rectangle", "rectangle"), ("Rounded Rectangle", "rounded"), ("Circle", "circle"), ("Ellipse", "ellipse"),
+                              ("Triangle", "triangle"), ("Line", "line"), ("Arrow", "arrow"), ("Double Arrow", "darrow")] {
             let mi = NSMenuItem(title: title, action: #selector(MainController.insertShapePressed(_:)), keyEquivalent: "")
             mi.representedObject = kind
             shapes.addItem(mi)
         }
         let shapeItem = NSMenuItem(title: "Shape", action: nil, keyEquivalent: ""); shapeItem.submenu = shapes
+        let draw = NSMenu(title: "Draw")
+        for (title, kind) in [("Line", "line"), ("Arrow", "arrow"), ("Double Arrow", "darrow"), ("Rectangle", "rectangle"), ("Ellipse", "ellipse")] {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.drawToolMenu(_:)), keyEquivalent: "")
+            mi.representedObject = kind
+            draw.addItem(mi)
+        }
+        draw.addItem(.separator())
+        let pen = NSMenuItem(title: "Pen (freehand)", action: #selector(MainController.drawToolMenu(_:)), keyEquivalent: "p")
+        pen.keyEquivalentModifierMask = [.command, .shift]; pen.representedObject = "pen"
+        draw.addItem(pen)
+        let penColors = NSMenu(title: "Pen Color")
+        for (title, hex) in MainActor.assumeIsolated({ MainController.penSwatches }) {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.penColorChosen(_:)), keyEquivalent: "")
+            mi.representedObject = hex
+            penColors.addItem(mi)
+        }
+        penColors.addItem(.separator())
+        penColors.addItem(item("Other…", #selector(MainController.penColorPanel), "", []))
+        let penColorItem = NSMenuItem(title: "Pen Color", action: nil, keyEquivalent: ""); penColorItem.submenu = penColors
+        draw.addItem(penColorItem)
+        let drawItem = NSMenuItem(title: "Draw (drag on the slide)", action: nil, keyEquivalent: ""); drawItem.submenu = draw
         add("Insert", [
             item("Text", #selector(MainController.insertTextPressed), "t", [.command, .shift]),
             item("Formula…", #selector(MainController.insertFormulaPressed), "e", [.command, .shift]),
             shapeItem,
+            drawItem,
             item("Table…", #selector(MainController.insertTablePressed), "", []),
             item("Image…", #selector(MainController.insertImagePressed), "i", [.command, .shift]),
+            item("Extract Elements from Image…", #selector(MainController.extractElementsPressed), "", []),
+            .separator(),
+            item("Slide Numbers…", #selector(MainController.slideNumbersPressed), "", []),
         ])
+        let layouts = NSMenu(title: "New Slide")
+        for (title, layout, key) in MainActor.assumeIsolated({ MainController.slideLayouts }) {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.newSlideLayout(_:)), keyEquivalent: key)
+            mi.keyEquivalentModifierMask = key.isEmpty ? [] : [.command, .shift]
+            mi.representedObject = layout
+            layouts.addItem(mi)
+        }
+        let newSlideItem = NSMenuItem(title: "New Slide", action: nil, keyEquivalent: ""); newSlideItem.submenu = layouts
         add("Slide", [
-            item("New Slide", #selector(MainController.newSlide), "n", [.command, .shift]),
+            newSlideItem,
             item("Duplicate Slide", #selector(MainController.duplicateSlide), "d"),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
+            item("Hide Slide", #selector(MainController.toggleHideSlide), "h", [.command, .shift]),
             item("Skip Slide", #selector(MainController.toggleSkipSlide), "", []),
             .separator(),
             item("Move Slide Up", #selector(MainController.moveSlideUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.command, .option]),
@@ -106,22 +142,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Previous Build", #selector(MainController.prevStop), "[", [.command]),
             item("Next Build", #selector(MainController.nextStop), "]", [.command]),
         ])
+        let highlight = NSMenu(title: "Highlight")
+        for (title, hex) in MainActor.assumeIsolated({ MainController.highlightSwatches }) {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.highlightChosen(_:)), keyEquivalent: "")
+            mi.representedObject = hex
+            highlight.addItem(mi)
+        }
+        let highlightItem = NSMenuItem(title: "Highlight", action: nil, keyEquivalent: ""); highlightItem.submenu = highlight
+        let spacing = NSMenu(title: "Line Spacing")
+        for (title, v) in [("1.0", 1.0), ("1.15", 1.15), ("1.5", 1.5), ("2.0", 2.0), ("2.5", 2.5), ("3.0", 3.0)] as [(String, Double?)] + [("Custom…", nil)] {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.spacingMenuChosen(_:)), keyEquivalent: "")
+            mi.representedObject = v
+            spacing.addItem(mi)
+        }
+        let spacingItem = NSMenuItem(title: "Line Spacing", action: nil, keyEquivalent: ""); spacingItem.submenu = spacing
+        let columns = NSMenu(title: "Columns")
+        for (title, n) in [("One", 1), ("Two", 2), ("Three", 3), ("Four", 4)] {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.columnsMenuChosen(_:)), keyEquivalent: "")
+            mi.representedObject = n
+            columns.addItem(mi)
+        }
+        let columnsItem = NSMenuItem(title: "Columns", action: nil, keyEquivalent: ""); columnsItem.submenu = columns
         add("Format", [
             item("Bold", #selector(MainController.formatBold), "b"),
             item("Italic", #selector(MainController.formatItalic), "i"),
+            item("Underline", #selector(MainController.formatUnderline), "u"),
+            item("Strikethrough", #selector(MainController.formatStrikethrough), "", []),
+            item("Superscript", #selector(MainController.formatSuperscript), "+", [.command, .shift]),
+            item("Subscript", #selector(MainController.formatSubscript), "_", [.command, .shift]),
             .separator(),
             item("Bigger", #selector(MainController.formatBigger), "=", [.command, .option]),
             item("Smaller", #selector(MainController.formatSmaller), "-", [.command, .option]),
+            highlightItem,
+            item("Clear Formatting", #selector(MainController.clearFormatting), "", []),
+            .separator(),
+            item("Bulleted List", #selector(MainController.toggleBullets), "8", [.command, .shift]),
+            item("Numbered List", #selector(MainController.toggleNumbering), "7", [.command, .shift]),
+            item("Increase Indent", #selector(MainController.increaseIndent), "]", [.command, .shift]),
+            item("Decrease Indent", #selector(MainController.decreaseIndent), "[", [.command, .shift]),
+            .separator(),
+            item("Align Left", #selector(MainController.alignLeft), "l"),
+            item("Center", #selector(MainController.alignCenter), "e"),
+            item("Align Right", #selector(MainController.alignRight), "r"),
+            item("Justify", #selector(MainController.alignJustify), "j"),
+            spacingItem,
+            columnsItem,
+            .separator(),
+            item("Background…", #selector(MainController.formatBackground), "", []),
+            .separator(),
+            item("Apply Dark Mode to Deck…", #selector(MainController.applyDarkMode), "", []),
+            item("Apply Inverted Colors to Deck…", #selector(MainController.applyInvertColors), "", []),
         ])
         add("View", [
-            item("Show Objects", #selector(MainController.toggleObjects), "j"),
+            item("Show Objects", #selector(MainController.toggleObjects), "j", [.command, .option]),
+            item("Grid Lines", #selector(MainController.toggleGrid), "g", [.command, .option]),
+            item("Snap to Objects", #selector(MainController.toggleSnap), "s", [.command, .option]),
+            item("Add Vertical Guide", #selector(MainController.addVerticalGuide), "", []),
+            item("Add Horizontal Guide", #selector(MainController.addHorizontalGuide), "", []),
+            item("Clear Guides", #selector(MainController.clearGuides), "", []),
             item("Show Unused Slides", #selector(MainController.toggleUnusedSlides), "", []),
+            item("Speaker Notes", #selector(MainController.toggleNotesPane), "k", [.command, .option]),
+            .separator(),
+            item("Dark Mode", #selector(MainController.toggleDarkMode), "d", [.command, .control, .shift]),
+            item("Invert Colors", #selector(MainController.toggleInvertColors), "i", [.command, .control, .shift]),
+            item("Recolor Images Too", #selector(MainController.toggleDarkImages), "", []),
             .separator(),
             item("Zoom In", #selector(MainController.zoomIn), "="),
             item("Zoom Out", #selector(MainController.zoomOut), "-"),
             item("Fit in Window", #selector(MainController.zoomFit), "0"),
             .separator(),
             item("Show Terminal", #selector(MainController.toggleTerminal), "t", [.command, .option]),
+            item("New Terminal", #selector(MainController.newTerminal), "t", [.command, .option, .shift]),
+            item("Split Terminal", #selector(MainController.splitTerminal), "\\"),
+            item("Terminal Starts in Working Copy", #selector(MainController.toggleTerminalInWorkCopy), "", []),
             .separator(),
             item("Hide/Show Slide Navigator", #selector(MainController.toggleNavigator), "n", [.command, .option]),
             item("Hide/Show Inspector and Source", #selector(MainController.toggleInspector), "i", [.command, .option]),
@@ -129,6 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("Play", [
             item("Play from Current Slide", #selector(MainController.playFromCurrent), "p", [.command, .option]),
             item("Play from Beginning", #selector(MainController.playFromBeginning), "p", [.command, .option, .shift]),
+            item("Presenter View (notes, next slide, timer)", #selector(MainController.presenterView), "p", [.command, .control]),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
             item("Play with Manim Slides (full animations)…", #selector(MainController.present), "", []),

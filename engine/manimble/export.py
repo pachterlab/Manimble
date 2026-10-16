@@ -47,9 +47,10 @@ def build_pptx(app, path: str, builds: bool = False, editable: bool = True, prog
                                       "(pip install python-pptx)."}
     prs = Presentation()
     blank = prs.slide_layouts[6]
-    total = len(app.scenes)
+    scenes = app.visible_scenes()
+    total = len(scenes)
     first = True
-    for si, s in enumerate(app.scenes):
+    for si, s in enumerate(scenes):
         if progress:
             progress(si, total, s["name"])
         sc = app.api_scene(s["name"])
