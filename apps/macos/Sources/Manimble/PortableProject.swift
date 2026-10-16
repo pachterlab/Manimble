@@ -143,11 +143,11 @@ enum PortableProject {
 
     private static func copyDeck(from source: URL, to destination: URL) throws {
         let fm = FileManager.default
-        let excluded: Set<String> = ["slides", "media", "snap", "__pycache__", ".manimble"]
+        // Portable projects include existing Manim Slides builds and their
+        // media so a recipient can present the deck before rendering it again.
+        let excluded: Set<String> = ["snap", "__pycache__", ".manimble"]
         for name in try fm.contentsOfDirectory(atPath: source.path).sorted() where !name.hasPrefix(".") && !excluded.contains(name) {
             let child = source.appendingPathComponent(name)
-            let values = try? child.resourceValues(forKeys: [.isSymbolicLinkKey])
-            if values?.isSymbolicLink == true { continue }
             try copyNode(from: child, to: destination.appendingPathComponent(name))
         }
     }

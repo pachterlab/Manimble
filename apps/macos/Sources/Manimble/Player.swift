@@ -20,8 +20,10 @@ final class SlidePlayer: NSObject {
     private let content = CALayer()
     private let progress = CALayer()
     private let counter = CATextLayer()
-    private var pages: [Page] = []
-    private var index = 0
+    private(set) var pages: [Page] = []
+    private(set) var index = 0
+    /// Called after every page change (the presenter view mirrors the audience display).
+    var onChange: (() -> Void)?
     private var cache: [String: CGImage] = [:]
     private var blackedOut = false
     private var showProgress = true
@@ -57,26 +59,31 @@ final class SlidePlayer: NSObject {
         window.onClick = { [weak self] forward in forward ? self?.next() : self?.previous() }
     }
 
-    /// slides: for each slide the PNG of every build.
-    func play(slides: [[String]], startSlide: Int) {
+    /// slides: for each slide the PNG of every build. `screen`: where the audience display goes; `visible: false`
+    /// keeps the pages and navigation without showing a window (presenter rehearsal on a single screen).
+    func play(slides: [[String]], startSlide: Int, screen: NSScreen? = nil, visible: Bool = true) {
         pages = []
         for (si, builds) in slides.enumerated() {
             for (bi, p) in builds.enumerated() { pages.append(Page(slide: si, build: bi, builds: builds.count, path: p)) }
         }
         guard !pages.isEmpty else { return }
         index = pages.firstIndex(where: { $0.slide >= startSlide }) ?? 0
-        savedOptions = NSApp.presentationOptions
-        NSApp.presentationOptions = [.hideDock, .hideMenuBar]
-        window.setFrame(NSScreen.main?.frame ?? window.frame, display: true)
-        window.makeKeyAndOrderFront(nil)
+        shown = visible
+        if visible {
+            savedOptions = NSApp.presentationOptions
+            NSApp.presentationOptions = [.hideDock, .hideMenuBar]
+            window.setFrame(screen?.frame ?? NSScreen.main?.frame ?? window.frame, display: true)
+            window.makeKeyAndOrderFront(nil)
+        }
         show(animated: false)
-        NSCursor.setHiddenUntilMouseMoves(true)
+        if visible { NSCursor.setHiddenUntilMouseMoves(true) }
     }
+    private var shown = true
+    var slideCount: Int { Set(pages.map { $0.slide }).count }
 
     private func image(_ path: String) -> CGImage? {
         if let c = cache[path] { return c }
-        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        guard let img = DarkMode.cgImage(path: path) else { return nil }
         if cache.count > 12 { cache.removeAll() }
         cache[path] = img
         return img
@@ -104,9 +111,10 @@ final class SlidePlayer: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: w2)
         // warm the neighbours
         for k in [index + 1, index - 1] where pages.indices.contains(k) { _ = image(pages[k].path) }
+        onChange?()
     }
 
-    private func go(_ i: Int) {
+    func go(_ i: Int) {
         guard pages.indices.contains(i), i != index else { return }
         let slideChange = pages[i].slide != pages[index].slide
         index = i
@@ -135,8 +143,21 @@ final class SlidePlayer: NSObject {
     }
 
     func exit() {
-        NSApp.presentationOptions = savedOptions
+        if shown { NSApp.presentationOptions = savedOptions }
         window.orderOut(nil)
         onExit?()
     }
+
+    /// Handle a navigation key from another window (the presenter view). Returns false for keys it does not know.
+    @discardableResult func handleKey(_ e: NSEvent) -> Bool {
+        switch e.keyCode {
+        case 124, 125, 49, 36, 76, 121, 123, 126, 51, 116, 115, 119, 53: key(e); return true
+        default:
+            switch e.charactersIgnoringModifiers?.lowercased() {
+            case "q", "b", ".", "p", "n": key(e); return true
+            default: return false
+            }
+        }
+    }
+    var isBlackedOut: Bool { blackedOut }
 }

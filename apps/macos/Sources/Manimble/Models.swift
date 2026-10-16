@@ -8,12 +8,14 @@ struct SceneSummary: Decodable {
     var thumb: String?
     var stops: Int?
     var error: String?
+    var hidden: Bool?                // in the show's order but left out of slideshows and exports
 }
 
 struct StateInfo: Decodable {
     var deck: String
     var path: String
     var scenes: [SceneSummary]
+    var unusedScenes: [SceneSummary]
     var canUndo: Bool
     var canRedo: Bool
     var undoLabel: String
@@ -41,8 +43,17 @@ struct SharedInfo: Decodable {
     var rel: String
 }
 
+struct FormatInfo: Decodable {
+    var underline: Bool?
+    var strike: Bool?
+    var highlight: String?           // "#RRGGBB", "on" (a named colour) or nil
+    var align: String?               // left | center | right
+    var columns: Int?
+    var lineSpacing: Double?         // manim line_spacing (0.3 = default)
+}
+
 struct ObjInfo: Decodable {
-    var kind: String                 // text | tex | image
+    var kind: String                 // text | tex | image | line | shape | table
     var value: String
     var fontSize: Double?
     var color: String?
@@ -56,7 +67,11 @@ struct ObjInfo: Decodable {
     var textNote: String?
     var shared: SharedInfo?
     var image: String?
+    var imagePath: String?           // absolute path of the picture file (images)
     var shape: String?
+    var rotation: Double?            // degrees, from the object's own rotate() calls
+    var dims: [Double]?              // manim width/height in frame pixels
+    var format: FormatInfo?
 }
 
 struct ChangedLines: Decodable {
@@ -81,6 +96,7 @@ struct SceneData: Decodable {
     var objects: [String: ObjInfo]?
     var source: SourceInfo?
     var error: String?
+    var notes: String?               // speaker notes (self.next_slide(notes=...) at the top of construct)
 }
 
 struct EditResult: Decodable {
@@ -88,6 +104,13 @@ struct EditResult: Decodable {
     var message: String?
     var error: String?
     var siblings: Int?
+    var changed: ChangedLines?
+}
+
+struct SourceEditResult: Decodable {
+    var ok: Bool
+    var message: String?
+    var error: String?
     var changed: ChangedLines?
 }
 
@@ -154,6 +177,24 @@ struct DeckSlide: Decodable {
     var scene: String
     var pages: [String]
     var error: String?
+    var notes: String?
+}
+
+struct PageNumberInfo: Decodable {
+    var on: Bool
+    var pos: String                  // DR | DOWN | DL
+    var start: Int
+    var skip: Bool
+    var total: Bool
+    var size: Int
+}
+
+struct NotesResult: Decodable {
+    var ok: Bool?
+    var text: String?
+    var message: String?
+    var error: String?
+    var changed: ChangedLines?
 }
 
 struct DeckPages: Decodable {

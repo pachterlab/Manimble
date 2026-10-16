@@ -21,7 +21,9 @@ from __future__ import annotations
 import hashlib
 import importlib
 import itertools
+import linecache
 import json
+import math
 import os
 import sys
 import traceback
@@ -31,6 +33,10 @@ import functools
 DECK = os.path.realpath(sys.argv[1])
 os.chdir(DECK)
 sys.path.insert(0, DECK)
+# Always compile the deck from source: Python validates cached bytecode by mtime (seconds) and size, so an edit that
+# keeps a file's length (e.g. one digit in a coordinate) within the same second would otherwise run the old code.
+sys.dont_write_bytecode = True
+sys.pycache_prefix = os.path.join(os.environ.get("TMPDIR", "/tmp"), "manimble-no-pycache")
 MEDIA_DIR = os.path.abspath(os.environ.get("MANIMBLE_MEDIA_DIR", os.path.join(DECK, "..", "media")))
 MEDIA_DIR_REAL = os.path.realpath(MEDIA_DIR)
 DEPENDENCIES: set[str] = set()
@@ -43,9 +49,13 @@ import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Camera, ORIGIN  # noqa: E402
+from manim import Paragraph, BackgroundRectangle, VMobject  # noqa: E402
 from manim import (FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,  # noqa: E402
                    GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform,
-                   TransformFromCopy, AnimationGroup, LaggedStart)
+                   TransformFromCopy, AnimationGroup, LaggedStart, Transform, MoveToTarget,
+                   Indicate, Flash, Circumscribe, Wiggle, FocusOn)
+from manim.animation.transform import _MethodAnimation  # noqa: E402
+from manim.animation.transform_matching_parts import TransformMatchingAbstractBase  # noqa: E402
 from manim.utils.family import extract_mobject_family_members  # noqa: E402
 from manim.utils.iterables import list_update  # noqa: E402
 from manim.mobject.mobject import _AnimationBuilder  # noqa: E402
@@ -199,11 +209,24 @@ def _wrap_method(cls, name):
     setattr(cls, name, wrapper)
 
 
+def _all_subclasses(cls):
+    out, stack = [], [cls]
+    while stack:
+        for sub in stack.pop().__subclasses__():
+            if sub not in out:
+                out.append(sub)
+                stack.append(sub)
+    return out
+
+
 for _m in LAYOUT_METHODS:
     _wrap_method(Mobject, _m)
-
-from manim import Line as _Line  # noqa: E402
-_wrap_method(_Line, "put_start_and_end_on")   # Line overrides the Mobject version
+# Subclasses that override a layout method (VMobject.rotate / .scale, Line.put_start_and_end_on, Table.scale, ...)
+# would otherwise call the Mobject wrapper from manim's own code, where the deck frame is no longer visible.
+for _cls in _all_subclasses(Mobject):
+    for _m in LAYOUT_METHODS:
+        if _m in _cls.__dict__:
+            _wrap_method(_cls, _m)
 
 _orig_add = Mobject.add
 
@@ -241,7 +264,8 @@ def _ab_getattr(self, method_name):
 _AnimationBuilder.__getattr__ = _ab_getattr
 
 
-def _track(kind, cls, value_of):
+def _track(kind, cls, value_of, only=None):
+    """Report every construction of cls by deck code; `only(mobject, source_line)` can restrict that further."""
     orig_init = cls.__init__
 
     @functools.wraps(orig_init)
@@ -257,12 +281,19 @@ def _track(kind, cls, value_of):
             stack = project_stack(caller)
             if not stack or any(fr["func"] == "setup" for fr in stack):
                 return
+            linecache.checkcache(caller.f_code.co_filename)       # the deck changes between renders
+            source_line = linecache.getline(caller.f_code.co_filename, caller.f_lineno)
+            if "# manimble background" in source_line:
+                return            # a slide background is part of the backdrop, not an editable object
+            if only is not None and not only(self, source_line):
+                return
             self._sl_id = len(TRACKED)
             self._sl_kind = kind
             self._sl_frames = stack
             self._sl_value = value_of(self, a, k)
             self._sl_born = next(SEQ)
-            self._sl_font0 = float(self.font_size) if kind in ("text", "tex") else None
+            fs = text_attr(self, "font_size") if kind in ("text", "tex") else None
+            self._sl_font0 = float(fs) if fs is not None else None
             TRACKED.append(self)
         except Exception:
             traceback.print_exc()
@@ -271,6 +302,8 @@ def _track(kind, cls, value_of):
 
 
 _track("text", Text, lambda s, a, k: str(a[0]) if a else str(k.get("text", s.text)))
+# Paragraph (one positional string per line, alignment=...) is how Manimble writes aligned multi-line text.
+_track("text", Paragraph, lambda s, a, k: "\n".join(str(x) for x in a))
 _track("tex", MathTex, lambda s, a, k: "".join(s.tex_strings))
 def _track_shapes():
     import inspect
@@ -309,6 +342,9 @@ def _track_tables():
 _track_shapes()
 _track_tables()
 _track("image", ImageMobject, lambda s, a, k: str(a[0]) if a else str(k.get("filename_or_array", "")))
+# A freehand pen stroke Manimble wrote (`VMobject(...).set_points_smoothly(...)  # manimble pen`): a plain VMobject,
+# tracked only on that marked line so groups and the VMobjects inside Text and shapes stay untouched.
+_track("shape", VMobject, lambda s, a, k: "Pen", only=lambda s, line: type(s) is VMobject and "# manimble pen" in line)
 # Tex (plain LaTeX text) is a MathTex subclass in manim and is tracked as such.
 
 # ------------------------------------------------------------ fake Slide
@@ -322,6 +358,8 @@ class Slide(Scene):
     _sl_dirty = False
 
     def next_slide(self, *a, **k):
+        if not self._sl_dirty and not _STATE["stops"]:
+            return            # options for the first build (e.g. notes=...) before anything is drawn: not a stop
         stack = project_stack(sys._getframe(1))
         self._sl_stop(stack[-1] if stack else None)
 
@@ -338,18 +376,24 @@ class Slide(Scene):
         return super().play(*a, **k)
 
     def _fast_play(self, anims):
-        """Jump straight to the end state of simple animations (no begin()/deep copies).
+        """Jump straight to the end state of the animations (no begin()/deep copies/interpolation).
 
-        Only for animation types whose end state is just "mobject added / removed / replaced";
-        anything else (Transform, .animate, updaters ...) goes through the real pipeline."""
+        Covered: animations whose end state is "mobject added / removed / replaced", `.animate` and
+        MoveToTarget (the mobject takes its prepared target), Transform (the mobject takes the target's
+        shape), the TransformMatching family (source out, target in) and indications that leave the
+        slide as it was. Anything else (updaters, Homotopy, custom animations ...) goes through the real
+        pipeline, which deep-copies every mobject it animates and is the slow part of a re-render."""
         flat = []
 
         def walk(x):
-            if isinstance(x, (AnimationGroup, LaggedStart)):
+            if isinstance(x, _AnimationBuilder):
+                x = x.build()              # `m.animate.shift(...)` arrives unbuilt; play() would build it the same way
+            if type(x) in SIMPLE_ANIMS or type(x) in TARGET_ANIMS or type(x) is Transform \
+                    or type(x) in NOOP_ANIMS or isinstance(x, TransformMatchingAbstractBase):
+                flat.append(x)
+            elif isinstance(x, (AnimationGroup, LaggedStart)):
                 for c in x.animations:
                     walk(c)
-            elif type(x) in SIMPLE_ANIMS:
-                flat.append(x)
             else:
                 raise _NotSimple
 
@@ -364,18 +408,40 @@ class Slide(Scene):
         for a in flat:
             if a.mobject.updaters:
                 return False
+            if type(a) in TARGET_ANIMS and getattr(a.mobject, "target", None) is None:
+                return False
         for a in flat:
-            if a.is_introducer():
+            if type(a) in SIMPLE_ANIMS and a.is_introducer():
                 self.add(a.mobject)
-        self.add_mobjects_from_animations(flat)
+        # what manim's play() adds before animating; the TransformMatching group of pieces is removed again
+        self.add_mobjects_from_animations([a for a in flat if not isinstance(a, TransformMatchingAbstractBase)
+                                           and type(a) not in NOOP_ANIMS])
         for a in flat:
-            if a.is_remover():
-                self.remove(a.mobject)
-            if getattr(a, "replace_mobject_with_target_in_scene", False):
-                self.replace(a.mobject, a.target_mobject)
+            if type(a) in TARGET_ANIMS:
+                # manim's _MethodAnimation.finish(): the methods for their side effects, then the target's geometry
+                for item in getattr(a, "methods", ()):
+                    item.method.__func__(a.mobject, *item.args, **item.kwargs)
+                a.mobject.become(a.mobject.target)
+            elif type(a) is Transform:
+                target = a.target_mobject
+                # become() aligns both structures; keep the real target untouched like Transform.begin() does
+                a.mobject.become(target if _same_shape(a.mobject, target) else target.copy())
+                if a.replace_mobject_with_target_in_scene:
+                    self.replace(a.mobject, target)
+            elif isinstance(a, TransformMatchingAbstractBase):
+                self.remove(*a.to_remove)
+                self.add(a.to_add)
+            elif type(a) in NOOP_ANIMS:
+                pass
+            else:
+                if a.is_remover():
+                    self.remove(a.mobject)
+                if getattr(a, "replace_mobject_with_target_in_scene", False):
+                    self.replace(a.mobject, a.target_mobject)
         return True
 
     def wait(self, *a, **k):
+        self._sl_dirty = True          # a wait() counts as an animation for manim-slides
         return super().wait(*a, **k)
 
     def add(self, *a, **k):
@@ -497,6 +563,15 @@ class _NotSimple(Exception):
 REAL_PLAY = bool(os.environ.get("MANIMBLE_REAL_PLAY"))
 SIMPLE_ANIMS = {FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,
                 GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform}
+TARGET_ANIMS = {_MethodAnimation, MoveToTarget}        # the mobject ends up as its prepared .target
+NOOP_ANIMS = {Indicate, Flash, Circumscribe, Wiggle, FocusOn}   # there-and-back / self-removing effects
+
+
+def _same_shape(a, b) -> bool:
+    """True when become() can copy b's points into a without inserting submobjects into either."""
+    if a.has_points() != b.has_points() or len(a.submobjects) != len(b.submobjects):
+        return False
+    return all(_same_shape(x, y) for x, y in zip(a.submobjects, b.submobjects))
 
 fake = types.ModuleType("manim_slides")
 fake.Slide = Slide
@@ -505,10 +580,18 @@ sys.modules["manim_slides"] = fake
 
 # ------------------------------------------------------------------ runner
 
+_realpaths: dict = {}
+
+
 def purge_project_modules():
     for name, mod in list(sys.modules.items()):
         fn = getattr(mod, "__file__", None)
-        if fn and in_project(os.path.realpath(fn)):
+        if not fn:
+            continue
+        real = _realpaths.get(fn)        # resolving ~1200 installed modules each render costs 60 ms
+        if real is None:
+            real = _realpaths[fn] = os.path.realpath(fn)
+        if in_project(real):
             del sys.modules[name]
     importlib.invalidate_caches()
 
@@ -516,11 +599,42 @@ def purge_project_modules():
 def hexcolor(m):
     try:
         for sub in m.get_family():
+            if isinstance(sub, BackgroundRectangle):
+                continue              # a text highlight, not the text's colour
             if sub.has_points():
                 return sub.get_color().to_hex()
     except Exception:
         pass
     return None
+
+
+def text_attr(m, name):
+    """font_size / font / weight / slant of a Text, or of the Text inside a Paragraph."""
+    v = getattr(m, name, None)
+    if v is None and getattr(m, "lines_text", None) is not None:
+        v = getattr(m.lines_text, name, None)
+    return v
+
+
+def dims_px(m):
+    """Manim's width and height of the object (all points, like stretch_to_fit_*), in frame pixels."""
+    try:
+        fw, fh = config.frame_width, config.frame_height
+        return [float(m.width) / fw * config.pixel_width, float(m.height) / fh * config.pixel_height]
+    except Exception:
+        return None
+
+
+def rotation_deg(m) -> float:
+    """Total angle of the object's own rotate() calls, in degrees (0-360)."""
+    total = 0.0
+    for e in EVENTS.get(id(m), (None, []))[1]:
+        if e["method"] != "rotate":
+            continue
+        a = e["args"][0] if e["args"] else e["kwargs"].get("angle")
+        if isinstance(a, (int, float)) and not isinstance(a, bool):
+            total += float(a)
+    return round(math.degrees(total) % 360.0, 2)
 
 
 def shape_color(m):
@@ -589,12 +703,15 @@ def render(req):
         objects[m._sl_id] = {
             "kind": m._sl_kind,
             "value": m._sl_value,
-            "font_size": getattr(m, "font_size", None) if m._sl_kind in ("text", "tex") else None,
+            "font_size": text_attr(m, "font_size") if m._sl_kind in ("text", "tex") else None,
             "font0": getattr(m, "_sl_font0", None),
-            "font": getattr(m, "font", None) if m._sl_kind == "text" else None,
-            "weight": getattr(m, "weight", None) if m._sl_kind == "text" else None,
-            "slant": getattr(m, "slant", None) if m._sl_kind == "text" else None,
+            "font": text_attr(m, "font") if m._sl_kind == "text" else None,
+            "weight": text_attr(m, "weight") if m._sl_kind == "text" else None,
+            "slant": text_attr(m, "slant") if m._sl_kind == "text" else None,
             "color": (hexcolor(m) if m._sl_kind in ("text", "tex") else shape_color(m)) if m._sl_kind != "image" else None,
+            "path": str(getattr(m, "path", "")) if m._sl_kind == "image" and getattr(m, "path", None) else None,
+            "rotation": rotation_deg(m),
+            "dims": dims_px(m),
             "frames": m._sl_frames,
             "events": collect_events(m),
         }
@@ -700,6 +817,11 @@ def main():
                 res = sprite(req)
             elif req["cmd"] == "latex":
                 res = latex(req)
+            elif req["cmd"] == "colors":
+                # manim's named colours (WHITE, BLUE_C, ORANGE, ...) as #RRGGBB
+                import manim.utils.color as mc
+                res = {"colors": {k: v.to_hex().upper()[:7] for k, v in vars(mc).items()
+                                  if k.isupper() and isinstance(v, mc.ManimColor)}}
             elif req["cmd"] == "ping":
                 res = {"ok": True}
             else:

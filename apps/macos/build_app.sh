@@ -21,6 +21,7 @@ swift build -c release \
   --cache-path "$ROOT/.build/swift-cache" \
   --config-path "$ROOT/.build/swift-config" \
   --security-path "$ROOT/.build/swift-security"
+VERSION="$(cat "$ROOT/../../VERSION")"
 APP="$ROOT/Manimble.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -38,12 +39,20 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>CFBundleExecutable</key><string>Manimble</string>
 <key>CFBundleIconFile</key><string>manimble</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>0.2.0</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>$VERSION</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Manimble uses Keynote to import and export Keynote files.</string>
 </dict></plist>
 PL
-codesign -s - --force "$APP" >/dev/null 2>&1 || true
+# Sign with a stable local identity when one exists (tools/make_signing_identity.sh).
+# macOS ties folder-access grants (Desktop, Documents, ...) to the signature;
+# an ad-hoc signature changes on every build, so each rebuild would re-prompt.
+SIGN_ID="${MANIMBLE_SIGN_IDENTITY:-Manimble Local Signing}"
+if security find-identity -p codesigning | grep -q "\"$SIGN_ID\""; then
+  codesign -s "$SIGN_ID" --force "$APP" >/dev/null 2>&1 || codesign -s - --force "$APP" >/dev/null 2>&1 || true
+else
+  codesign -s - --force "$APP" >/dev/null 2>&1 || true
+fi
 echo "built $APP"
