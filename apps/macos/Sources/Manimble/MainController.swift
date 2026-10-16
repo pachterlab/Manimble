@@ -60,6 +60,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var sideScroll: NSScrollView?
     var player: SlidePlayer?
     var presenter: PresenterController?
+    var animatedPlayer: AnimatedPlayer?
+    private var presentFrom = 0              // scene (order.txt index) the animated show starts at
+    private var presentWithPresenter = false // the animated show opens in Presenter View
     var animationPreview: AnimationPreviewView?
     /// Speaker notes of the slide on screen, below the canvas (View ▸ Speaker Notes).
     let notesBox = MultilineTextBox(string: "", maxLines: 4)
@@ -720,13 +723,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 if let onlyScene = ev["onlyScene"] as? String {
                     title = "Building \(onlyScene)’s animations \(done)/\(total)"
                 } else {
-                    title = "Building slides for Manim Slides \(done)/\(total)"
+                    title = "Building animations \(done)/\(total): \(ev["scene"] as? String ?? "")"
                 }
                 busyPill.show(title, symbol: nil, tint: nil, spinning: true)
-            case "playing":
-                busyPill.hide(); toast((ev["onlyScene"] as? String) == nil ? "Manim Slides presenter launched" : "Playing this slide’s animations")
+            case "ready":
+                busyPill.hide()
+                guard let data = try? JSONSerialization.data(withJSONObject: ev),
+                      let d = try? JSONDecoder().decode(PresentDeck.self, from: data), !d.slides.isEmpty else {
+                    toast("No built slides to play", error: true); return
+                }
+                startAnimated(d)
             default:
-                busyPill.hide(); toast(ev["error"] as? String ?? "presenter failed", error: true)
+                busyPill.hide(); toast(ev["error"] as? String ?? "presentation failed", error: true)
             }
             return
         }
@@ -824,6 +832,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if !keepOverrides { canvas.overrides = [:]; canvas.lineOverrides = [:] }
         if ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] != nil { selfTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLAY"] != nil, !testRan { testRan = true; playTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PRESENT"] != nil, !testRan { testRan = true; presentTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"] != nil, !testRan { testRan = true; termTest() }
         if let tcase = ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMULA"], !testRan { testRan = true; formulaTest(tcase) }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] != nil, !testRan { testRan = true; backgroundTest() }
@@ -896,6 +905,53 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             toggleTerminal()
             try? "hidden-after=\(terminal.isHidden)".appendLine(to: dir + "term.log")
         }
+    }
+
+    /// Headless check of the animated player: builds, plays, steps, and logs what it is showing over time.
+    func presentTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] ?? "/tmp") + "/"
+        let log = dir + "present.log"
+        try? "".write(toFile: log, atomically: true, encoding: .utf8)
+        Task { @MainActor in
+            if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PRESENT"] == "presenter" {
+                await presenterAnimatedTest(dir: dir, log: log); return
+            }
+            presentFromBeginning()
+            for _ in 0..<600 { try? await Task.sleep(nanoseconds: 500_000_000); if animatedPlayer != nil { break } }
+            guard let p = animatedPlayer else { try? "no player\n".appendLine(to: log); return }
+            func note(_ what: String) { try? "\(what): \(p.debugState)\n".appendLine(to: log) }
+            for k in 0..<6 { try? await Task.sleep(nanoseconds: 300_000_000); note("t\(k)") }
+            p.next(); note("after next")
+            for k in 0..<6 { try? await Task.sleep(nanoseconds: 300_000_000); note("t\(k)") }
+            p.previous(); try? await Task.sleep(nanoseconds: 600_000_000); note("after previous")
+            p.jump(section: 1); try? await Task.sleep(nanoseconds: 600_000_000); note("after section 2")
+            for _ in 0..<12 { p.next(); try? await Task.sleep(nanoseconds: 120_000_000) }
+            try? await Task.sleep(nanoseconds: 1_000_000_000); note("after 12 rapid nexts")
+            p.exit()
+            try? "exited player=\(animatedPlayer == nil)\n".appendLine(to: log)
+        }
+    }
+
+    /// MANIMBLE_TEST_PRESENT=presenter: Presenter View over the animated show (a rehearsal on one display).
+    private func presenterAnimatedTest(dir: String, log: String) async {
+        presenterViewAnimated()
+        for _ in 0..<600 { try? await Task.sleep(nanoseconds: 500_000_000); if presenter != nil { break } }
+        guard let pc = presenter, let p = pc.source as? AnimatedPlayer else { try? "no presenter\n".appendLine(to: log); return }
+        func note(_ what: String) {
+            try? "\(what): \(p.debugState) live=\(p.livePlayer != nil) state=\(p.playbackState ?? "-") audience=\(p.window.isVisible) panel=\(pc.liveFrameReady)\n".appendLine(to: log)
+        }
+        func shot(_ name: String) {
+            guard let v = pc.window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
+        }
+        try? await Task.sleep(nanoseconds: 400_000_000); note("start"); shot("presenter1.png")
+        try? await Task.sleep(nanoseconds: 1_500_000_000); note("settled")
+        p.next(); try? await Task.sleep(nanoseconds: 300_000_000); note("after next"); shot("presenter2.png")
+        try? await Task.sleep(nanoseconds: 1_500_000_000); note("settled"); shot("presenter3.png")
+        pc.window.close()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? "closed presenter=\(presenter == nil)\n".appendLine(to: log)
     }
 
     func playTest() {
@@ -1680,12 +1736,53 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             } else { self.toast(r?.error ?? "nothing to undo", error: true) }
         }
     }
-    @objc func present() {
+    // MARK: Play with animations (native Manim Slides player)
+
+    /// Frame height the animations are built at (Play ▸ Animation Resolution); 720p unless chosen otherwise.
+    var animationHeight: Int {
+        let h = UserDefaults.standard.integer(forKey: "animationHeight")
+        return [720, 1080, 1440, 2160].contains(h) ? h : 720
+    }
+
+    @objc func animationResolutionChosen(_ m: NSMenuItem) {
+        guard let h = m.representedObject as? Int else { return }
+        UserDefaults.standard.set(h, forKey: "animationHeight")
+        toast(h == 720 ? "Animations build at 720p" : "Animations build at \(h == 2160 ? "4K" : "\(h)p") from the next show (slides rebuild once)")
+    }
+
+    @objc func presentFromCurrent() { present(fromCurrent: true) }
+    @objc func presentFromBeginning() { present(fromCurrent: false) }
+    /// Presenter View (notes, next build, timer) over the animated show, from the current slide.
+    @objc func presenterViewAnimated() { present(fromCurrent: true, withPresenter: true) }
+
+    /// Builds any out-of-date slides with manim, then plays their clips in AnimatedPlayer (see the "ready" event).
+    func present(fromCurrent: Bool, withPresenter: Bool = false) {
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
+        closeAnimationPreview()
+        presentWithPresenter = withPresenter
+        presentFrom = fromCurrent ? (state?.scenes.firstIndex { $0.name == sceneName } ?? 0) : 0
         Task { @MainActor in
             busyPill.show("Preparing presentation…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("present", as: UndoResult.self)
-            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not start the presenter", error: true) }
+            let r = try? await engine.call("present", ["height": animationHeight], as: UndoResult.self)
+            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not start the presentation", error: true) }
         }
+    }
+
+    private func startAnimated(_ d: PresentDeck) {
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
+        if presentWithPresenter {
+            let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+            let other = NSScreen.screens.first { $0 != here }
+            let p = PresenterController(deck: d, startScene: presentFrom, presenterScreen: here, audienceScreen: other)
+            p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            presenter = p
+            if other == nil { toast("One display: this is a rehearsal view. With a second display the audience sees the slides there.") }
+            return
+        }
+        let p = AnimatedPlayer(screen: window.screen ?? NSScreen.main ?? NSScreen.screens[0])
+        p.onExit = { [weak self] in self?.animatedPlayer = nil; self?.window.makeKeyAndOrderFront(nil) }
+        animatedPlayer = p
+        p.play(d, startScene: presentFrom)
     }
 
     @objc func playCurrentSlideAnimations() {
@@ -1694,7 +1791,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         previewScene = name
         Task { @MainActor in
             busyPill.show("Preparing \(name)’s animations…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("animation_preview", ["scene": name], as: UndoResult.self)
+            let r = try? await engine.call("animation_preview", ["scene": name, "height": animationHeight], as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); previewScene = nil; toast(r?.error ?? "Could not play this slide", error: true) }
         }
     }
@@ -1705,7 +1802,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func playFromCurrent() { play(fromCurrent: true) }
 
     func play(fromCurrent: Bool) {
-        guard player == nil, presenter == nil else { return }
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
         closeAnimationPreview()
         Task { @MainActor in
             busyText = "Preparing slideshow…"
@@ -1895,6 +1992,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(toggleDarkImages): item.state = DarkMode.images ? .on : .off; return DarkMode.isOn
         case #selector(applyDarkMode), #selector(applyInvertColors): return state?.scenes.isEmpty == false && player == nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil && presenter == nil
+        case #selector(animationResolutionChosen(_:)):
+            item.state = (item.representedObject as? Int) == animationHeight ? .on : .off
+            return previewScene == nil && player == nil && presenter == nil && animatedPlayer == nil
+        case #selector(presentFromCurrent), #selector(presenterViewAnimated):
+            return sceneName != nil && player == nil && presenter == nil && animatedPlayer == nil
+        case #selector(presentFromBeginning):
+            return state?.scenes.isEmpty == false && player == nil && presenter == nil && animatedPlayer == nil
         case #selector(deleteSlide): return sceneName != nil && ((state?.scenes.count ?? 0) > 1 || selectedSlideIsUnused) && player == nil
         case #selector(undo): return state?.canUndo ?? true
         case #selector(redo): return state?.canRedo ?? true

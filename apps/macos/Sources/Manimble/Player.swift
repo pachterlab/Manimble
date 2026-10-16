@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import QuartzCore
 import ImageIO
 
@@ -6,11 +7,12 @@ import ImageIO
 final class PlayerWindow: NSWindow {
     var onKey: ((NSEvent) -> Void)?
     var onClick: ((Bool) -> Void)?          // true = forward
+    var onMouse: ((NSEvent, Bool) -> Void)? // takes over from onClick when the position matters (true = left button)
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func keyDown(with event: NSEvent) { onKey?(event) }
-    override func mouseDown(with event: NSEvent) { onClick?(true) }
-    override func rightMouseDown(with event: NSEvent) { onClick?(false) }
+    override func mouseDown(with event: NSEvent) { if let m = onMouse { m(event, true) } else { onClick?(true) } }
+    override func rightMouseDown(with event: NSEvent) { if let m = onMouse { m(event, false) } else { onClick?(false) } }
 }
 
 final class SlidePlayer: NSObject {
@@ -22,6 +24,8 @@ final class SlidePlayer: NSObject {
     private let counter = CATextLayer()
     private(set) var pages: [Page] = []
     private(set) var index = 0
+    /// Speaker notes per slide, for Presenter View.
+    var notes: [String] = []
     /// Called after every page change (the presenter view mirrors the audience display).
     var onChange: (() -> Void)?
     private var cache: [String: CGImage] = [:]
@@ -160,4 +164,16 @@ final class SlidePlayer: NSObject {
         }
     }
     var isBlackedOut: Bool { blackedOut }
+}
+
+extension SlidePlayer: PresenterSource {
+    var pageCount: Int { pages.count }
+    var pageIndex: Int { index }
+    var livePlayer: AVPlayer? { nil }
+    var playbackState: String? { nil }
+    func presenterPage(_ i: Int) -> PresenterPage {
+        let p = pages[i]
+        return PresenterPage(slide: p.slide, build: p.build, builds: p.builds,
+                             notes: notes.indices.contains(p.slide) ? notes[p.slide] : "", still: p.path, clip: nil)
+    }
 }

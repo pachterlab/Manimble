@@ -34,8 +34,8 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `page_numbers` | `op` (`get`, `set`, `remove`), and for `set`: `scene` (re-rendered to verify), `pos` (`DR`, `DOWN`, `DL`), `start`, `skip` (no number on the first slide), `total` (`3 / 10`), `size` | `get`: `{on, pos, start, skip, total, size}`; otherwise `{ok, message, changed}`. Writes `self.add(Text("3 / 10", ...).to_corner(DR, ...))  # manimble page number ...` at the top of every construct() of the show; a moved or restyled number keeps its tweaks when renumbered |
 | `notes` | `op` (`get`, `set`), `scene`, `text?` | `get`: `{text}`; `set`: `{ok, message, changed}`. Speaker notes live in `self.next_slide(notes="...")  # manimble notes` as the first statement of construct(), which manim-slides' presenter shows for the first build; empty text removes it |
 | `undo`, `redo` | | `{ok, label}` or `{ok: false, error}` |
-| `present` | `scene?` | `{ok}`; builds out-of-date slides and starts the deck's presenter; with `scene`, builds and presents only that scene |
-| `animation_preview` | `scene` | `{ok}`; builds one scene and sends native playback clips in an event |
+| `present` | `scene?`, `height?` (720, 1080, 1440 or 2160; default 720) | `{ok}`; builds out-of-date slides (`python -m manim render`, no Qt needed) and sends their clips to the app's native player in a `present` `ready` event; with `scene`, only that scene |
+| `animation_preview` | `scene`, `height?` (as for `present`) | `{ok}`; builds one scene and sends native playback clips in an event |
 | `export` | `kind` (`pptx` or `key`), `path`, `builds?`, `editable?` | `{ok}`; progress by events |
 | `export_python` | `path`, `hidden?` (include hidden slides) | `{ok, message, path}`; writes the whole deck as one Python file: helper modules inlined (deck-local imports dropped), then the slides in show order and a `SLIDES` list |
 | `import` | `src` (`.pptx` or `.key`), `dest` (new folder); needs no open deck | `{ok}`; progress by events |
@@ -80,7 +80,7 @@ Every edit is verified by re-rendering and rolled back if later code overrides i
 | event | fields |
 |---|---|
 | `rendered` | `name`: a slide finished re-rendering in the background |
-| `present` | `phase`: `building` (`done`, `total`, `scene`), `playing`, or `error` (`error`); single-scene requests also send `onlyScene` |
+| `present` | `phase`: `building` (`done`, `total`, `scene`), `ready` (`slides`: `[{scene, sceneIndex, number, index, count, kind, file, revFile, loop, autoNext, rate, revRate, notes}]`, `sections`: scene indices, `links`: `{sceneIndex: [[x0, x1, y0, y1, url]]}`), or `error` (`error`); single-scene requests also send `onlyScene` |
 | `animation_preview` | `phase`: `building` (`done`, `total`, `scene`), `ready` (`scene`, `clips: [{path, kind, playbackRate}]`), or `error` (`error`) |
 | `export` | `phase`: `building` (`done`, `total`, `scene`), `keynote`, `done` (`path`), or `error` (`error`) |
 | `darkmode` | `phase`: `building` (`done`, `total`, `scene`, `mode`) |

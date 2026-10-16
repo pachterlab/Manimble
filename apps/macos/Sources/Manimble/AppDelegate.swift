@@ -220,13 +220,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Hide/Show Slide Navigator", #selector(MainController.toggleNavigator), "n", [.command, .option]),
             item("Hide/Show Inspector and Source", #selector(MainController.toggleInspector), "i", [.command, .option]),
         ])
+        let resolution = NSMenu(title: "Animation Resolution")
+        for (title, h) in [("720p (fastest builds)", 720), ("1080p", 1080), ("1440p", 1440), ("4K (slowest builds)", 2160)] {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.animationResolutionChosen(_:)), keyEquivalent: "")
+            mi.representedObject = h
+            resolution.addItem(mi)
+        }
+        let resolutionItem = NSMenuItem(title: "Animation Resolution", action: nil, keyEquivalent: ""); resolutionItem.submenu = resolution
         add("Play", [
             item("Play from Current Slide", #selector(MainController.playFromCurrent), "p", [.command, .option]),
             item("Play from Beginning", #selector(MainController.playFromBeginning), "p", [.command, .option, .shift]),
             item("Presenter View (notes, next slide, timer)", #selector(MainController.presenterView), "p", [.command, .control]),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
-            item("Play with Manim Slides (full animations)…", #selector(MainController.present), "", []),
+            item("Play with Animations from Current Slide", #selector(MainController.presentFromCurrent), "a", [.command, .option]),
+            item("Play with Animations from Beginning", #selector(MainController.presentFromBeginning), "a", [.command, .option, .shift]),
+            item("Presenter View with Animations", #selector(MainController.presenterViewAnimated), "a", [.command, .control]),
+            resolutionItem,
         ])
         let win = NSMenu(title: "Window")
         win.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
