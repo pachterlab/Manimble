@@ -68,6 +68,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var notesMinHeight: NSLayoutConstraint?
     var previewScene: String?
     let stageArea = NSView()
+    /// PowerPoint-style rulers above and left of the slide (View ▸ Ruler).
+    let hRuler = RulerView(.horizontal), vRuler = RulerView(.vertical), rulerCorner = NSView()
+    var rulerThickness: [NSLayoutConstraint] = []
     let terminal = TerminalPanel()
     var centerSplit: NSSplitView?
     var formatBar: FormatBar!
@@ -185,13 +188,27 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             stepsScroll.bottomAnchor.constraint(equalTo: stageColumn.bottomAnchor),
         ])
         stageArea.addSubview(canvas)
+        for v in [hRuler, vRuler, rulerCorner] { stageArea.addSubview(v); v.translatesAutoresizingMaskIntoConstraints = false }
+        rulerCorner.wantsLayer = true; rulerCorner.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        hRuler.canvas = canvas; vRuler.canvas = canvas
         canvas.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            canvas.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor),
+        rulerThickness = [hRuler.heightAnchor.constraint(equalToConstant: RulerView.thickness),
+                          vRuler.widthAnchor.constraint(equalToConstant: RulerView.thickness)]
+        NSLayoutConstraint.activate(rulerThickness + [
+            rulerCorner.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor), rulerCorner.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            rulerCorner.widthAnchor.constraint(equalTo: vRuler.widthAnchor), rulerCorner.heightAnchor.constraint(equalTo: hRuler.heightAnchor),
+            hRuler.leadingAnchor.constraint(equalTo: vRuler.trailingAnchor), hRuler.trailingAnchor.constraint(equalTo: stageArea.trailingAnchor),
+            hRuler.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            vRuler.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor), vRuler.topAnchor.constraint(equalTo: hRuler.bottomAnchor),
+            vRuler.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
+            canvas.leadingAnchor.constraint(equalTo: vRuler.trailingAnchor),
             canvas.trailingAnchor.constraint(equalTo: stageArea.trailingAnchor),
-            canvas.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            canvas.topAnchor.constraint(equalTo: hRuler.bottomAnchor),
             canvas.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
         ])
+        applyRulerVisibility()
+        canvas.onGeometryChange = { [weak self] in self?.redrawRulers() }
+        canvas.onCursorMove = { [weak self] p in self?.hRuler.cursor = p; self?.vRuler.cursor = p }
         // slides on top, optional terminal below
         let cs = GrabSplitView(); cs.isVertical = false; cs.dividerStyle = .thin
         cs.addArrangedSubview(stageColumn); cs.addArrangedSubview(terminal)
@@ -383,7 +400,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             pendingDeck = nil
             open(deck: pending)
         } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"]
-                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] {
+                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"]
+                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_EXTRACT"] {
             open(deck: d)
         } else {
             let last = UserDefaults.standard.string(forKey: "lastDeck")
@@ -812,6 +830,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] != nil, !testRan { testRan = true; darkModeTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] != nil, !testRan { testRan = true; formatTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] != nil, !testRan { testRan = true; toolsTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_EXTRACT"] != nil, !testRan { testRan = true; extractTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -1712,7 +1731,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func newSlide() { slideOp("new", layout: "title_content") }
     @objc func duplicateSlide() { slideOp("duplicate") }
     @objc func deleteSlide() { slideOp("delete") }
-    @objc func toggleSkipSlide() { slideOp(selectedSlideIsUnused ? "unskip" : "skip") }
+    @objc func restoreSlide() { slideOp("restore") }
     var selectedSlideIsHidden: Bool { state?.scenes.first(where: { $0.name == sceneName })?.hidden == true }
     @objc func toggleHideSlide() { slideOp(selectedSlideIsHidden ? "unhide" : "hide") }
     @objc func toggleUnusedSlides() {
@@ -1830,6 +1849,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             if item.action == #selector(columnsMenuChosen(_:)) { item.state = (objInfo?.format?.columns ?? 1) == (item.representedObject as? Int) ? .on : .off }
             return objInfo?.kind == "text"
         case #selector(toggleGrid): item.state = canvas.showGrid ? .on : .off; return true
+        case #selector(toggleRuler): item.state = showRuler ? .on : .off; return true
         case #selector(toggleSnap): item.state = canvas.snapEnabled ? .on : .off; return true
         case #selector(addVerticalGuide), #selector(addHorizontalGuide): return sceneName != nil
         case #selector(clearGuides): return !canvas.userGuides.isEmpty
@@ -1850,9 +1870,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return workspace != nil
         case #selector(presenterView):
             return state?.scenes.isEmpty == false && player == nil && presenter == nil
-        case #selector(toggleSkipSlide):
-            item.title = selectedSlideIsUnused ? "Restore Slide to Show" : "Skip Slide"
-            return sceneName != nil && player == nil
+        case #selector(restoreSlide):
+            return selectedSlideIsUnused && player == nil
         case #selector(toggleHideSlide):
             item.title = selectedSlideIsHidden ? "Unhide Slide" : "Hide Slide"
             return sceneName != nil && !selectedSlideIsUnused && player == nil

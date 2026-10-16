@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 
 
@@ -742,6 +743,29 @@ class Planner:
                 if "# manimble" in t and re.search(rf"\b{re.escape(var)}\b", t):
                     edits.append(Edit(src.rel, sa, sb, ""))
         return edits
+
+    def plan_image_file(self, obj: dict, file: str, deck_dir: str) -> list[Edit]:
+        """Point a picture at another file (Extract Elements' filled-in background). `file` is in the deck folder.
+        A direct ImageMobject(...) gets that file in place of its first argument; a helper call that is given the
+        picture's file name (paper_figure("x.png") ...) gets the new name, with the file copied next to the old one."""
+        src, call, _, _ = self._creation(obj)
+        if _func_name(call) == "ImageMobject" and call.args and not isinstance(call.args[0], ast.Starred):
+            a, b = src.span(call.args[0])
+            return [Edit(src.rel, a, b, f'str(__import__("pathlib").Path(__file__).resolve().parent / {py_str(file)})')]
+        old = os.path.basename(str(obj.get("value") or ""))
+        hits = [n for n in ast.walk(call) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and old and (n.value == old or n.value.endswith("/" + old))]
+        if len(hits) != 1:
+            raise EditError("the picture's file is chosen by code, so it cannot be swapped for the filled-in copy")
+        n = hits[0]
+        here = os.path.dirname(str(obj.get("path") or obj.get("value") or ""))
+        if not here or not os.path.isdir(here):
+            raise EditError("could not find the folder of the picture")
+        name = os.path.basename(file)
+        if os.path.realpath(os.path.join(here, name)) != os.path.realpath(os.path.join(deck_dir, file)):
+            shutil.copyfile(os.path.join(deck_dir, file), os.path.join(here, name))
+        a, b = src.span(n)
+        return [Edit(src.rel, a, b, py_str(n.value[: len(n.value) - len(old)] + name))]
 
     # ------------------------------------------------------- formatting
     def _creation(self, obj: dict):

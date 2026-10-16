@@ -153,12 +153,12 @@ final class CanvasView: MTKView {
     private let loader: MTKTextureLoader
 
     // content
-    var frameSize = CGSize(width: 1280, height: 720)
-    var stop: StopInfo? { didSet { needsDisplay2() } }
+    var frameSize = CGSize(width: 1280, height: 720) { didSet { onGeometryChange?() } }
+    var stop: StopInfo? { didSet { needsDisplay2(); onGeometryChange?() } }
     var sceneObjects: [String: ObjInfo] = [:]
-    var selection: Int? { didSet { needsDisplay2() } }
+    var selection: Int? { didSet { needsDisplay2(); onGeometryChange?() } }
     var hover: Int?
-    var overrides: [Int: Override] = [:] { didSet { needsDisplay2() } }
+    var overrides: [Int: Override] = [:] { didSet { needsDisplay2(); onGeometryChange?() } }
     var showObjects = false { didSet { needsDisplay2() } }
     /// Dark mode / inverted colours (nothing is written): the slide is composited from backdrop + sprites, each colour-mapped.
     var colorView = ColorView.normal { didSet { needsDisplay2() } }
@@ -170,13 +170,13 @@ final class CanvasView: MTKView {
     var onEndpoints: ((Int, [Double]) -> Void)?
     private var dragEnd: Int?           // 0 = start, 1 = end
     /// Frame pixels per manim unit (grid spacing); set from the scene.
-    var unitPx: Double = 90 { didSet { needsDisplay2() } }
+    var unitPx: Double = 90 { didSet { needsDisplay2(); onGeometryChange?() } }
     var showGrid = false { didSet { needsDisplay2() } }
     /// Snap a dragged object's edges and centre to other objects, the slide and the grid.
     var snapEnabled = true
     private var guides: [(vertical: Bool, pos: Double)] = [] { didSet { needsDisplay2() } }
     /// Guides the user added (frame px); draggable, removed by dragging off the slide, and snap targets.
-    var userGuides: [(vertical: Bool, pos: Double)] = [] { didSet { needsDisplay2() } }
+    var userGuides: [(vertical: Bool, pos: Double)] = [] { didSet { needsDisplay2(); onGeometryChange?() } }
     var onGuidesChange: (() -> Void)?
     private var dragGuide: Int?
     /// Drawing mode: "line", "arrow", "darrow", "rectangle" or "ellipse"; drag on the slide to create one.
@@ -202,10 +202,19 @@ final class CanvasView: MTKView {
     var onDelete: ((Int) -> Void)?
     var onZoomChange: (() -> Void)?
     var onContextMenu: (() -> NSMenu?)?
+    /// Anything the rulers show changed: slide placement, zoom, pan, selection or guides.
+    var onGeometryChange: (() -> Void)?
+    /// Pointer position over the canvas in frame px (nil when it leaves), for the rulers' cursor marks.
+    var onCursorMove: ((CGPoint?) -> Void)?
 
     /// Points per frame pixel; nil = fit the slide to the window.
-    var zoom: CGFloat? { didSet { if zoom == nil { pan = .zero }; needsDisplay2(); onZoomChange?() } }
-    var pan = CGPoint.zero { didSet { needsDisplay2() } }
+    var zoom: CGFloat? { didSet { if zoom == nil { pan = .zero }; needsDisplay2(); onZoomChange?(); onGeometryChange?() } }
+    var pan = CGPoint.zero { didSet { needsDisplay2(); onGeometryChange?() } }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        onGeometryChange?()
+    }
 
     // drag state
     private var dragStart: CGPoint?
@@ -330,11 +339,49 @@ final class CanvasView: MTKView {
     override func magnify(with event: NSEvent) { zoomBy(1 + event.magnification) }
     private var pxPerPoint: Double { Double(frameSize.width / slideRect.width) }
 
-    private func framePoint(_ ev: NSEvent) -> CGPoint {
-        let p = convert(ev.locationInWindow, from: nil)
+    private func framePoint(_ ev: NSEvent) -> CGPoint { framePoint(window: ev.locationInWindow) }
+
+    /// Frame-pixel coordinates (y down) of a point given in window coordinates.
+    func framePoint(window wp: CGPoint) -> CGPoint {
+        let p = convert(wp, from: nil)
         let r = slideRect
         return CGPoint(x: (p.x - r.minX) * frameSize.width / r.width,
                        y: (r.maxY - p.y) * frameSize.height / r.height)     // flipped: y down
+    }
+
+    /// The selected object's box as shown right now (live drag included), in frame px.
+    var selectedBox: Box? {
+        guard let s = selection else { return nil }
+        if let e = lineEnds(s) { return Box(x0: min(e[0], e[2]), y0: min(e[1], e[3]), x1: max(e[0], e[2]), y1: max(e[1], e[3])) }
+        return currentBox(s)
+    }
+
+    // MARK: guides dragged in from the rulers
+
+    /// Start dragging a brand-new guide (it begins off the slide, under the pointer on the ruler).
+    func beginGuideDrag(vertical: Bool, pos: Double) {
+        userGuides.append((vertical: vertical, pos: pos))
+        dragGuide = userGuides.count - 1
+    }
+    /// Start dragging an existing guide by its ruler marker.
+    func continueGuideDrag(index: Int) {
+        guard userGuides.indices.contains(index) else { return }
+        dragGuide = index; needsDisplay2()
+    }
+    func updateGuideDrag(pos: Double) {
+        guard let i = dragGuide, userGuides.indices.contains(i) else { return }
+        userGuides[i].pos = pos
+    }
+    /// Drop the dragged guide: gone if it ended off the slide, otherwise kept and saved.
+    func endGuideDrag() {
+        guard let i = dragGuide else { return }
+        dragGuide = nil
+        if userGuides.indices.contains(i) {
+            let g = userGuides[i], limit = g.vertical ? Double(frameSize.width) : Double(frameSize.height)
+            if g.pos < 0 || g.pos > limit { userGuides.remove(at: i) }          // dragged off the slide: gone
+        }
+        needsDisplay2()
+        onGuidesChange?()
     }
 
     /// Current endpoints of a line object (live edit if any).
@@ -628,9 +675,11 @@ final class CanvasView: MTKView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
-        tracking = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        tracking = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
         addTrackingArea(tracking!)
     }
+
+    override func mouseExited(with event: NSEvent) { onCursorMove?(nil) }
 
     private func hit(_ p: CGPoint) -> Int? {
         guard let stop = stop else { return nil }
@@ -658,6 +707,7 @@ final class CanvasView: MTKView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        onCursorMove?(framePoint(event))
         if drawTool != nil { NSCursor.crosshair.set(); return }
         if let i = guideAt(framePoint(event)) { (userGuides[i].vertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set(); return }
         let h = hit(framePoint(event))
@@ -703,6 +753,7 @@ final class CanvasView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        onCursorMove?(framePoint(event))
         if drawTool == "pen", let last = penPoints.last {
             let p = framePoint(event)
             if hypot(Double(p.x - last.x), Double(p.y - last.y)) >= 1.5 { penPoints.append(p) }
@@ -795,13 +846,7 @@ final class CanvasView: MTKView {
 
     override func mouseUp(with event: NSEvent) {
         defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = [] }
-        if let i = dragGuide, userGuides.indices.contains(i) {
-            dragGuide = nil
-            let g = userGuides[i], limit = g.vertical ? Double(frameSize.width) : Double(frameSize.height)
-            if g.pos < 0 || g.pos > limit { userGuides.remove(at: i) }          // dragged off the slide: gone
-            onGuidesChange?()
-            return
-        }
+        if dragGuide != nil { endGuideDrag(); return }
         if drawTool == "pen" {
             let pts = CanvasView.simplify(penPoints, tolerance: 1.2)
             penPoints = []

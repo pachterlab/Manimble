@@ -132,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Duplicate Slide", #selector(MainController.duplicateSlide), "d"),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
             item("Hide Slide", #selector(MainController.toggleHideSlide), "h", [.command, .shift]),
-            item("Skip Slide", #selector(MainController.toggleSkipSlide), "", []),
+            item("Restore Slide to Show", #selector(MainController.restoreSlide), "", []),
             .separator(),
             item("Move Slide Up", #selector(MainController.moveSlideUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.command, .option]),
             item("Move Slide Down", #selector(MainController.moveSlideDown), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.command, .option]),
@@ -196,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j", [.command, .option]),
             item("Grid Lines", #selector(MainController.toggleGrid), "g", [.command, .option]),
+            item("Ruler", #selector(MainController.toggleRuler), "u", [.command, .option]),
             item("Snap to Objects", #selector(MainController.toggleSnap), "s", [.command, .option]),
             item("Add Vertical Guide", #selector(MainController.addVerticalGuide), "", []),
             item("Add Horizontal Guide", #selector(MainController.addHorizontalGuide), "", []),

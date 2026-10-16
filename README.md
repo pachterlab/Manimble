@@ -127,6 +127,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   orange lines show the match. Hold ⌥ to drag freely.
 - Guides: Add Vertical / Horizontal Guide (View menu or the Home bar) puts a cyan guide at the centre; drag it into
   place, drag it off the slide to remove it (Clear Guides removes all). Guides are remembered per deck.
+- Rulers (View menu, ⌥⌘U) along the top and left of the slide, graduated in manim units with 0 at the slide's
+  centre (negative left and below), following the zoom. They show the slide's and the selection's extent, the
+  pointer, and each guide's marker; drag from a ruler onto the slide to add a guide, or drag a marker to move one.
 - Drawing (Insert ▸ Draw, or the Shape menu in the toolbar): choose line, arrow, double arrow, rectangle or ellipse,
   then drag on the slide; ⇧ snaps the angle or makes a square/circle. The element is inserted with those endpoints or
   that box.
@@ -153,7 +156,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - **Slide Numbers…** (Insert menu): a number on every slide of the show, bottom right / centre / left, with a start
   number, "don't show on the title slide" and "show the total" (`3 / 10`). Each is a `Text` written at the top of
   `construct()` with a `# manimble page number` marker, so it is an ordinary object (move it, change its size) and
-  the numbers are renumbered in the same undo step whenever slides are added, duplicated, deleted, skipped or
+  the numbers are renumbered in the same undo step whenever slides are added, duplicated, deleted or
   reordered. Open the dialog again to change the options or remove the numbers.
 
 **Slides and decks**
@@ -182,12 +185,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   `self.next_slide(notes="...")  # manimble notes` at the top of `construct()`, which is what manim-slides' own
   presenter shows for the slide; they do not add a build.
 - Delete Slide: Slide menu (⇧⌘⌫), the Delete key in the navigator, or right-click a slide; ⌘Z brings it back.
-  Right-clicking a slide in the navigator also offers New Slide After This (with layouts), Duplicate, Hide and Skip.
+  Right-clicking a slide in the navigator also offers New Slide After This (with layouts), Duplicate and Hide.
 - Hide Slide (Slide menu, ⇧⌘H, or right-click): the slide stays in the deck and the navigator (dimmed, with a
   struck-through number) but is left out of the slideshow, the presenter view and the PDF, PowerPoint and Keynote
   exports, like PowerPoint's hidden slides. It is a `# manimble hidden` comment on the class line; Unhide removes it.
-- Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
-  skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
+- View ▸ Show Unused Slides reveals scene classes outside `order.txt`; select one and choose Restore Slide to Show
+  (Slide menu or right-click) to append it.
 - Drag a slide in the navigator to reorder the show; the change is saved to `order.txt` and can be undone.
 - Python source pane with syntax colours, highlighted changed/selected lines, and always-visible scroll bars. Click the
   code to edit that scene class, then click outside to update the slide. Syntax errors leave the draft in the editor;

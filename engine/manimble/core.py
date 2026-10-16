@@ -702,8 +702,15 @@ class Manimble:
                     continue
                 ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy)
                 if ok:
+                    held, along = [], []
+                    if op in ("move", "resize", "endpoints", "size", "rotate"):
+                        written, held, along = self._hold_others(name, oid, obj, data, new["data"], stop, ux, uy, written)
                     self._commit(label if op in TEXT_OPS else f"{label} ({how})", written)
                     msg = how
+                    if held:
+                        msg += f"; {len(held)} other object{'s' if len(held) > 1 else ''} kept in place"
+                    if along:
+                        msg += f"; {len(along)} other object{'s' if len(along) > 1 else ''} moved with it"
                     sib = None
                     if op in ("move", "resize", "endpoints", "size", "rotate"):
                         cnt = sum(1 for o in data["objects"].values()
@@ -723,6 +730,93 @@ class Manimble:
                 fr = e["frames"][-1]
                 last_error += f" (position is set by .{e['method']}() at {fr['file']}:{fr['pos'][0]})"
             return {"ok": False, "error": "Could not apply this change: " + last_error}
+
+    def _hold_others(self, name, oid, obj, data, new_data, stop, ux, uy, written):
+        """Keep every other object where it was.
+
+        Layout code such as ``label.next_to(formula)`` or ``group.arrange()`` makes other objects follow
+        the one just edited, so they appear to jump when the render lands. Each object that moved without
+        changing size gets a compensating move of its own (planned from the fresh render, so source
+        positions are current), applied in one render; the compensation is kept only when every one of
+        them is back in place and nothing else shifted. Returns (written, held oids, oids still moved)."""
+        def boxes(d):
+            st = d["stops"][min(stop, len(d["stops"]) - 1)]
+            return {str(v[0]): v for v in st["visible"]}
+
+        def centre(v):
+            return ((v[1] + v[3]) / 2, (v[2] + v[4]) / 2)
+
+        before, after = boxes(data), boxes(new_data)
+        site = (obj["frames"][-1]["file"], obj["frames"][-1]["pos"])
+        mine = before.get(oid)
+        moved = {}
+        for k, a in before.items():
+            b = after.get(k)
+            if k == oid or b is None:
+                continue
+            o = new_data["objects"].get(k)
+            if o is None or (o["frames"][-1]["file"], o["frames"][-1]["pos"]) == site:
+                continue                      # siblings share the edited line: they move together by design
+            (ax, ay), (bx, by) = centre(a), centre(b)
+            if abs(bx - ax) <= 1.5 and abs(by - ay) <= 1.5:
+                continue
+            if abs((b[3] - b[1]) - (a[3] - a[1])) > 1.5 or abs((b[4] - b[2]) - (a[4] - a[2])) > 1.5:
+                continue                      # resized too: part of the edited object's family
+            if mine and (a[1] <= mine[1] and a[2] <= mine[2] and a[3] >= mine[3] and a[4] >= mine[4]
+                         or mine[1] <= a[1] and mine[2] <= a[2] and mine[3] >= a[3] and mine[4] >= a[4]):
+                continue                      # encloses or lies inside the edited object: a frame or a part of it
+            moved[k] = (bx - ax, by - ay)
+        if not moved:
+            return written, [], []
+        # one plan per source line: objects created on the same line can only move together
+        edits, planned = [], {}
+        for k, (ddx, ddy) in moved.items():
+            o = new_data["objects"][k]
+            key = (o["frames"][-1]["file"], tuple(o["frames"][-1]["pos"]))
+            if key in planned:
+                continue
+            try:
+                attempts = self.planner.plan_move(o, -ddx * ux, ddy * uy)
+            except EditError:
+                attempts = []
+            first = next((e for _, e in attempts if e), None)
+            planned[key] = first is not None
+            if first:
+                edits += first
+        if not edits:
+            return written, [], sorted(moved, key=int)
+        try:
+            extra = self.project.apply(edits)
+            self._sig_at = 0
+        except Exception:
+            return written, [], sorted(moved, key=int)
+
+        def undo():
+            self._restore(extra, 0)
+            self.results.pop(name, None)
+            self.render_now(name, interactive=True)
+            return written, [], sorted(moved, key=int)
+
+        held = self.render_now(name, interactive=True)
+        if "error" in held:
+            return undo()
+        final = boxes(held["data"])
+        for k, a in before.items():
+            f = final.get(k)
+            if f is None:
+                if k in after:
+                    return undo()
+                continue
+            ref = a if k in moved else after.get(k)      # held objects go back to before; the rest stay as rendered
+            if ref is None:
+                continue
+            (rx, ry), (fx, fy) = centre(ref), centre(f)
+            if abs(fx - rx) > 2.5 or abs(fy - ry) > 2.5:
+                return undo()
+        merged = dict(written)
+        for rel, (b, a) in extra.items():
+            merged[rel] = (written[rel][0], a) if rel in written else (b, a)
+        return merged, sorted(moved, key=int), []
 
     def _verify(self, op, req, oid, stop, before_box, data, ux, uy):
         if op == "endpoints":
@@ -854,19 +948,7 @@ class Manimble:
                         final = rest
                     label = "delete slide"
                     select = names[i + 1] if i >= 0 and i + 1 < len(names) else (names[i - 1] if i > 0 else (names[0] if names else None))
-                elif op == "skip":
-                    if name not in names:
-                        return {"ok": False, "error": "slide is already skipped"}
-                    i = names.index(name)
-                    final = [n for n in names if n != name]
-                    edits.append(self._order_edit(final))
-                    if numbering and src is not None:
-                        e = self._page_edit(src, self._construct(cur)[1], None, True)     # a skipped slide shows no stale number
-                        if e:
-                            edits.append(e)
-                    label = "skip slide"
-                    select = names[i + 1] if i + 1 < len(names) else (names[i - 1] if i > 0 else None)
-                elif op == "unskip":
+                elif op == "restore":
                     if name in names:
                         return {"ok": False, "error": "slide is already in the show"}
                     final = names + [name]
@@ -1447,7 +1529,8 @@ class Manimble:
                     "changed": self.last_changed, "hidden": not shown}
 
     def insert_many(self, req: dict) -> dict:
-        """Insert several elements (`items`: one dict per element, as for `insert`) at the same build as one undo step."""
+        """Insert several elements (`items`: one dict per element, as for `insert`) at the same build as one undo step.
+        `replace_image` ({oid, file}) also points that picture at another file in the deck folder, in the same step."""
         with self.edit_lock:
             name = req["scene"]
             items = [it for it in (req.get("items") or []) if isinstance(it, dict) and it.get("kind")]
@@ -1469,6 +1552,12 @@ class Manimble:
                     edit, _ = self.planner.plan_insert(self.scene(name), si, nstops, code, site,
                                                        tag="pen" if it["kind"] == "pen" else "")
                     edits.append(edit)
+                swap = req.get("replace_image")
+                if isinstance(swap, dict) and swap.get("file"):
+                    obj = rec["data"]["objects"].get(str(swap.get("oid")))
+                    if obj is None or obj.get("kind") != "image":
+                        return {"ok": False, "error": "the picture is no longer on the slide"}
+                    edits = self.planner.plan_image_file(obj, str(swap["file"]), self.deck) + edits
                 # edits at one offset land in reverse order of application: keep the items' order on the slide
                 written = self.project.apply(list(reversed(edits)))
                 self._sig_at = 0
