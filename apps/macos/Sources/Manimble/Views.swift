@@ -62,10 +62,22 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
     private let editor = Editor()
     private var original: String
     private var heightConstraint: NSLayoutConstraint!
+    /// Fill whatever height the container gives (a resizable pane) instead of growing with the text.
+    var fillsContainer = false { didSet { heightConstraint.isActive = !fillsContainer; fit() } }
     private let maxLines: Int
     var onCommit: ((String) -> Void)?
 
     var stringValue: String { editor.string }
+    /// Current selection (UTF-16 range) of the box, kept while the box is not focused.
+    var selectedRange: NSRange { editor.selectedRange() }
+    /// Whether the box has the keyboard focus (unsaved typing is committed when it loses it).
+    var isEditing: Bool { window?.firstResponder === editor }
+    var font: NSFont? { get { editor.font } set { editor.font = newValue; fit() } }
+    var textColor: NSColor? { get { editor.textColor } set { editor.textColor = newValue } }
+    var editorBackground: NSColor { get { editor.backgroundColor } set { editor.backgroundColor = newValue; backgroundColor = newValue } }
+
+    /// Replace the text without triggering a commit (the caller applies the edit itself).
+    func setText(_ s: String) { editor.string = s; original = s; fit() }
 
     init(string: String, maxLines: Int = 14) {
         original = string; self.maxLines = maxLines
@@ -107,7 +119,7 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
     }
 
     private func fit() {
-        guard let lm = editor.layoutManager, let tc = editor.textContainer else { return }
+        guard !fillsContainer, let lm = editor.layoutManager, let tc = editor.textContainer else { return }
         lm.ensureLayout(for: tc)
         let line = lm.defaultLineHeight(for: editor.font ?? Theme.font(13))
         let used = max(lm.usedRect(for: tc).height, line)
@@ -126,6 +138,21 @@ extension NSColor {
     var hexString: String {
         let c = usingColorSpace(.sRGB) ?? self
         return String(format: "#%02X%02X%02X", Int(round(c.redComponent * 255)), Int(round(c.greenComponent * 255)), Int(round(c.blueComponent * 255)))
+    }
+}
+
+/// The slide navigator: Delete removes the selected slide, right-click offers the Slide menu for that row.
+final class SlideTable: NSTableView {
+    var onDelete: (() -> Void)?
+    var onMenu: ((Int) -> NSMenu?)?
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117, selectedRow >= 0 { onDelete?(); return }
+        super.keyDown(with: event)
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0, row != selectedRow { selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+        return onMenu?(row)
     }
 }
 
@@ -177,12 +204,17 @@ final class SlideCell: NSTableCellView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(number: Int, name n: String, image: NSImage?, status: String, stops: Int, active: Bool, unused: Bool = false) {
-        num.stringValue = unused ? "–" : String(number)
+    func configure(number: Int, name n: String, image: NSImage?, status: String, stops: Int, active: Bool, unused: Bool = false, hidden: Bool = false) {
+        if hidden, !unused {
+            num.attributedStringValue = NSAttributedString(string: String(number), attributes: [.strikethroughStyle: NSUnderlineStyle.single.rawValue, .font: Theme.font(11, .medium)])
+        } else {
+            num.stringValue = unused ? "–" : String(number)
+        }
         name.stringValue = status == "error" ? "\(n) — error" : n
         name.textColor = status == "error" ? .systemRed : (active ? .labelColor : .secondaryLabelColor)
         thumb.image = image
-        badge.stringValue = unused ? "unused" : (stops > 1 ? "\(stops) builds" : (image == nil && status != "error" ? "…" : ""))
+        thumb.alphaValue = hidden ? 0.4 : 1
+        badge.stringValue = unused ? "unused" : hidden ? "hidden" : (stops > 1 ? "\(stops) builds" : (image == nil && status != "error" ? "…" : ""))
         setActive(active)
     }
 

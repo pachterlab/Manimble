@@ -68,6 +68,10 @@ def main():
         "slide": lambda a: need().slide_op(a),
         "deck_pages": lambda a: need().deck_pages(a),
         "background": lambda a: need().background(a),
+        "page_numbers": lambda a: need().page_numbers(a),
+        "notes": lambda a: need().notes(a),
+        "insert_many": lambda a: need().insert_many(a),
+        "export_python": lambda a: need().export_python(a),
         "darkmode": lambda a: need().dark_mode(a),
     }
     def import_job(a):

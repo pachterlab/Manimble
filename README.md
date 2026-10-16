@@ -65,6 +65,44 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   formulas, images, shapes, lines/arrows and tables. Numeric X / Y / width / height in the inspector.
 - Text: retype in a multi-line box (↵ new line, ⌘↵ or click away to apply, esc to revert; bold/colour ranges follow
   the words they cover), font family, bold, italic, size (field + stepper), colour.
+- **Home bar** above the slide, in the spirit of PowerPoint's: font, size (field, stepper, A↑ A↓), bold, italic,
+  underline, strikethrough, superscript/subscript, highlight colour, text colour (the A opens the colour panel), clear
+  formatting; bullets, numbering, indent/outdent, left/centre/right alignment, line spacing, columns; grid lines,
+  snapping and guides. Everything
+  is also in the Format, View and Insert menus with shortcuts (⌘B ⌘I ⌘U, ⇧⌘+ ⇧⌘_, ⇧⌘8 ⇧⌘7, ⇧⌘[ ⇧⌘], ⌘L ⌘E ⌘R).
+  Each one is a source edit:
+  - Underline and strikethrough: Manim text has neither, so Manimble adds a small `manimble_helpers.py` to the deck
+    (`strike()` and `underline()` group the glyphs into visual lines and draw one line per line of text) and writes
+    `t.add(strike(t, color=...))  # manimble strike`; the lines move, scale and are deleted with the text. The text
+    must be held in a variable; an element inserted with the toolbar is given one automatically.
+  - Highlight: `.add_background_rectangle(color=..., opacity=0.6)` on the object; "No Highlight" removes it.
+  - Superscript and subscript swap the characters selected in the inspector's text box for their Unicode
+    super/subscript forms (digits, signs, most letters), since a `Text` has no per-character rise. Formulas take
+    `^{}` / `_{}` in the LaTeX sheet.
+  - Bullets, numbering and indent rewrite the lines of the string (`• `, `1. `, four spaces); they apply to the lines
+    selected in the text box, or all lines.
+  - Alignment turns a multi-line `Text("a\nb")` written in the slide into `Paragraph("a", "b", alignment="center")`,
+    which Manimble edits like any text. Justify is not possible for text with manual line breaks.
+  - Line spacing sets `line_spacing=` (PowerPoint's 1.0 is Manim's default 0.3; 1.5 ≈ 0.8, 2.0 ≈ 1.3).
+  - Columns split the lines of a text into `VGroup(Text(...), Text(...)).arrange(RIGHT, buff=0.8, aligned_edge=UP)`;
+    one column merges them back.
+  - Clear formatting removes bold, italic, colour, per-range styles (`t2c` …), line spacing, highlight, underline and
+    strikethrough; font and size stay.
+- Arrange (inspector): X, Y, width, height, rotation in degrees (rewrites or appends `.rotate(... * DEGREES)`), and for
+  pictures and shapes a *Keep aspect ratio* switch: off, width and height stretch independently
+  (`width=`/`height=` arguments, `.set(width=...)`, or `.stretch_to_fit_width/height`).
+- Grid lines (View menu, ⌥⌘G) one manim unit apart with the axes marked. Snapping (⌥⌘S): while dragging, an object's
+  edges and centre snap to the other objects, your guides, the slide's edges and centre, and the grid when shown;
+  orange lines show the match. Hold ⌥ to drag freely.
+- Guides: Add Vertical / Horizontal Guide (View menu or the Home bar) puts a cyan guide at the centre; drag it into
+  place, drag it off the slide to remove it (Clear Guides removes all). Guides are remembered per deck.
+- Drawing (Insert ▸ Draw, or the Shape menu in the toolbar): choose line, arrow, double arrow, rectangle or ellipse,
+  then drag on the slide; ⇧ snaps the angle or makes a square/circle. The element is inserted with those endpoints or
+  that box.
+- **Pen** (Insert ▸ Draw ▸ Pen, ⇧⌘P, or the Shape menu): draw freehand on the slide. Each stroke is simplified and
+  written as one line, `self.add(VMobject(color=..., stroke_width=6).set_points_smoothly([...]))  # manimble pen`, so
+  it is a real object of the slide: select it to move, resize, recolour or delete it. The pen stays active for the next
+  stroke; esc ends it. Insert ▸ Draw ▸ Pen Color picks the colour (remembered).
 - Formulas: LaTeX sheet with a live preview compiled by your real TeX; applies to a shared constant
   (e.g. a `FORMULA` defined once and used on several slides) everywhere, or to this slide only.
 - Lines and arrows: drag either end (⇧ snaps the angle to 15°).
@@ -72,9 +110,20 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Shared constants (a title, a font name, …) are recognised and edited at their definition.
 
 **Insert** (toolbar and Insert menu)
-- Text, formula, shapes (rectangle, rounded rectangle, circle, triangle, line, arrow), table, image.
+- Text, formula, shapes (rectangle, rounded rectangle, circle, ellipse, triangle, line, arrow, double arrow), table,
+  image; or draw lines, arrows, rectangles, ellipses and pen strokes by dragging on the slide.
   They appear instantly and are written as one marked line (`self.add(...)  # manimble`) at the build you are on.
   The Delete key removes elements inserted this way.
+- **Extract Elements from Image…** (Insert menu, with a picture selected): the system's subject-lifting model
+  (macOS 14+) finds the separate things in the picture (the five people in a photo, the parts of a figure). Tick the
+  ones you want and each becomes its own transparent PNG in the deck folder and its own `ImageMobject`, placed exactly
+  where it is in the picture, so it can be moved, resized and animated on its own. The original picture stays; one ⌘Z
+  removes all the parts.
+- **Slide Numbers…** (Insert menu): a number on every slide of the show, bottom right / centre / left, with a start
+  number, "don't show on the title slide" and "show the total" (`3 / 10`). Each is a `Text` written at the top of
+  `construct()` with a `# manimble page number` marker, so it is an ordinary object (move it, change its size) and
+  the numbers are renumbered in the same undo step whenever slides are added, duplicated, deleted, skipped or
+  reordered. Open the dialog again to change the options or remove the numbers.
 
 **Slides and decks**
 - Format Background (right-click the slide, or Format ▸ Background…), as in PowerPoint: a solid colour or a picture
@@ -92,7 +141,20 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   (orange ↔ blue, white ↔ black). Also view-only, with Format ▸ Apply Inverted Colors to Deck… to write it the same way
   (manim's colour names such as `ORANGE` become the hex of their complement).
 - Slide list with thumbnails, builds strip for every `next_slide()` stop, ⌘↑/⌘↓ and ⌘[ ⌘] navigation.
-- Slide menu: New, Duplicate, Delete, Move Up/Down (edits the scene class and `order.txt`, fully undoable).
+- Slide menu: New Slide (with the toolbar's New Slide button): choose a layout as in PowerPoint: Title Slide, Title and
+  Content (⇧⌘N), Section Header, Two Content, Title Only or Blank (no text at all). The placeholders are plain `Text`
+  objects, bullets included; Duplicate, Delete, Move Up/Down edit the scene class and `order.txt`, fully undoable.
+- Bulleted and numbered lists (Home bar, Format menu, ⇧⌘8 / ⇧⌘7) prefix the lines of a text with `• ` or `1. `, and
+  Increase / Decrease Indent (⇧⌘] / ⇧⌘[) indent the selected lines; all of it is retyped into the `Text` string.
+- **Speaker notes**: the box under the slide (View ▸ Speaker Notes, ⌥⌘K, to hide or show it; drag the divider above
+  it to give the notes more or less room, the height is remembered). Notes are saved as
+  `self.next_slide(notes="...")  # manimble notes` at the top of `construct()`, which is what manim-slides' own
+  presenter shows for the slide; they do not add a build.
+- Delete Slide: Slide menu (⇧⌘⌫), the Delete key in the navigator, or right-click a slide; ⌘Z brings it back.
+  Right-clicking a slide in the navigator also offers New Slide After This (with layouts), Duplicate, Hide and Skip.
+- Hide Slide (Slide menu, ⇧⌘H, or right-click): the slide stays in the deck and the navigator (dimmed, with a
+  struck-through number) but is left out of the slideshow, the presenter view and the PDF, PowerPoint and Keynote
+  exports, like PowerPoint's hidden slides. It is a `# manimble hidden` comment on the class line; Unhide removes it.
 - Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
   skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
 - Drag a slide in the navigator to reorder the show; the change is saved to `order.txt` and can be undone.
@@ -106,12 +168,19 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Play and share**
 - Built-in full-screen slideshow (Play menu: ⌥⌘P from the current slide, ⌥⌘⇧P from the beginning) with fades,
   progress bar, counter, click/keyboard navigation and blank screen.
+- **Presenter View** (Play menu, ⌃⌘P): the current slide, the next slide or build, the speaker notes in large type,
+  the slide counter, a clock and an elapsed-time timer (click it, or press R, to reset). With a second display the
+  audience sees the full-screen slideshow there while you see the presenter window; with one display it is a
+  rehearsal view. Both follow the same keys: → / space / click next, ← back, N next slide, B blank, esc end.
 - **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
   real animations and builds inside the editor. Each build pauses at its end; click the slide or press → to play the
   next build. Use the player controls to pause or scrub, and ← to go back.
 - **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
   top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
   go into the working copy's `slides/` folder, so the original's builds are untouched.
+- File ▸ Export To ▸ Python (whole deck in one file)… writes the deck as a single `.py`: helper modules inlined, the
+  slides in show order, a `SLIDES` list at the end. (The deck's own `.py` files are already the editable source that
+  every edit is written to; this is a one-file copy for sharing, best kept in the deck folder so relative paths work.)
 - File ▸ Save Project Copy… writes an editable, portable project folder. File ▸ Package for Sharing… creates one
   `.manimble` file that can be transferred and opened in Manimble. Both scan files opened while scenes render,
   preserve project-relative paths, and report missing or out-of-project dependencies. The Share menu stays focused
@@ -130,7 +199,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   it is editable in Manimble like anything else.
 
 **Terminal**
-- A docked terminal (View ▸ Show Terminal, ⌥⌘T, or the toolbar button) running your login shell in the *working copy*
+- A docked terminal (View ▸ Show Terminal, ⌥⌘T, or the toolbar button) running your login shell in the project repository (the original deck's git root, or its parent folder; View ▸ Terminal Starts in Working Copy switches it to the *working copy*, the folder the slides are rendered from)
   of the deck, with a "Run claude" shortcut for [Claude Code](https://claude.com/claude-code). Edits made there (by
   Claude or by hand) are noticed within about two seconds; the slide you are looking at is re-rendered first and
   refreshes on screen by itself (about 1–3 s in total), the other slides re-render in the background.
@@ -173,6 +242,15 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   resize.
 - Text styling applies to the whole object; there is no per-word bold or colour. The font family is usually a
   deck-wide constant, so changing it changes every slide. Bold and italic apply to plain text, not formulas.
+- Alignment and columns need a `Text("...")` with a plain string written in the slide itself (not made by a helper
+  function such as `label()`); converting to columns drops per-range styles and alignment. Underline, strikethrough and
+  highlight work on helper-made text too, but underline/strikethrough need the object in a variable. The lines are
+  drawn in the text's colour at the time; recolouring the text later leaves them. `manimble_helpers.py` becomes part
+  of the deck (it is plain Manim code and is packaged with the project). Superscript/subscript cover only the
+  characters Unicode provides (no q, and few capitals in subscript).
+- Rotation is read from the object's own `rotate()` calls, so a rotation applied by a group or computed in code shows
+  as 0°. Width/height show Manim's measure (all curve control points), which for circles and curves is a few percent
+  larger than the drawn outline.
 - Changing a shared constant (or a formula whose parts the code selects by name with `get_part_by_tex`) can break
   other slides. Only the slide on screen is re-rendered, so the breakage shows later as an error badge. A "re-render
   the other slides that use this constant and warn" check is not built.
@@ -215,7 +293,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - The app is ad-hoc signed, not notarised.
 - Scene renders still take 0.4–1 s; brand-new LaTeX adds roughly half a second for TeX.
 - macOS only. There are no automated tests; the app has headless self-test hooks (`MANIMBLE_SELFTEST`,
-  `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_BG`, `MANIMBLE_TEST_DARK`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
+  `MANIMBLE_TEST_FORMULA`, `MANIMBLE_TEST_BG`, `MANIMBLE_TEST_DARK`, `MANIMBLE_TEST_FORMAT`, `MANIMBLE_TEST_PLAY`, `MANIMBLE_TEST_SPLIT`, `MANIMBLE_TEST_TERM`) used for development
   checks.
 
 ## Roadmap (missing, roughly in order of value)
@@ -223,7 +301,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 1. **Animations panel**: list a build's `self.play(...)` calls, add simple ones to the selected object (fade, write,
    create, grow, move, scale, indicate), reorder, delete, set duration, and preview a build as a short clip.
 2. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
-3. Per-word text styling; per-element font; non-uniform resize; rotate.
+3. Per-word text styling; per-element font; justified and wrapped text (`MarkupText`); rotation by dragging.
 4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
 5. Presenter display (current + next slide, notes, timer); animated playback across the full-screen slideshow; PDF/video
    export at full resolution.

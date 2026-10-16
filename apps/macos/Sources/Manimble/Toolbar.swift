@@ -3,6 +3,7 @@ import PDFKit
 import UniformTypeIdentifiers
 
 private extension NSToolbarItem.Identifier {
+    static let newSlide = NSToolbarItem.Identifier("newSlide")
     static let insText = NSToolbarItem.Identifier("insText")
     static let insFormula = NSToolbarItem.Identifier("insFormula")
     static let insShape = NSToolbarItem.Identifier("insShape")
@@ -28,7 +29,7 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.insTable, .insText, .insFormula, .insShape, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
+        [.newSlide, .space, .insTable, .insText, .insFormula, .insShape, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(t) }
 
@@ -52,6 +53,20 @@ extension MainController: NSToolbarDelegate {
             i.toolTip = "Show slides with whites and blacks swapped (view only; Format ▸ Apply Dark Mode to Deck writes it)"
             i.image = symbol(DarkMode.mode == .dark ? "moon.fill" : "moon", "Dark Mode"); i.target = self; i.action = #selector(toggleDarkMode)
             return i
+        case .newSlide:
+            let i = NSMenuToolbarItem(itemIdentifier: id)
+            i.label = "New Slide"; i.paletteLabel = "New Slide"; i.toolTip = "Add a slide after this one (choose a layout)"
+            i.image = symbol("plus.rectangle.on.rectangle", "New Slide"); i.showsIndicator = true
+            i.target = self; i.action = #selector(newSlide)
+            let m = NSMenu()
+            for (title, layout, _) in MainController.slideLayouts {
+                let mi = NSMenuItem(title: title, action: #selector(newSlideLayout(_:)), keyEquivalent: "")
+                mi.representedObject = layout; mi.target = self
+                mi.image = symbol(MainController.layoutSymbols[layout] ?? "rectangle", title)
+                m.addItem(mi)
+            }
+            i.menu = m
+            return i
         case .insTable: return button(id, "Table", "tablecells", #selector(insertTablePressed))
         case .insText: return button(id, "Text", "textformat", #selector(insertTextPressed))
         case .insFormula: return button(id, "Formula", "function", #selector(insertFormulaPressed))
@@ -62,12 +77,38 @@ extension MainController: NSToolbarDelegate {
             i.image = symbol("square.on.circle", "Shape"); i.showsIndicator = true
             let m = NSMenu()
             for (title, kind, sym) in [("Rectangle", "rectangle", "rectangle"), ("Rounded Rectangle", "rounded", "rectangle.roundedtop"),
-                                       ("Circle", "circle", "circle"), ("Triangle", "triangle", "triangle"),
-                                       ("Line", "line", "line.diagonal"), ("Arrow", "arrow", "arrow.right")] {
+                                       ("Circle", "circle", "circle"), ("Ellipse", "ellipse", "oval"), ("Triangle", "triangle", "triangle"),
+                                       ("Line", "line", "line.diagonal"), ("Arrow", "arrow", "arrow.right"),
+                                       ("Double Arrow", "darrow", "arrow.left.and.right")] {
                 let mi = NSMenuItem(title: title, action: #selector(insertShapePressed(_:)), keyEquivalent: "")
                 mi.representedObject = kind; mi.target = self; mi.image = symbol(sym, title)
                 m.addItem(mi)
             }
+            m.addItem(.separator())
+            for (title, kind, sym) in [("Draw Line", "line", "pencil.line"), ("Draw Arrow", "arrow", "arrow.up.right"),
+                                       ("Draw Double Arrow", "darrow", "arrow.left.and.right"), ("Draw Rectangle", "rectangle", "rectangle.dashed"),
+                                       ("Draw Ellipse", "ellipse", "oval")] {
+                let mi = NSMenuItem(title: title, action: #selector(drawToolMenu(_:)), keyEquivalent: "")
+                mi.representedObject = kind; mi.target = self; mi.image = symbol(sym, title)
+                mi.toolTip = "Then drag on the slide (⇧ snaps the angle or keeps it square)"
+                m.addItem(mi)
+            }
+            m.addItem(.separator())
+            let pen = NSMenuItem(title: "Pen (freehand)", action: #selector(drawToolMenu(_:)), keyEquivalent: "")
+            pen.representedObject = "pen"; pen.target = self; pen.image = symbol("pencil.tip", "Pen")
+            pen.toolTip = "Draw freehand on the slide (⇧⌘P); each stroke becomes a smooth curve in the source. Esc ends the pen."
+            m.addItem(pen)
+            let colors = NSMenu()
+            for (title, hex) in MainController.penSwatches {
+                let mi = NSMenuItem(title: title, action: #selector(penColorChosen(_:)), keyEquivalent: "")
+                mi.representedObject = hex; mi.target = self
+                mi.image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { r in
+                    NSColor(hex: hex).setFill(); NSBezierPath(ovalIn: r.insetBy(dx: 2, dy: 2)).fill(); return true
+                }
+                colors.addItem(mi)
+            }
+            let colorItem = NSMenuItem(title: "Pen Color", action: nil, keyEquivalent: ""); colorItem.submenu = colors
+            m.addItem(colorItem)
             i.menu = m
             return i
         case .zoom:
@@ -172,15 +213,15 @@ extension MainController: NSToolbarDelegate {
     }
 
     func insert(kind: String, extra: [String: Any] = [:]) {
-        guard sceneName != nil else { return }
-        var req = extra; req["kind"] = kind
+        guard let scene = sceneName else { return }
+        var req = extra; req["kind"] = kind; req["scene"] = scene
         // 1. show the element immediately (rasterised on its own, in parallel with the real insert)
-        Task { @MainActor in
+        if kind != "pen" { Task { @MainActor in
             if let sp = try? await engine.call("insert_sprite", req, as: SpriteResult.self), let path = sp.path,
                let tex = canvas.texture(path: path), let w = sp.w, let h = sp.h, sceneName != nil, canvas.ghost == nil || true {
                 canvas.ghost = (tex, Double(canvas.frameSize.width) / 2 + (sp.cx ?? 0), Double(canvas.frameSize.height) / 2 + (sp.cy ?? 0), w, h)
             }
-        }
+        } }
         // 2. patch the source and re-render in the background
         submit { [weak self] in
             guard let self = self, let name = self.sceneName else { return }
@@ -190,13 +231,15 @@ extension MainController: NSToolbarDelegate {
             self.busy -= 1
             guard let r = res, r.ok == true else {
                 self.canvas.ghost = nil
+                if kind == "pen", !self.canvas.pendingStrokes.isEmpty { self.canvas.pendingStrokes.removeFirst() }
                 self.toast(res?.error ?? "insert failed", error: true); return
             }
             self.lastChanged = ChangedLines(file: r.file, ranges: [[r.line ?? 1, r.line ?? 1]])
             await self.loadScene(name, keepStop: true)
             self.canvas.ghost = nil
+            if kind == "pen", !self.canvas.pendingStrokes.isEmpty { self.canvas.pendingStrokes.removeFirst() }
             let target = "\(r.file ?? ""):\(r.line ?? 0)"
-            if let oid = self.scene?.objects?.first(where: { $0.value.loc == target })?.key, let id = Int(oid) {
+            if kind != "pen", let oid = self.scene?.objects?.first(where: { $0.value.loc == target })?.key, let id = Int(oid) {
                 self.selection = id
                 if kind == "text" { self.beginEdit(id) }
             }

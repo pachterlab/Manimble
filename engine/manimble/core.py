@@ -6,6 +6,7 @@ import ast
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -16,7 +17,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .srcedit import EditError, Planner, Project, fmt, py_str, py_tex
+from .srcedit import EditError, Planner, Project, Src, _stmt_lines, fmt, py_str, py_tex, remove_kwargs
 
 HERE = Path(__file__).resolve().parent
 
@@ -78,6 +79,10 @@ class WorkerProc:
 
 # ------------------------------------------------------------------- state
 
+TEXT_OPS = ("text", "font", "color", "style", "table", "delete", "decorate", "highlight", "align", "columns",
+            "spacing", "clear_format")
+
+
 class Manimble:
     def __init__(self, deck: str, python: str, cache: str | None = None):
         self.project = Project(deck)
@@ -121,7 +126,16 @@ class Manimble:
     # ----------------------------------------------------------- scenes
     def refresh_scenes(self):
         found = self.project.scenes()
-        rows = [{"name": n, "file": rel, "line": l, "end": e, "module": rel[:-3]} for n, rel, l, e in found]
+        rows = []
+        for n, rel, l, e in found:
+            try:
+                src = self.project.src(rel)
+                a = src.line_starts[l - 1]
+                b = src.line_starts[l] if l < len(src.line_starts) else len(src.data)
+                hidden = self.HIDDEN_MARK in src.data[a:b].decode("utf-8", "replace")
+            except Exception:                       # noqa: BLE001
+                hidden = False
+            rows.append({"name": n, "file": rel, "line": l, "end": e, "module": rel[:-3], "hidden": hidden})
         order_file = os.path.join(self.deck, "order.txt")
         listed = rows
         if os.path.exists(order_file):
@@ -138,6 +152,12 @@ class Manimble:
             if s["name"] == name:
                 return s
         raise KeyError(name)
+
+    HIDDEN_MARK = "# manimble hidden"
+
+    def visible_scenes(self) -> list:
+        """The slides of the show that are not hidden (what a slideshow, the presenter and exports use)."""
+        return [s for s in self.scenes if not s.get("hidden")]
 
     def _signature(self):
         """Cheap fingerprint (mtimes/sizes) of every file a scene could depend on."""
@@ -381,7 +401,7 @@ class Manimble:
             for s in scenes:
                 st = self.status(s["name"])
                 r = self.results.get(s["name"])
-                item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st}
+                item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st, "hidden": bool(s.get("hidden"))}
                 if r and "data" in r:
                     item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
                     item["stops"] = len(r["data"]["stops"])
@@ -436,8 +456,10 @@ class Manimble:
                 "kind": o["kind"], "value": o["value"], "fontSize": o["font_size"], "color": o["color"],
                 "siblings": counts[k], "font": o.get("font"), "weight": o.get("weight"), "slant": o.get("slant"),
                 "loc": f"{o['frames'][-1]['file']}:{o['frames'][-1]['pos'][0]}",
+                "rotation": o.get("rotation"), "dims": o.get("dims"),
             }
             if o["kind"] in ("text", "tex"):
+                info["format"] = self.planner.format_info(o)
                 t = self.planner.text_target(o)
                 info["textOk"] = t.kind == "node"
                 if t.kind == "node":
@@ -448,6 +470,8 @@ class Manimble:
                     info["textNote"] = t.note
             elif o["kind"] == "image":
                 info["image"] = os.path.basename(o["value"])
+                if o.get("path"):
+                    info["imagePath"] = o["path"]
             else:
                 info["shape"] = o["value"]
             objects[oid] = info
@@ -462,6 +486,7 @@ class Manimble:
             } for st in data["stops"]],
             "objects": objects,
             "source": self.api_source(name),
+            "notes": self._notes_of(name),
         }
 
     def api_source(self, name: str) -> dict:
@@ -606,6 +631,41 @@ class Manimble:
                     if abs(ratio - 1) < 1e-3:
                         return {"ok": True, "message": "no change"}
                     attempts = self.planner.plan_resize(obj, ratio)
+                elif op == "decorate":
+                    kind = req.get("kind", "underline")
+                    label = ("underline" if kind == "underline" else "strikethrough") + (" on" if req.get("on", True) else " off")
+                    attempts = [(label, self.planner.plan_decoration(obj, kind, bool(req.get("on", True))))]
+                elif op == "highlight":
+                    label = "highlight" if req.get("color") else "remove highlight"
+                    attempts = [(label, self.planner.plan_highlight(obj, req.get("color"), float(req.get("opacity", 0.6))))]
+                elif op == "align":
+                    label = "alignment"
+                    attempts = [(label, self.planner.plan_align(obj, str(req["value"])))]
+                elif op == "columns":
+                    label = "columns"
+                    attempts = [(label, self.planner.plan_columns(obj, int(req["value"])))]
+                elif op == "spacing":
+                    label = "line spacing"
+                    if obj["kind"] != "text":
+                        return {"ok": False, "error": "line spacing applies to text"}
+                    attempts = [(label, self.planner.plan_arg(obj, "line_spacing", fmt(float(req["value"]), 2), outermost=True))]
+                elif op == "clear_format":
+                    label = "clear formatting"
+                    attempts = [(label, self.planner.plan_clear_format(obj))]
+                elif op == "size":
+                    label = "size"
+                    w = float(req["width"]) * ux if req.get("width") is not None else None
+                    h = float(req["height"]) * uy if req.get("height") is not None else None
+                    if w is None and h is None:
+                        return {"ok": True, "message": "no change"}
+                    attempts = self.planner.plan_size(obj, w, h)
+                elif op == "rotate":
+                    label = "rotate"
+                    want = float(req["degrees"]) % 360.0
+                    delta = math.radians(((want - float(obj.get("rotation") or 0.0)) + 180.0) % 360.0 - 180.0)
+                    if abs(delta) < 1e-4:
+                        return {"ok": True, "message": "no change"}
+                    attempts = self.planner.plan_rotate(obj, delta)
                 else:
                     return {"ok": False, "error": f"unknown operation {op}"}
             except EditError as exc:
@@ -613,6 +673,8 @@ class Manimble:
 
             if not attempts:
                 return {"ok": False, "error": "nothing to edit"}
+            if all(not edits for _, edits in attempts):
+                return {"ok": True, "message": "no change"}
             last_error = "edit had no visible effect"
             for how, edits in attempts:
                 try:
@@ -627,7 +689,7 @@ class Manimble:
                     self.results.pop(name, None)
                     self.render_now(name, interactive=True)
                     last_error = new["error"]
-                    if op in ("text", "font", "color", "style", "table", "delete"):
+                    if op in TEXT_OPS:
                         hint = ""
                         if "NoneType" in last_error or "get_part" in last_error:
                             hint = " The slide's code picks out parts of this text/formula by name, so the new content must keep those parts."
@@ -636,10 +698,10 @@ class Manimble:
                     continue
                 ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy)
                 if ok:
-                    self._commit(label if op in ("text", "font", "color", "style", "table", "delete") else f"{label} ({how})", written)
+                    self._commit(label if op in TEXT_OPS else f"{label} ({how})", written)
                     msg = how
                     sib = None
-                    if op in ("move", "resize", "endpoints"):
+                    if op in ("move", "resize", "endpoints", "size", "rotate"):
                         cnt = sum(1 for o in data["objects"].values()
                                   if o["frames"][-1]["pos"] == obj["frames"][-1]["pos"]
                                   and o["frames"][-1]["file"] == obj["frames"][-1]["file"])
@@ -652,7 +714,7 @@ class Manimble:
                 self.render_now(name, interactive=True)
             ctl = [e for e in obj["events"] if e["method"] in
                    ("move_to", "next_to", "to_edge", "to_corner", "align_to", "arrange", "arrange_in_grid")]
-            if ctl and op in ("move", "resize", "endpoints"):
+            if ctl and op in ("move", "resize", "endpoints", "size"):
                 e = ctl[-1]
                 fr = e["frames"][-1]
                 last_error += f" (position is set by .{e['method']}() at {fr['file']}:{fr['pos'][0]})"
@@ -667,12 +729,27 @@ class Manimble:
             if max(abs(ln[i] - want[i]) for i in range(4)) > 4:
                 return False, "later code in the slide overrides this line"
             return True, ""
-        if op not in ("move", "resize"):
+        if op == "rotate":
+            got = float(data["objects"].get(oid, {}).get("rotation") or 0.0)
+            want = float(req["degrees"]) % 360.0
+            if abs(((got - want) + 180.0) % 360.0 - 180.0) > 0.5:
+                return False, "later code in the slide overrides this rotation"
+            return True, ""
+        if op not in ("move", "resize", "size"):
             return True, ""
         vis = {str(v[0]): v for v in data["stops"][min(stop, len(data["stops"]) - 1)]["visible"]}
         after = vis.get(oid)
         if not after or not before_box:
             return False, "object is not visible after the change"
+        if op == "size":
+            dims = data["objects"].get(oid, {}).get("dims") or [after[3] - after[1], after[4] - after[2]]
+            for k, i in (("width", 0), ("height", 1)):
+                if req.get(k) is None:
+                    continue
+                got, want = float(dims[i]), float(req[k])
+                if abs(got - want) > max(4.0, 0.03 * want):
+                    return False, f"later code in the slide overrides this {k}"
+            return True, ""
         cx0 = (before_box[1] + before_box[3]) / 2
         cy0 = (before_box[2] + before_box[4]) / 2
         cx1 = (after[1] + after[3]) / 2
@@ -720,21 +797,25 @@ class Manimble:
                 return f"{base}{i}"
 
             edits, label, select = [], op, name
+            numbering = self._page_settings()        # slide numbers written in the deck follow every reordering
+            final, nn = None, None                   # the show's order afterwards; a class this operation creates
             try:
                 if op == "new":
                     if cls is None:
                         return {"ok": False, "error": "select a slide first"}
                     base = ast.unparse(cls.bases[0]) if cls.bases else "Scene"
                     nn = fresh("NewSlide")
-                    body = self._insert_code("text", {}).replace('"Text"', '"New slide"', 1)
-                    text = (f"\n\nclass {nn}({base}):\n    def construct(self):\n"
-                            f"        self.add({body})  # manimble\n")
+                    i = names.index(name) if name in names else len(names) - 1
+                    final = names[:i + 1] + [nn] + names[i + 1:]
+                    body = "".join(f"        {ln}\n" for ln in self._layout_body(str(req.get("layout") or "title_content")))
+                    text = f"\n\nclass {nn}({base}):\n    def construct(self):\n{body}"
+                    if numbering:
+                        text = self._page_patch_text(text, numbering["start"] + final.index(nn), numbering["start"] + len(final) - 1, numbering)
                     at = src.line_starts[cls.end_lineno] if cls.end_lineno < len(src.line_starts) else len(src.data)
                     if at == len(src.data) and not src.data.endswith(b"\n"):
                         text = "\n" + text
                     edits.append(Edit(src.rel, at, at, text))
-                    i = names.index(name)
-                    edits.append(self._order_edit(names[:i + 1] + [nn] + names[i + 1:]))
+                    edits.append(self._order_edit(final))
                     label, select = "new slide", nn
                 elif op == "duplicate":
                     if cls is None:
@@ -746,9 +827,12 @@ class Manimble:
                     chunk = chunk.replace(f"class {name}(", f"class {nn}(", 1)
                     if not chunk.endswith("\n"):
                         chunk += "\n"
+                    i = names.index(name) if name in names else len(names) - 1
+                    final = names[:i + 1] + [nn] + names[i + 1:]
+                    if numbering:
+                        chunk = self._page_patch_text(chunk, numbering["start"] + final.index(nn), numbering["start"] + len(final) - 1, numbering)
                     edits.append(Edit(src.rel, b, b, "\n\n" + chunk if b < len(src.data) else "\n\n" + chunk))
-                    i = names.index(name)
-                    edits.append(self._order_edit(names[:i + 1] + [nn] + names[i + 1:]))
+                    edits.append(self._order_edit(final))
                     label, select = "duplicate slide", nn
                 elif op == "delete":
                     if cls is None:
@@ -763,19 +847,26 @@ class Manimble:
                     rest = [n for n in names if n != name]
                     if name in names:
                         edits.append(self._order_edit(rest))
+                        final = rest
                     label = "delete slide"
                     select = names[i + 1] if i >= 0 and i + 1 < len(names) else (names[i - 1] if i > 0 else (names[0] if names else None))
                 elif op == "skip":
                     if name not in names:
                         return {"ok": False, "error": "slide is already skipped"}
                     i = names.index(name)
-                    edits.append(self._order_edit([n for n in names if n != name]))
+                    final = [n for n in names if n != name]
+                    edits.append(self._order_edit(final))
+                    if numbering and src is not None:
+                        e = self._page_edit(src, self._construct(cur)[1], None, True)     # a skipped slide shows no stale number
+                        if e:
+                            edits.append(e)
                     label = "skip slide"
                     select = names[i + 1] if i + 1 < len(names) else (names[i - 1] if i > 0 else None)
                 elif op == "unskip":
                     if name in names:
                         return {"ok": False, "error": "slide is already in the show"}
-                    edits.append(self._order_edit(names + [name]))
+                    final = names + [name]
+                    edits.append(self._order_edit(final))
                     label = "restore slide"
                 elif op == "reorder":
                     if name not in names:
@@ -789,7 +880,26 @@ class Manimble:
                     names.pop(source)
                     names.insert(destination - (1 if source < destination else 0), name)
                     edits.append(self._order_edit(names))
+                    final = names
                     label = "move slide"
+                elif op in ("hide", "unhide"):
+                    if cls is None:
+                        return {"ok": False, "error": "select a slide first"}
+                    a = src.line_starts[cls.lineno - 1]
+                    b = src.line_starts[cls.lineno] if cls.lineno < len(src.line_starts) else len(src.data)
+                    line = src.data[a:b].decode("utf-8")
+                    body = line.rstrip("\n")
+                    nl = line[len(body):]
+                    if op == "hide":
+                        if self.HIDDEN_MARK in body:
+                            return {"ok": True, "message": "slide is already hidden", "select": name}
+                        new = body + "  " + self.HIDDEN_MARK + nl
+                    else:
+                        if self.HIDDEN_MARK not in body:
+                            return {"ok": True, "message": "slide is not hidden", "select": name}
+                        new = re.sub(r"\s*" + re.escape(self.HIDDEN_MARK), "", body) + nl
+                    edits.append(Edit(src.rel, a, b, new))
+                    label = "hide slide" if op == "hide" else "unhide slide"
                 elif op in ("up", "down"):
                     i = names.index(name)
                     j = i - 1 if op == "up" else i + 1
@@ -797,9 +907,12 @@ class Manimble:
                         return {"ok": True, "message": "already at the " + ("start" if op == "up" else "end"), "select": name}
                     names[i], names[j] = names[j], names[i]
                     edits.append(self._order_edit(names))
+                    final = names
                     label = "move slide"
                 else:
                     return {"ok": False, "error": f"unknown slide operation {op}"}
+                if numbering and final is not None:
+                    edits += self._page_edits(final, numbering, skip={nn} if nn else set())
                 written = self.project.apply(edits)
                 self._sig_at = 0
             except Exception as exc:
@@ -812,20 +925,425 @@ class Manimble:
             self.enqueue_all()
             return {"ok": True, "message": label, "select": select}
 
-    def deck_pages(self, req: dict) -> dict:
-        """Every build of every slide, in order, for the slideshow."""
-        slides = []
+    LAYOUTS = ("title", "title_content", "section", "two_content", "title_only", "blank")
+
+    def _layout_body(self, layout: str) -> list[str]:
+        """construct() statements (unindented) of a new slide with a PowerPoint-style layout."""
+        font = ", font=FONT" if self._font_const() else ""
+
+        def element(var, text, size, x, y, color=None):
+            c = f", color={color}" if color else ""
+            return [f"{var} = Text({py_str(text)}, font_size={size}{font}{c}).move_to(({fmt(x)}, {fmt(y)}, 0))  # manimble",
+                    f"self.add({var})  # manimble"]
+        bullets = "\u2022 First point\n\u2022 Second point\n\u2022 Third point"
+        if layout == "title":
+            return element("title", "Title", 64, 0, 0.7) + element("subtitle", "Subtitle", 32, 0, -0.8, "GREY_B")
+        if layout == "section":
+            return element("title", "Section title", 56, 0, 0.5) + element("subtitle", "Subtitle", 30, 0, -0.9, "GREY_B")
+        if layout == "title_only":
+            return element("title", "Title", 48, 0, 3.0)
+        if layout == "two_content":
+            return (element("title", "Title", 48, 0, 3.0) + element("left", bullets, 30, -3.4, 0.2)
+                    + element("right", bullets, 30, 3.4, 0.2))
+        if layout == "blank":
+            return ["pass"]
+        return element("title", "Title", 48, 0, 3.0) + element("body", bullets, 32, 0, 0.2)      # title and content
+
+    # ------------------------------------------------------- slide numbers
+    PAGE_MARK = "# manimble page number"
+    PAGE_RE = re.compile(r"# manimble page number(?: pos=(\w+))?(?: start=(-?\d+))?(?: skip=([01]))?(?: total=([01]))?(?: size=(\d+))?")
+    PAGE_PLACES = {"DR": "to_corner(DR, buff=0.35)", "DOWN": "to_edge(DOWN, buff=0.35)", "DL": "to_corner(DL, buff=0.35)"}
+    PAGE_DEFAULTS = {"pos": "DR", "start": 1, "skip": True, "total": True, "size": 24}
+
+    @classmethod
+    def _page_parse(cls, text: str) -> dict | None:
+        m = cls.PAGE_RE.search(text)
+        if not m:
+            return None
+        pos = m.group(1) or "DR"
+        return {"pos": pos if pos in cls.PAGE_PLACES else "DR", "start": int(m.group(2) or 1),
+                "skip": m.group(3) == "1", "total": m.group(4) == "1", "size": int(m.group(5) or 24)}
+
+    def _page_settings(self) -> dict | None:
+        """The slide-number options recorded in the deck's marker comments; None when the deck has no numbers."""
         for s in self.scenes:
+            try:
+                src, fn = self._construct(s)
+            except Exception:                       # noqa: BLE001
+                continue
+            hit = self._page_stmt(src, fn)
+            if hit:
+                return self._page_parse(hit[2]) or dict(self.PAGE_DEFAULTS)
+        return None
+
+    def _page_stmt(self, src, fn):
+        """(start, end, text) of the slide-number statement Manimble wrote into construct(), if any."""
+        for st in fn.body:
+            a, b = _stmt_lines(src, st)
+            text = src.data[a:b].decode("utf-8")
+            if self.PAGE_MARK in text:
+                return a, b, text
+        return None
+
+    def _background_is_light(self, src=None, fn=None) -> bool:
+        """Whether the slide's background (set in construct(), else manim.cfg) is light, so dark text is needed."""
+        color = self._default_background()
+        if src is not None and fn is not None:
+            try:
+                info = self._bg_parse([t for _, _, t in self._bg_statements(src, fn)])
+                if info["mode"] == "color" and info["color"]:
+                    color = info["color"]
+            except Exception:                       # noqa: BLE001
+                pass
+        try:
+            r, g, b = (int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        except (ValueError, IndexError):
+            return False
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.6
+
+    def _page_line(self, n: int, total: int, st: dict, src=None, fn=None) -> str:
+        label = f"{n} / {total}" if st["total"] else str(n)
+        font = ", font=FONT" if self._font_const() else ""
+        color = '"#333333"' if self._background_is_light(src, fn) else '"#FFFFFF"'
+        return (f"self.add(Text({py_str(label)}, font_size={st['size']}{font}, color={color}).{self.PAGE_PLACES[st['pos']]})"
+                f"  {self.PAGE_MARK} pos={st['pos']} start={st['start']} skip={int(st['skip'])} total={int(st['total'])} size={st['size']}")
+
+    def _is_preamble(self, src, st) -> bool:
+        """Statements that stay at the top of construct(): docstring, background, slide number, speaker notes."""
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str):
+            return True
+        a, b = _stmt_lines(src, st)
+        text = src.data[a:b].decode("utf-8")
+        if self.BG_MARK in text or self.PAGE_MARK in text or self.NOTES_MARK in text:
+            return True
+        return isinstance(st, ast.Assign) and len(st.targets) == 1 and ast.unparse(st.targets[0]) == "self.camera.background_color"
+
+    def _preamble_end(self, src, fn) -> tuple[int, str]:
+        """(offset, indent) for a new statement after construct()'s preamble."""
+        for st in fn.body:
+            if not self._is_preamble(src, st):
+                return src.line_starts[st.lineno - 1], " " * st.col_offset
+        last = fn.body[-1]
+        at = src.line_starts[last.end_lineno] if last.end_lineno < len(src.line_starts) else len(src.data)
+        return at, " " * last.col_offset
+
+    def _page_edit(self, src, fn, want: str | None, rewrite: bool):
+        """One edit that brings construct()'s slide-number line to `want` (None: no line). Unless `rewrite`,
+        an existing line only gets its number replaced, so a moved or restyled number keeps its tweaks."""
+        from .srcedit import Edit
+        old = self._page_stmt(src, fn)
+        if old:
+            a, b, text = old
+            if want is None:
+                return Edit(src.rel, a, b, "")
+            if rewrite:
+                indent = text[:len(text) - len(text.lstrip(" "))]
+                return Edit(src.rel, a, b, indent + want + "\n")
+            label = re.search(r'Text\("[^"]*"', want).group(0)
+            new = re.sub(r'Text\("[^"]*"', lambda m: label, text, count=1)
+            return Edit(src.rel, a, b, new) if new != text else None
+        if want is None or not fn.body:
+            return None
+        at, indent = self._preamble_end(src, fn)
+        lead = "\n" if at == len(src.data) and not src.data.endswith(b"\n") else ""
+        return Edit(src.rel, at, at, lead + indent + want + "\n")
+
+    def _page_edits(self, names: list, st: dict, skip=()) -> list:
+        """Renumber the slides of the show in this order (scenes in `skip` are handled by the caller)."""
+        edits = []
+        total = st["start"] + len(names) - 1
+        for i, n in enumerate(names):
+            if n in skip:
+                continue
+            try:
+                src, fn = self._construct(self.scene(n))
+            except Exception:                       # noqa: BLE001
+                continue
+            want = None if (st["skip"] and i == 0) else self._page_line(st["start"] + i, total, st, src, fn)
+            e = self._page_edit(src, fn, want, rewrite=False)
+            if e:
+                edits.append(e)
+        return edits
+
+    def _page_patch_text(self, text: str, n: int, total: int, st: dict) -> str:
+        """The slide-number line applied to a class definition given as text (a new or duplicated slide)."""
+        try:
+            src = Src("chunk", text.encode("utf-8"))
+        except SyntaxError:
+            return text
+        cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef)), None)
+        fn = next((n for n in (cls.body if cls else []) if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
+        if fn is None or not fn.body:
+            return text
+        want = self._page_line(n, total, st, src, fn)
+        e = self._page_edit(src, fn, want, rewrite=False)
+        if e is None:
+            return text
+        data = bytearray(src.data)
+        data[e.start:e.end] = e.text.encode("utf-8")
+        return bytes(data).decode("utf-8")
+
+    def page_numbers(self, req: dict) -> dict:
+        """Slide numbers: op=get reads the options; op=set writes `self.add(Text("3 / 10") ...)` into every slide of the
+        show (pos DR|DOWN|DL, start, skip the title slide, show the total, font size); op=remove deletes them."""
+        op = req.get("op", "get")
+        self.refresh_scenes()
+        if op == "get":
+            st = self._page_settings()
+            return {"on": st is not None, **(st or self.PAGE_DEFAULTS)}
+        with self.edit_lock:
+            names = self._order_names()
+            edits = []
+            if op == "remove":
+                for s in self.all_scenes:
+                    try:
+                        src, fn = self._construct(s)
+                    except Exception:               # noqa: BLE001
+                        continue
+                    e = self._page_edit(src, fn, None, True)
+                    if e:
+                        edits.append(e)
+                label = "remove slide numbers"
+            elif op == "set":
+                pos = str(req.get("pos") or "DR").upper()
+                st = {"pos": pos if pos in self.PAGE_PLACES else "DR", "start": int(req.get("start", 1)),
+                      "skip": bool(req.get("skip", True)), "total": bool(req.get("total", True)),
+                      "size": max(6, min(200, int(req.get("size", 24) or 24)))}
+                total = st["start"] + len(names) - 1
+                for i, n in enumerate(names):
+                    try:
+                        src, fn = self._construct(self.scene(n))
+                    except Exception:               # noqa: BLE001
+                        continue
+                    want = None if (st["skip"] and i == 0) else self._page_line(st["start"] + i, total, st, src, fn)
+                    e = self._page_edit(src, fn, want, rewrite=True)
+                    if e:
+                        edits.append(e)
+                label = "slide numbers"
+            else:
+                return {"ok": False, "error": f"unknown slide-number operation {op}"}
+            if not edits:
+                return {"ok": True, "message": "no change"}
+            try:
+                written = self.project.apply(edits)
+                self._sig_at = 0
+            except Exception as exc:                # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+            current = req.get("scene") if req.get("scene") in names else (names[0] if names else None)
+            if current:
+                new = self.render_now(current, interactive=True)
+                if "error" in new:
+                    self._restore(written, 0)
+                    self.results.pop(current, None)
+                    self.render_now(current, interactive=True)
+                    return {"ok": False, "error": "The slide no longer renders with slide numbers, so they were undone: "
+                            + new["error"][-300:]}
+            self._commit(label, written)
+            self.refresh_scenes()
+            self.enqueue_all()
+            return {"ok": True, "message": label, "changed": self.last_changed}
+
+    # ------------------------------------------------------- one-file Python export
+    def export_python(self, req: dict) -> dict:
+        """Write the whole deck as one Python file: helper modules inlined, then the slides in show order.
+        Deck-local imports are dropped (their code is in the file); everything else is kept as written."""
+        path = req.get("path")
+        if not path:
+            return {"ok": False, "error": "no destination"}
+        self.refresh_scenes()
+        include_hidden = bool(req.get("hidden", False))
+        wanted = [s for s in self.scenes if include_hidden or not s.get("hidden")]
+        scene_names = {s["name"] for s in self.all_scenes}
+        local = {rel[:-3] for rel in self.project.py_files()}
+        srcs = {}
+        for rel in self.project.py_files():
+            try:
+                srcs[rel[:-3]] = self.project.src(rel)
+            except SyntaxError as exc:
+                return {"ok": False, "error": f"{rel}: {exc}"}
+
+        def local_import(node) -> bool:
+            if isinstance(node, ast.ImportFrom):
+                return node.level == 0 and (node.module or "").split(".")[0] in local
+            if isinstance(node, ast.Import):
+                return all(a.name.split(".")[0] in local for a in node.names)
+            return False
+
+        def deps(mod) -> set:
+            out = set()
+            for n in srcs[mod].tree.body:
+                if isinstance(n, ast.ImportFrom) and local_import(n):
+                    out.add(n.module.split(".")[0])
+                elif isinstance(n, ast.Import) and local_import(n):
+                    out |= {a.name.split(".")[0] for a in n.names}
+            return out & set(srcs) - {mod}
+
+        def chunk(src, node) -> str:
+            a = src.line_starts[node.lineno - 1]
+            b = src.line_starts[node.end_lineno] if node.end_lineno < len(src.line_starts) else len(src.data)
+            # decorators sit above the node's first line
+            for d in getattr(node, "decorator_list", []):
+                a = min(a, src.line_starts[d.lineno - 1])
+            return src.data[a:b].decode("utf-8")
+
+        # helper modules first, each after the ones it imports; then the non-scene code of the scene modules
+        ordered, seen = [], set()
+
+        def visit(mod):
+            if mod in seen:
+                return
+            seen.add(mod)
+            for d in sorted(deps(mod)):
+                visit(d)
+            ordered.append(mod)
+        helpers = [m for m in sorted(srcs) if not any(isinstance(n, ast.ClassDef) and n.name in scene_names for n in srcs[m].tree.body)]
+        scene_mods = [m for m in sorted(srcs) if m not in helpers]
+        for m in helpers + scene_mods:
+            visit(m)
+        parts = [f'"""{os.path.basename(os.path.dirname(self.deck))}/{os.path.basename(self.deck)}: the whole deck in one file, '
+                 f'written by Manimble.\n\nKeep it in the deck folder (or next to the deck\'s assets) so relative paths still work.\n"""\n']
+        for mod in ordered:
+            src = srcs[mod]
+            body = []
+            for n in src.tree.body:
+                if local_import(n) or (isinstance(n, ast.ClassDef) and n.name in scene_names):
+                    continue
+                if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str) and n is src.tree.body[0]:
+                    continue                                # module docstring
+                if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body:
+                    body.append("\n\n")
+                body.append(chunk(src, n))
+            text = "".join(body).strip("\n")
+            if text:
+                parts.append(f"\n# ---- {mod}.py\n\n{text}\n")
+        parts.append("\n# ---- slides, in the order of the show\n")
+        for s in wanted:
+            src = srcs.get(s["module"])
+            cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == s["name"]), None) if src else None
+            if cls is None:
+                continue
+            parts.append("\n\n" + chunk(src, cls).rstrip("\n") + "\n")
+        parts.append("\n\nSLIDES = [" + ", ".join(py_str(s["name"]) for s in wanted) + "]   # the show, in order\n")
+        out = "".join(parts)
+        try:
+            ast.parse(out)
+        except SyntaxError as exc:
+            return {"ok": False, "error": f"the combined file does not parse: line {exc.lineno}: {exc.msg}"}
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(out)
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "message": f"{len(wanted)} slides written to {os.path.basename(path)}", "path": path}
+
+    # ------------------------------------------------------- speaker notes
+    NOTES_MARK = "# manimble notes"
+
+    def _notes_stmt(self, src, fn):
+        """(statement, keyword) of the leading `self.next_slide(notes=...)` that holds the slide's speaker notes."""
+        for st in fn.body:
+            if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call) and ast.unparse(st.value.func) == "self.next_slide":
+                kw = next((k for k in st.value.keywords if k.arg == "notes"), None)
+                if kw is not None and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    return st, kw
+                return None
+            if not self._is_preamble(src, st):
+                return None
+        return None
+
+    def _notes_of(self, name: str) -> str:
+        try:
+            src, fn = self._construct(self.scene(name))
+            hit = self._notes_stmt(src, fn)
+            return hit[1].value.value if hit else ""
+        except Exception:                           # noqa: BLE001
+            return ""
+
+    def notes(self, req: dict) -> dict:
+        """Speaker notes of a slide: op=get -> {text}; op=set writes `self.next_slide(notes="...")` at the top of
+        construct() (what manim-slides' presenter shows for the first build), or removes it for empty text."""
+        from .srcedit import Edit
+        op = req.get("op", "get")
+        name = req["scene"]
+        self.refresh_scenes()
+        if op == "get":
+            return {"text": self._notes_of(name)}
+        with self.edit_lock:
+            text = str(req.get("text") or "")
+            try:
+                src, fn = self._construct(self.scene(name))
+            except (EditError, KeyError) as exc:
+                return {"ok": False, "error": str(exc)}
+            hit = self._notes_stmt(src, fn)
+            if hit:
+                st, kw = hit
+                if kw.value.value == text:
+                    return {"ok": True, "message": "no change"}
+                if text:
+                    a, b = src.span(kw.value)
+                    edit = Edit(src.rel, a, b, py_str(text))
+                elif not st.value.args and len(st.value.keywords) == 1:
+                    a, b = _stmt_lines(src, st)
+                    edit = Edit(src.rel, a, b, "")
+                else:
+                    edit = remove_kwargs(src, st.value, {kw})
+            else:
+                if not text.strip():
+                    return {"ok": True, "message": "no change"}
+                first = fn.body[0]
+                doc = isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
+                if doc and len(fn.body) > 1:
+                    first = fn.body[1]
+                indent = " " * first.col_offset
+                line = f"self.next_slide(notes={py_str(text)})  {self.NOTES_MARK}"
+                if doc and len(fn.body) == 1:
+                    at = src.line_starts[first.end_lineno] if first.end_lineno < len(src.line_starts) else len(src.data)
+                    lead = "\n" if at == len(src.data) and not src.data.endswith(b"\n") else ""
+                    edit = Edit(src.rel, at, at, lead + indent + line + "\n")
+                else:
+                    at = src.line_starts[first.lineno - 1]
+                    edit = Edit(src.rel, at, at, indent + line + "\n")
+            try:
+                written = self.project.apply([edit])
+                self._sig_at = 0
+            except Exception as exc:                # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": "The slide no longer renders with these notes (its class needs manim_slides' "
+                        "next_slide), so they were undone: " + new["error"][-300:]}
+            self._commit("speaker notes", written)
+            self.refresh_scenes()
+            self.enqueue_all()
+            return {"ok": True, "message": "speaker notes", "changed": self.last_changed}
+
+    def deck_pages(self, req: dict) -> dict:
+        """Every build of every slide, in order, for the slideshow (hidden slides left out)."""
+        slides = []
+        for s in self.visible_scenes():
             sc = self.api_scene(s["name"])
             if sc.get("status") != "ready":
                 slides.append({"scene": s["name"], "error": sc.get("error", "not rendered"), "pages": []})
             else:
-                slides.append({"scene": s["name"], "pages": [st["png"] for st in sc["stops"]]})
+                slides.append({"scene": s["name"], "pages": [st["png"] for st in sc["stops"]], "notes": self._notes_of(s["name"])})
         return {"slides": slides}
 
     # ------------------------------------------------------------ insert
     def _font_const(self) -> bool:
         return bool(self.project.top_level_assigns("FONT"))
+
+    def _units(self, name: str | None):
+        """(ux, uy, pw, ph): manim units per frame pixel and the frame size in pixels."""
+        rec = self.results.get(name) if name else None
+        data = (rec or {}).get("data")
+        if data:
+            (fw, fh), (pw, ph) = data["frame"], data["size"]
+        else:
+            fw, fh, pw, ph = 14.222222, 8.0, 1280, 720
+        return fw / pw, fh / ph, pw, ph
 
     def _insert_code(self, kind: str, req: dict, preview: bool = False) -> str | None:
         font = ""
@@ -837,26 +1355,50 @@ class Manimble:
             else:
                 font = ", font=FONT"
         origin = "(0, 0, 0)"
+        # drawn on the canvas: start/end in frame pixels -> manim units
+        a, b = (-1.5, 0.0), (1.5, 0.0)
+        if req.get("sx") is not None:
+            ux, uy, pw, ph = self._units(req.get("scene"))
+            a = ((float(req["sx"]) - pw / 2) * ux, (ph / 2 - float(req["sy"])) * uy)
+            b = ((float(req["ex"]) - pw / 2) * ux, (ph / 2 - float(req["ey"])) * uy)
+            origin = f"({fmt((a[0] + b[0]) / 2)}, {fmt((a[1] + b[1]) / 2)}, 0)"
+        w, h = max(abs(b[0] - a[0]), 0.05), max(abs(b[1] - a[1]), 0.05)
+        pa, pb = f"({fmt(a[0])}, {fmt(a[1])}, 0)", f"({fmt(b[0])}, {fmt(b[1])}, 0)"
+        drawn = req.get("sx") is not None
         codes = {
             "text": f'Text("Text", font_size=36{font}).move_to({origin})',
             "formula": f'MathTex({py_tex(req.get("tex") or "x^2 + y^2 = z^2", True)}, font_size=48).move_to({origin})',
-            "rectangle": f'Rectangle(width=3, height=1.8, color=WHITE, stroke_width=4).move_to({origin})',
-            "rounded": f'RoundedRectangle(width=3, height=1.8, corner_radius=0.25, color=WHITE, stroke_width=4).move_to({origin})',
-            "circle": f'Circle(radius=1, color=WHITE, stroke_width=4).move_to({origin})',
+            "rectangle": f'Rectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color=WHITE, stroke_width=4).move_to({origin})',
+            "rounded": f'RoundedRectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, corner_radius=0.25, color=WHITE, stroke_width=4).move_to({origin})',
+            "circle": f'Circle(radius={fmt(min(w, h) / 2) if drawn else 1}, color=WHITE, stroke_width=4).move_to({origin})',
+            "ellipse": f'Ellipse(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color=WHITE, stroke_width=4).move_to({origin})',
             "triangle": f'Triangle(color=WHITE, stroke_width=4).scale(1.2).move_to({origin})',
-            "line": 'Line((-1.5, 0, 0), (1.5, 0, 0), color=WHITE, stroke_width=4)',
-            "arrow": 'Arrow((-1.5, 0, 0), (1.5, 0, 0), buff=0, color=WHITE)',
+            "line": f'Line({pa}, {pb}, color=WHITE, stroke_width=4)',
+            "arrow": f'Arrow({pa}, {pb}, buff=0, color=WHITE)',
+            "darrow": f'DoubleArrow({pa}, {pb}, buff=0, color=WHITE)',
         }
         if kind == "table":
             r, c = max(1, int(req.get("rows", 3))), max(1, int(req.get("cols", 3)))
             data = "[" + ", ".join("[" + ", ".join(str(i * c + j + 1) for j in range(c)) + "]" for i in range(r)) + "]"
             codes["table"] = f"MathTable({data}, include_outer_lines=True).scale(0.7).move_to({origin})"
         if kind == "image":
+            iw = fmt(w) if drawn else "4"           # drawn / placed: the box's width in manim units
             if preview:
-                codes["image"] = f'ImageMobject({py_str(req["path"])}).set(width=4).move_to({origin})'
+                codes["image"] = f'ImageMobject({py_str(req["path"])}).set(width={iw}).move_to({origin})'
             else:
                 codes["image"] = (f'ImageMobject(str(__import__("pathlib").Path(__file__).resolve().parent / {py_str(req["file"])}))'
-                                  f'.set(width=4).move_to({origin})')
+                                  f'.set(width={iw}).move_to({origin})')
+        if kind == "pen":
+            pts = [p for p in (req.get("points") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
+            if len(pts) < 2:
+                return None
+            ux, uy, pw, ph = self._units(req.get("scene"))
+            coords = ", ".join(f"({fmt((float(x) - pw / 2) * ux, 2)}, {fmt((ph / 2 - float(y)) * uy, 2)}, 0)" for x, y in pts)
+            color = str(req.get("color") or "#FF3B30").upper()
+            if not re.fullmatch(r"#[0-9A-F]{6}", color):
+                color = "#FF3B30"
+            width = fmt(min(max(float(req.get("width", 6) or 6), 0.5), 60), 1)
+            codes["pen"] = f'VMobject(color={py_str(color)}, stroke_width={width}).set_points_smoothly([{coords}])'
         return codes.get(kind)
 
     def insert_sprite(self, req: dict) -> dict:
@@ -880,7 +1422,8 @@ class Manimble:
                 stops = rec["data"]["stops"]
                 si = min(int(req.get("stop", 0)), nstops - 1)
                 edit, line = self.planner.plan_insert(self.scene(name), si, nstops, code,
-                                                      stops[si].get("site") if si < nstops - 1 else None)
+                                                      stops[si].get("site") if si < nstops - 1 else None,
+                                                      tag="pen" if kind == "pen" else "")
                 written = self.project.apply([edit])
                 self._sig_at = 0
             except Exception as exc:
@@ -898,6 +1441,45 @@ class Manimble:
                                                  if o["frames"][-1]["pos"][0] == line and o["frames"][-1]["file"] == edit.rel))
             return {"ok": True, "message": f"inserted {kind}", "line": line, "file": edit.rel,
                     "changed": self.last_changed, "hidden": not shown}
+
+    def insert_many(self, req: dict) -> dict:
+        """Insert several elements (`items`: one dict per element, as for `insert`) at the same build as one undo step."""
+        with self.edit_lock:
+            name = req["scene"]
+            items = [it for it in (req.get("items") or []) if isinstance(it, dict) and it.get("kind")]
+            if not items:
+                return {"ok": False, "error": "nothing to insert"}
+            rec = self.fresh_record(name)
+            if "error" in rec:
+                return {"ok": False, "error": rec["error"]}
+            stops = rec["data"]["stops"]
+            nstops = len(stops)
+            si = min(int(req.get("stop", 0)), nstops - 1)
+            site = stops[si].get("site") if si < nstops - 1 else None
+            try:
+                edits = []
+                for it in items:
+                    code = self._insert_code(it["kind"], dict(it, scene=name))
+                    if code is None:
+                        return {"ok": False, "error": f"unknown element {it['kind']}"}
+                    edit, _ = self.planner.plan_insert(self.scene(name), si, nstops, code, site,
+                                                       tag="pen" if it["kind"] == "pen" else "")
+                    edits.append(edit)
+                # edits at one offset land in reverse order of application: keep the items' order on the slide
+                written = self.project.apply(list(reversed(edits)))
+                self._sig_at = 0
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": new["error"]}
+            kinds = {it["kind"] for it in items}
+            what = f"{len(items)} {next(iter(kinds))}s" if len(kinds) == 1 else f"{len(items)} elements"
+            self._commit(f"insert {what}", written)
+            return {"ok": True, "message": f"inserted {what}", "file": edits[0].rel, "changed": self.last_changed}
 
     # -------------------------------------------------------- background
     BG_MARK = "# manimble background"
@@ -1153,9 +1735,9 @@ class Manimble:
             return {"ok": True, "message": msg, "changed": self.last_changed}
 
     def pages(self, req: dict) -> dict:
-        """Frame images for exporting: every build or just the last build of each slide."""
+        """Frame images for exporting: every build or just the last build of each slide (hidden slides left out)."""
         out = []
-        for s in self.scenes:
+        for s in self.visible_scenes():
             sc = self.api_scene(s["name"])
             if sc.get("status") != "ready":
                 return {"error": f"{s['name']}: {sc.get('error', 'not rendered')}"}
@@ -1337,7 +1919,7 @@ class Manimble:
                     emit({"event": "present", "phase": "error",
                           "error": "Animation playback needs a Qt binding. Re-run install_manimble.sh to install PySide6."})
                     return
-            selected = [self.scene(only_scene)] if only_scene else list(self.scenes)
+            selected = [self.scene(only_scene)] if only_scene else list(self.visible_scenes())
             if not self._build_animation_slides(selected, "present"):
                 return
             if presenter.exists() and only_scene is None:

@@ -7,7 +7,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 920),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     let canvas = CanvasView()
-    let table = NSTableView()
+    let table = SlideTable()
     private let slideDragType = NSPasteboard.PasteboardType("org.manimble.slide-reorder")
     let stepsBar = NSStackView()
     let inspector = NSStackView()
@@ -59,11 +59,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var mainSplit: NSSplitView?
     var sideScroll: NSScrollView?
     var player: SlidePlayer?
+    var presenter: PresenterController?
     var animationPreview: AnimationPreviewView?
+    /// Speaker notes of the slide on screen, below the canvas (View ▸ Speaker Notes).
+    let notesBox = MultilineTextBox(string: "", maxLines: 4)
+    let notesPane = NSView()
+    var notesSplit: NSSplitView?
+    var notesMinHeight: NSLayoutConstraint?
     var previewScene: String?
     let stageArea = NSView()
     let terminal = TerminalPanel()
     var centerSplit: NSSplitView?
+    var formatBar: FormatBar!
+    /// Width and height fields change an object proportionally (true) or stretch it (false).
+    var aspectLocked = true
+    var colorPanelWork: DispatchWorkItem?
 
     // inspector controls kept for reading
     var zoomPopup: NSPopUpButton?
@@ -87,6 +97,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.onDelete = { [weak self] oid in self?.deleteSelected(oid) }
         canvas.onContextMenu = { [weak self] in self?.canvasMenu() }
         canvas.colorView = DarkMode.mode; canvas.darkImages = DarkMode.images
+        canvas.onDraw = { [weak self] kind, sx, sy, ex, ey in self?.drawFinished(kind, sx, sy, ex, ey) }
+        canvas.onPen = { [weak self] pts in self?.penFinished(pts) }
+        canvas.penColor = NSColor(hex: UserDefaults.standard.string(forKey: "penColor") ?? "#FF3B30")
+        canvas.onDrawToolChange = { [weak self] in self?.syncFormatBar() }
+        canvas.onGuidesChange = { [weak self] in self?.saveGuides() }
+        canvas.showGrid = UserDefaults.standard.bool(forKey: "showGrid")
+        canvas.snapEnabled = UserDefaults.standard.object(forKey: "snapObjects") as? Bool ?? true
+        syncFormatBar()
         window.center()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(canvas)
@@ -102,6 +120,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         table.headerView = nil
         table.rowHeight = 108
         table.dataSource = self; table.delegate = self
+        table.onDelete = { [weak self] in self?.deleteSlide() }
+        table.onMenu = { [weak self] row in self?.navigatorMenu(row: row) }
         table.registerForDraggedTypes([slideDragType])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.style = .plain
@@ -139,15 +159,24 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         stepsScroll.heightAnchor.constraint(equalToConstant: 68).isActive = true
         let center = NSView()
         let stageColumn = NSView()
-        stageColumn.addSubview(stageArea)
+        buildNotesPane()
+        // the slide above the notes, with a draggable divider between them
+        let ns = GrabSplitView(); ns.isVertical = false; ns.dividerStyle = .thin
+        ns.addArrangedSubview(stageArea); ns.addArrangedSubview(notesPane)
+        ns.setHoldingPriority(.init(240), forSubviewAt: 0)
+        ns.setHoldingPriority(.init(260), forSubviewAt: 1)
+        ns.autosaveName = "manimble.notes"
+        notesSplit = ns
+        stageColumn.addSubview(ns)
         stageColumn.addSubview(stepsScroll)
-        stageArea.translatesAutoresizingMaskIntoConstraints = false
+        ns.translatesAutoresizingMaskIntoConstraints = false
         stepsScroll.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stageArea.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
-            stageArea.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
-            stageArea.topAnchor.constraint(equalTo: stageColumn.topAnchor),
-            stageArea.bottomAnchor.constraint(equalTo: stepsScroll.topAnchor),
+            ns.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
+            ns.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
+            ns.topAnchor.constraint(equalTo: stageColumn.topAnchor),
+            ns.bottomAnchor.constraint(equalTo: stepsScroll.topAnchor),
+            stageArea.heightAnchor.constraint(greaterThanOrEqualToConstant: 160),
             stepsScroll.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
             stepsScroll.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
             stepsScroll.bottomAnchor.constraint(equalTo: stageColumn.bottomAnchor),
@@ -302,7 +331,19 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         DispatchQueue.main.async { right.setPosition(400, ofDividerAt: 0) }
         rebuildInspector()
-        return split
+        // the Home bar sits above everything
+        formatBar = makeFormatBar()
+        let root = NSView()
+        formatBar.translatesAutoresizingMaskIntoConstraints = false
+        split.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(formatBar); root.addSubview(split)
+        NSLayoutConstraint.activate([
+            formatBar.leadingAnchor.constraint(equalTo: root.leadingAnchor), formatBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            formatBar.topAnchor.constraint(equalTo: root.topAnchor),
+            split.leadingAnchor.constraint(equalTo: root.leadingAnchor), split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            split.topAnchor.constraint(equalTo: formatBar.bottomAnchor), split.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+        return root
     }
 
     // MARK: engine lifecycle
@@ -338,7 +379,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let pending = pendingDeck {
             pendingDeck = nil
             open(deck: pending)
-        } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] {
+        } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"]
+                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] {
             open(deck: d)
         } else {
             let last = UserDefaults.standard.string(forKey: "lastDeck")
@@ -457,9 +499,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 let ws = try Workspace(deck: deck)
                 workspace?.discard()
                 workspace = ws
-                if terminal.hasStarted { terminal.start(in: ws.work.path, original: ws.original.path) }
+                if terminal.hasStarted { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
                 _ = try await engine.raw("open", ["deck": ws.work.path, "cache": Workspace.cacheDir(for: ws.original)])
                 UserDefaults.standard.set(deck, forKey: "lastDeck")
+                loadGuides()
                 sceneName = nil; scene = nil; selection = nil
                 sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil
                 sourceFocused = false
@@ -688,7 +731,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let newRows = navigatorScenes
         if oldRows.map(\.name) == newRows.map(\.name) {
             var changed = IndexSet()
-            for (i, (a, b)) in zip(oldRows, newRows).enumerated() where a.thumb != b.thumb || a.status != b.status || a.stops != b.stops { changed.insert(i) }
+            for (i, (a, b)) in zip(oldRows, newRows).enumerated() where a.thumb != b.thumb || a.status != b.status || a.stops != b.stops || a.hidden != b.hidden { changed.insert(i) }
             if !changed.isEmpty { table.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0)) }
         } else {
             suppressTable = true; table.reloadData(); suppressTable = false
@@ -713,6 +756,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func selectScene(_ name: String) async {
         if name != sceneName && sourceFocused { window.makeFirstResponder(canvas) }
+        if name != sceneName && notesBox.isEditing { window.makeFirstResponder(canvas) }     // commits the notes first
         if name != sceneName && sourceDraft != nil {
             await queueTail?.value
             if sourceDraft != nil {
@@ -747,6 +791,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         scene = sc
+        if !notesBox.isEditing { notesBox.setText(sc.notes ?? "") }
         shownDir = URL(fileURLWithPath: sc.stops![0].png).deletingLastPathComponent().path
         stopIndex = keepStop ? min(stopIndex, sc.stops!.count - 1) : 0
         if let sel = selection, sc.objects?[String(sel)] == nil { selection = nil }
@@ -758,6 +803,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let tcase = ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMULA"], !testRan { testRan = true; formulaTest(tcase) }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] != nil, !testRan { testRan = true; backgroundTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] != nil, !testRan { testRan = true; darkModeTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] != nil, !testRan { testRan = true; formatTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] != nil, !testRan { testRan = true; toolsTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -766,6 +813,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func applyStop() {
         guard let sc = scene, let stops = sc.stops else { return }
         canvas.frameSize = CGSize(width: sc.size?[0] ?? 1280, height: sc.size?[1] ?? 720)
+        canvas.unitPx = (sc.size?[0] ?? 1280) / (sc.frame?[0] ?? 14.2222)
         canvas.sceneObjects = sc.objects ?? [:]
         canvas.stop = stops[stopIndex]
         canvas.selection = selection
@@ -899,7 +947,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             if img == nil, let i = DarkMode.image(path: t) { thumbCache.setObject(i, forKey: key); img = i }
         }
         let unused = row >= (state?.scenes.count ?? 0)
-        cell.configure(number: unused ? 0 : row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName, unused: unused)
+        cell.configure(number: unused ? 0 : row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName, unused: unused, hidden: s.hidden == true)
         _ = tv
         return cell
     }
@@ -987,6 +1035,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func rebuildInspector() {
         inspector.arrangedSubviews.forEach { $0.removeFromSuperview() }
         textField = nil; sizeField = nil; colorWell = nil
+        defer { syncFormatBar() }
         func width(_ v: NSView) { v.widthAnchor.constraint(equalToConstant: 292).isActive = true }
         guard let sel = selection, let sc = scene, let o = sc.objects?[String(sel)] else {
             inspector.addArrangedSubview(inspectorHeader(symbol: "rectangle.on.rectangle", title: "Slide", detail: sceneName))
@@ -1043,7 +1092,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 n.textColor = .secondaryLabelColor; width(n); inspector.addArrangedSubview(n)
             }
         }
-        if let b = canvas.stop?.box(of: sel) { geometryRows(b) }
+        if let b = canvas.stop?.box(of: sel) { geometryRows(b, o) }
         if o.siblings > 1 {
             let n = NSTextField(wrappingLabelWithString: "Created in a loop/helper: \(o.siblings) objects share this source line.")
             n.textColor = .systemOrange; width(n); inspector.addArrangedSubview(n)
@@ -1097,25 +1146,67 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         inspector.addArrangedSubview(label("Color")); inspector.addArrangedSubview(w)
     }
 
-    func geometryRows(_ b: Box) {
+    func geometryRows(_ b: Box, _ o: ObjInfo) {
         inspector.addArrangedSubview(hairline())
         inspector.addArrangedSubview(sectionLabel("Arrange"))
-        func row(_ a: (String, Double, Selector), _ c: (String, Double, Selector)) {
-            let fa = NSTextField(string: String(Int(a.1.rounded()))), fc = NSTextField(string: String(Int(c.1.rounded())))
-            fa.target = self; fa.action = a.2; fc.target = self; fc.action = c.2
-            fa.widthAnchor.constraint(equalToConstant: 80).isActive = true; fc.widthAnchor.constraint(equalToConstant: 80).isActive = true
-            let sa = NSStackView(views: [label(a.0), fa]); sa.orientation = .vertical; sa.alignment = .leading; sa.spacing = 2
-            let sc = NSStackView(views: [label(c.0), fc]); sc.orientation = .vertical; sc.alignment = .leading; sc.spacing = 2
-            let r = NSStackView(views: [sa, sc]); r.spacing = 16; inspector.addArrangedSubview(r)
+        func field(_ title: String, _ value: Double, _ sel: Selector, decimals: Int = 0) -> NSView {
+            let f = NSTextField(string: decimals == 0 ? String(Int(value.rounded())) : String(format: "%.\(decimals)f", value))
+            f.target = self; f.action = sel
+            f.widthAnchor.constraint(equalToConstant: 80).isActive = true
+            let s = NSStackView(views: [label(title), f]); s.orientation = .vertical; s.alignment = .leading; s.spacing = 2
+            return s
         }
-        row(("X (px)", b.cx, #selector(xCommitted(_:))), ("Y (px)", b.cy, #selector(yCommitted(_:))))
-        row(("Width", b.w, #selector(wCommitted(_:))), ("Height", b.h, #selector(hCommitted(_:))))
+        func row(_ views: [NSView]) { let r = NSStackView(views: views); r.spacing = 16; r.alignment = .bottom; inspector.addArrangedSubview(r) }
+        let dims = o.dims ?? [b.w, b.h]
+        row([field("X (px)", b.cx, #selector(xCommitted(_:))), field("Y (px)", b.cy, #selector(yCommitted(_:)))])
+        row([field("Width", dims[0], #selector(wCommitted(_:))), field("Height", dims[1], #selector(hCommitted(_:)))])
+        if o.kind != "line" {
+            var views: [NSView] = [field("Rotation (°)", o.rotation ?? 0, #selector(rotationCommitted(_:)), decimals: 1)]
+            if o.kind == "image" || o.kind == "shape" {
+                let lock = NSButton(checkboxWithTitle: "Keep aspect ratio", target: self, action: #selector(aspectToggled(_:)))
+                lock.state = aspectLocked ? .on : .off; lock.font = Theme.font(11)
+                lock.toolTip = "Off: width and height stretch the picture or shape independently"
+                views.append(lock)
+            }
+            row(views)
+        }
+    }
+
+    @objc func aspectToggled(_ b: NSButton) { aspectLocked = b.state == .on }
+
+    /// Width and height from manim (what stretching sets), falling back to the on-screen box.
+    func currentDims(_ s: Int) -> (Double, Double)? {
+        if let d = objInfo?.dims, d.count == 2, d[0] > 0, d[1] > 0 { return (d[0], d[1]) }
+        if let b = canvas.stop?.box(of: s), b.w > 0, b.h > 0 { return (b.w, b.h) }
+        return nil
     }
 
     @objc func xCommitted(_ f: NSTextField) { if let s = selection, let b = canvas.stop?.box(of: s) { commitMove(s, f.doubleValue - b.cx, 0) } }
     @objc func yCommitted(_ f: NSTextField) { if let s = selection, let b = canvas.stop?.box(of: s) { commitMove(s, 0, f.doubleValue - b.cy) } }
-    @objc func wCommitted(_ f: NSTextField) { if let s = selection, let b = canvas.stop?.box(of: s), b.w > 0 { commitResize(s, f.doubleValue / b.w) } }
-    @objc func hCommitted(_ f: NSTextField) { if let s = selection, let b = canvas.stop?.box(of: s), b.h > 0 { commitResize(s, f.doubleValue / b.h) } }
+    @objc func wCommitted(_ f: NSTextField) { commitDimension(width: f.doubleValue) }
+    @objc func hCommitted(_ f: NSTextField) { commitDimension(height: f.doubleValue) }
+
+    /// One dimension typed in the inspector: proportional resize when the aspect ratio is kept (or for text),
+    /// otherwise a stretch of that dimension alone.
+    func commitDimension(width: Double? = nil, height: Double? = nil) {
+        guard let s = selection, let o = objInfo, let (w, h) = currentDims(s) else { return }
+        let stretch = !aspectLocked && (o.kind == "image" || o.kind == "shape")
+        if !stretch {
+            if let v = width, v > 0 { commitResize(s, v / w) } else if let v = height, v > 0 { commitResize(s, v / h) }
+            return
+        }
+        var req: [String: Any] = ["op": "size", "oid": s]
+        if let v = width, v > 0 { req["width"] = v }
+        if let v = height, v > 0 { req["height"] = v }
+        guard req.count > 2 else { return }
+        submit { [weak self] in await self?.runEdit(req) }
+    }
+
+    @objc func rotationCommitted(_ f: NSTextField) {
+        guard let s = selection else { return }
+        let deg = f.doubleValue
+        submit { [weak self] in await self?.runEdit(["op": "rotate", "oid": s, "degrees": deg]) }
+    }
 
     // MARK: edits
 
@@ -1198,19 +1289,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    @objc func sizeCommitted(_ f: NSTextField) {
-        guard let s = selection, let o = objInfo, f.doubleValue >= 4 else { return }
-        let v = f.doubleValue
+    @objc func sizeCommitted(_ f: NSTextField) { commitFontSize(f.doubleValue) }
+
+    @objc func sizeStepped(_ st: NSStepper) {
+        sizeField?.doubleValue = st.doubleValue
+        formatBar?.sizeField.doubleValue = st.doubleValue
+        commitFontSize(st.doubleValue)
+    }
+
+    func commitFontSize(_ v: Double) {
+        guard let s = selection, let o = objInfo, v >= 4, o.kind == "text" || o.kind == "tex" else { return }
         submit { [weak self] in
             guard let self = self else { return }
             await self.previewSprite(s, kind: o.kind, value: o.value, size: v, color: o.color, font: o.font, weight: o.weight, slant: o.slant)
             await self.runEdit(["op": "font", "oid": s, "value": v])
         }
-    }
-
-    @objc func sizeStepped(_ st: NSStepper) {
-        sizeField?.doubleValue = st.doubleValue
-        if let f = sizeField { sizeCommitted(f) }
     }
 
     func commitStyle(font: String? = nil, weight: String? = nil, slant: String? = nil) {
@@ -1484,7 +1577,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func playFromCurrent() { play(fromCurrent: true) }
 
     func play(fromCurrent: Bool) {
-        guard player == nil else { return }
+        guard player == nil, presenter == nil else { return }
         closeAnimationPreview()
         Task { @MainActor in
             busyText = "Preparing slideshow…"
@@ -1507,10 +1600,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     // MARK: Slide menu
 
-    @objc func newSlide() { slideOp("new") }
+    @objc func newSlide() { slideOp("new", layout: "title_content") }
     @objc func duplicateSlide() { slideOp("duplicate") }
     @objc func deleteSlide() { slideOp("delete") }
     @objc func toggleSkipSlide() { slideOp(selectedSlideIsUnused ? "unskip" : "skip") }
+    var selectedSlideIsHidden: Bool { state?.scenes.first(where: { $0.name == sceneName })?.hidden == true }
+    @objc func toggleHideSlide() { slideOp(selectedSlideIsHidden ? "unhide" : "hide") }
     @objc func toggleUnusedSlides() {
         showUnusedSlides.toggle()
         suppressTable = true; table.reloadData(); suppressTable = false
@@ -1521,13 +1616,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func moveSlideUp() { slideOp("up") }
     @objc func moveSlideDown() { slideOp("down") }
 
-    func slideOp(_ op: String, index: Int? = nil, sceneOverride: String? = nil) {
+    func slideOp(_ op: String, index: Int? = nil, sceneOverride: String? = nil, layout: String? = nil) {
         guard let name = sceneOverride ?? sceneName else { return }
         submit { [weak self] in
             guard let self = self else { return }
             self.busy += 1
             var args: [String: Any] = ["op": op, "scene": name]
             if let index { args["index"] = index }
+            if let layout { args["layout"] = layout }
             let r = try? await self.engine.call("slide", args, as: SlideResult.self)
             self.busy -= 1
             guard let res = r, res.ok == true else { self.toast(r?.error ?? "slide operation failed", error: true); return }
@@ -1575,7 +1671,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         terminal.isHidden = !show
         cs.adjustSubviews()
         if show {
-            if !terminal.hasStarted, let ws = workspace { terminal.start(in: ws.work.path, original: ws.original.path) }
+            if !terminal.hasStarted, let ws = workspace { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
             DispatchQueue.main.async { [self] in
                 if cs.bounds.height > 300 { cs.setPosition(cs.bounds.height * 0.58, ofDividerAt: 0) }
                 terminal.focus()
@@ -1607,12 +1703,55 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(formatBold), #selector(formatItalic): return objInfo?.kind == "text"
-        case #selector(formatBigger), #selector(formatSmaller): return objInfo?.kind == "text" || objInfo?.kind == "tex"
-        case #selector(newSlide), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
+        case #selector(formatBigger), #selector(formatSmaller), #selector(formatUnderline), #selector(formatStrikethrough),
+             #selector(highlightChosen(_:)), #selector(clearFormatting):
+            if item.action == #selector(formatUnderline) { item.state = objInfo?.format?.underline == true ? .on : .off }
+            if item.action == #selector(formatStrikethrough) { item.state = objInfo?.format?.strike == true ? .on : .off }
+            if item.action == #selector(highlightChosen(_:)) {
+                item.state = (objInfo?.format?.highlight?.uppercased()) == (item.representedObject as? String)?.uppercased() ? .on : .off
+            }
+            return objInfo?.kind == "text" || objInfo?.kind == "tex"
+        case #selector(formatSuperscript), #selector(formatSubscript), #selector(toggleBullets), #selector(toggleNumbering),
+             #selector(increaseIndent), #selector(decreaseIndent):
+            return objInfo?.kind == "text" && objInfo?.textOk == true
+        case #selector(alignLeft), #selector(alignCenter), #selector(alignRight), #selector(alignJustify),
+             #selector(spacingMenuChosen(_:)), #selector(columnsMenuChosen(_:)):
+            let align = ["left": #selector(alignLeft), "center": #selector(alignCenter), "right": #selector(alignRight)]
+            if let a = objInfo?.format?.align, align[a] == item.action { item.state = .on } else if align.values.contains(item.action!) { item.state = .off }
+            if item.action == #selector(columnsMenuChosen(_:)) { item.state = (objInfo?.format?.columns ?? 1) == (item.representedObject as? Int) ? .on : .off }
+            return objInfo?.kind == "text"
+        case #selector(toggleGrid): item.state = canvas.showGrid ? .on : .off; return true
+        case #selector(toggleSnap): item.state = canvas.snapEnabled ? .on : .off; return true
+        case #selector(addVerticalGuide), #selector(addHorizontalGuide): return sceneName != nil
+        case #selector(clearGuides): return !canvas.userGuides.isEmpty
+        case #selector(drawToolMenu(_:)):
+            item.state = canvas.drawTool == (item.representedObject as? String) ? .on : .off
+            return sceneName != nil && player == nil
+        case #selector(penColorChosen(_:)):
+            item.state = (item.representedObject as? String)?.uppercased() == canvas.penColor.hexString.uppercased() ? .on : .off
+            return true
+        case #selector(newSlide), #selector(newSlideLayout(_:)), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
             return sceneName != nil && !selectedSlideIsUnused && player == nil
+        case #selector(extractElementsPressed):
+            return objInfo?.kind == "image" && objInfo?.imagePath != nil && player == nil
+        case #selector(slideNumbersPressed):
+            return state?.scenes.isEmpty == false && player == nil
+        case #selector(toggleNotesPane):
+            item.state = notesPane.isHidden ? .off : .on
+            return workspace != nil
+        case #selector(presenterView):
+            return state?.scenes.isEmpty == false && player == nil && presenter == nil
         case #selector(toggleSkipSlide):
             item.title = selectedSlideIsUnused ? "Restore Slide to Show" : "Skip Slide"
             return sceneName != nil && player == nil
+        case #selector(toggleHideSlide):
+            item.title = selectedSlideIsHidden ? "Unhide Slide" : "Hide Slide"
+            return sceneName != nil && !selectedSlideIsUnused && player == nil
+        case #selector(toggleTerminalInWorkCopy):
+            item.state = UserDefaults.standard.bool(forKey: "terminalInWorkCopy") ? .on : .off
+            return true
+        case #selector(exportPythonPressed):
+            return workspace != nil
         case #selector(toggleUnusedSlides):
             item.state = showUnusedSlides ? .on : .off
             return workspace != nil
@@ -1627,7 +1766,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(toggleInvertColors): item.state = DarkMode.mode == .invert ? .on : .off; return true
         case #selector(toggleDarkImages): item.state = DarkMode.images ? .on : .off; return DarkMode.isOn
         case #selector(applyDarkMode), #selector(applyInvertColors): return state?.scenes.isEmpty == false && player == nil
-        case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil
+        case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil && presenter == nil
         case #selector(deleteSlide): return sceneName != nil && ((state?.scenes.count ?? 0) > 1 || selectedSlideIsUnused) && player == nil
         case #selector(undo): return state?.canUndo ?? true
         case #selector(redo): return state?.canRedo ?? true
