@@ -1,23 +1,27 @@
 # Manimble
 
-A native macOS editor for [Manim Slides](https://github.com/jeertmans/manim-slides) decks, in the spirit of Keynote.
-Click a text, formula, image, line or shape on a slide and edit it directly. Every edit is written back to your
-Python source, and you can watch the lines change in the built-in code pane.
+A Slideshow creator that provides a graphical interface for the animations created by [Manim](https://github.com/3b1b/manim).
 
-## Run it
+## Installation
+
+Currently only supports MacOS Silicon. Support for MacOS Intel, Windows, and Linux in development.
+
+### Precompiled binary
+
+- Download precompiled binary in [Releases](https://github.com/pachterlab/Manimble/releases)
+- Unzip
+- Move to /Applications
+- To install Python/Manim/TeX dependencies, run: `git clone https://github.com/pachterlab/Manimble.git && cd Manimble && ./setup_python_env.sh`
+- To bypass the unidentified application warning, run: `xattr -dr com.apple.quarantine /Applications/Manimble.app`
+
+
+### Compile directly
 
 ```bash
 git clone https://github.com/pachterlab/Manimble.git && cd Manimble
 ./install_manimble.sh   # installs dependencies and builds the app
 open "$HOME/Applications/Manimble.app"  # File ▸ Open Deck… (try examples/hello/deck)
 ```
-
-Prefer not to build from source? Download `Manimble-macOS.zip` from the
-[latest release](https://github.com/pachterlab/Manimble/releases/latest), unzip it into
-`~/Applications`, then `git clone` the repository above (for the engine and examples) and run
-`./setup_python_env.sh` instead of `install_manimble.sh` to install the Python/Manim/TeX
-dependencies without needing Xcode. The app is ad-hoc signed, so the first launch needs
-right-click ▸ Open (or `xattr -cr ~/Applications/Manimble.app`) to get past Gatekeeper.
 
 Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
