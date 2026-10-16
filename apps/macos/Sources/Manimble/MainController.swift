@@ -1719,6 +1719,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     // MARK: Play with animations (native Manim Slides player)
 
+    /// Frame height the animations are built at (Play ▸ Animation Resolution); 720p unless chosen otherwise.
+    var animationHeight: Int {
+        let h = UserDefaults.standard.integer(forKey: "animationHeight")
+        return [720, 1080, 1440, 2160].contains(h) ? h : 720
+    }
+
+    @objc func animationResolutionChosen(_ m: NSMenuItem) {
+        guard let h = m.representedObject as? Int else { return }
+        UserDefaults.standard.set(h, forKey: "animationHeight")
+        toast(h == 720 ? "Animations build at 720p" : "Animations build at \(h == 2160 ? "4K" : "\(h)p") from the next show (slides rebuild once)")
+    }
+
     @objc func presentFromCurrent() { present(fromCurrent: true) }
     @objc func presentFromBeginning() { present(fromCurrent: false) }
     /// Presenter View (notes, next build, timer) over the animated show, from the current slide.
@@ -1732,7 +1744,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         presentFrom = fromCurrent ? (state?.scenes.firstIndex { $0.name == sceneName } ?? 0) : 0
         Task { @MainActor in
             busyPill.show("Preparing presentation…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("present", as: UndoResult.self)
+            let r = try? await engine.call("present", ["height": animationHeight], as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not start the presentation", error: true) }
         }
     }
@@ -1760,7 +1772,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         previewScene = name
         Task { @MainActor in
             busyPill.show("Preparing \(name)’s animations…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("animation_preview", ["scene": name], as: UndoResult.self)
+            let r = try? await engine.call("animation_preview", ["scene": name, "height": animationHeight], as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); previewScene = nil; toast(r?.error ?? "Could not play this slide", error: true) }
         }
     }
@@ -1961,6 +1973,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(toggleDarkImages): item.state = DarkMode.images ? .on : .off; return DarkMode.isOn
         case #selector(applyDarkMode), #selector(applyInvertColors): return state?.scenes.isEmpty == false && player == nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil && presenter == nil
+        case #selector(animationResolutionChosen(_:)):
+            item.state = (item.representedObject as? Int) == animationHeight ? .on : .off
+            return previewScene == nil && player == nil && presenter == nil && animatedPlayer == nil
         case #selector(presentFromCurrent), #selector(presenterViewAnimated):
             return sceneName != nil && player == nil && presenter == nil && animatedPlayer == nil
         case #selector(presentFromBeginning):

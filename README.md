@@ -223,7 +223,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   (`{"sections": [scene indices], "links": {"<scene index>": [[x0, x1, y0, y1, url], ...]}}`, fractions of the
   slide, y from the top, scene indices counting `order.txt`) or, without one, the `SECTION_SCENE_INDICES` /
   `REFERENCE_LINKS` constants of a custom `present.py`; clicking the bottom 6% of the slide jumps to the chapter
-  under the pointer.
+  under the pointer. **Play ▸ Animation Resolution** picks the size the animations are built at: 720p (the default,
+  fastest), 1080p, 1440p or 4K. Higher ones look sharper on big screens and projectors but take longer to build;
+  changing it rebuilds each slide once, the next time it is played.
 - File ▸ Export To ▸ Python (whole deck in one file)… writes the deck as a single `.py`: helper modules inlined, the
   slides in show order, a `SLIDES` list at the end. (The deck's own `.py` files are already the editable source that
   every edit is written to; this is a one-file copy for sharing, best kept in the deck folder so relative paths work.)

@@ -1823,7 +1823,7 @@ class Manimble:
             except KeyError:
                 return {"ok": False, "error": f"unknown slide: {req['scene']}"}
         self._presenting = True
-        threading.Thread(target=self._present_job, args=(req.get("scene"),), daemon=True).start()
+        threading.Thread(target=self._present_job, args=(req.get("scene"), self._clip_height(req)), daemon=True).start()
         return {"ok": True}
 
     def animation_preview(self, req: dict) -> dict:
@@ -1838,14 +1838,22 @@ class Manimble:
         except KeyError:
             return {"ok": False, "error": f"unknown slide: {name}"}
         self._presenting = True
-        threading.Thread(target=self._animation_preview_job, args=(name,), daemon=True).start()
+        threading.Thread(target=self._animation_preview_job, args=(name, self._clip_height(req)), daemon=True).start()
         return {"ok": True}
 
-    def _animation_preview_job(self, name: str):
+    # Build resolutions for the animated show, by frame height. 720p is the default (and what builds made before
+    # the setting existed are); higher ones look sharper on big screens but take longer to build.
+    CLIP_SIZES = {720: "1280,720", 1080: "1920,1080", 1440: "2560,1440", 2160: "3840,2160"}
+
+    def _clip_height(self, req: dict) -> int:
+        h = int(req.get("height") or 720)
+        return h if h in self.CLIP_SIZES else 720
+
+    def _animation_preview_job(self, name: str, height: int = 720):
         emit = self.on_event or (lambda e: None)
         try:
             selected = [self.scene(name)]
-            if not self._build_animation_slides(selected, "animation_preview"):
+            if not self._build_animation_slides(selected, "animation_preview", height):
                 return
             manifest = Path(self.deck) / "slides" / f"{name}.json"
             data = json.loads(manifest.read_text())
@@ -1870,7 +1878,9 @@ class Manimble:
         finally:
             self._presenting = False
 
-    def _build_animation_slides(self, selected: list[dict], event: str) -> bool:
+    def _build_animation_slides(self, selected: list[dict], event: str, height: int = 720) -> bool:
+        """Build the selected scenes with manim where their code (or the resolution asked for) changed since the
+        last build. The stamp file keeps each scene's key, with "@<height>p" added for builds above 720p."""
         emit = self.on_event or (lambda e: None)
         deck = Path(self.deck)
         slides_dir = deck / "slides"
@@ -1880,14 +1890,15 @@ class Manimble:
             built = json.loads(stamp.read_text())
         except Exception:
             built = {}
+        def key_of(s):
+            return self.scene_key(s) + ("" if height == 720 else f"@{height}p")
         def is_stale(s):
             if not (slides_dir / f"{s['name']}.json").exists():
                 return True
-            key = self.scene_key(s)
             have = built.get(s["name"])
-            if have is None:
-                return key != self.baseline_keys.get(s["name"])
-            return have != key
+            if have is None:                       # built outside Manimble: trusted at 720p unless edited since opening
+                return height != 720 or self.scene_key(s) != self.baseline_keys.get(s["name"])
+            return have != key_of(s)
 
         stale = [s for s in selected if is_stale(s)]
         log = self.cache_dir / "present.log"
@@ -1895,25 +1906,25 @@ class Manimble:
             emit({"event": event, "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
             with open(log, "w") as lf:
                 # what `manim-slides render` runs, without going through its CLI
-                r = subprocess.run([self.python, "-m", "manim", "render", "--disable_caching", "-r", "1280,720",
+                r = subprocess.run([self.python, "-m", "manim", "render", "--disable_caching", "-r", self.CLIP_SIZES[height],
                                     "--media_dir", "../media", s["file"], s["name"]],
                                    cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
             if r.returncode != 0:
                 emit({"event": event, "phase": "error", "error": f"Building {s['name']} failed:\n{log.read_text()[-700:]}"})
                 return False
-            built[s["name"]] = self.scene_key(s)
+            built[s["name"]] = key_of(s)
             stamp.write_text(json.dumps(built))
         for s in selected:
             if (slides_dir / f"{s['name']}.json").exists():
-                built.setdefault(s["name"], self.scene_key(s))
+                built.setdefault(s["name"], key_of(s))
         stamp.write_text(json.dumps(built))
         return True
 
-    def _present_job(self, only_scene: str | None = None):
+    def _present_job(self, only_scene: str | None = None, height: int = 720):
         emit = self.on_event or (lambda e: None)
         try:
             selected = [self.scene(only_scene)] if only_scene else list(self.visible_scenes())
-            if not self._build_animation_slides(selected, "present"):
+            if not self._build_animation_slides(selected, "present", height):
                 return
             emit({"event": "present", "phase": "ready", "onlyScene": only_scene,
                   "slides": self._present_slides(selected), **self._present_extras()})
