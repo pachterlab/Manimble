@@ -1,6 +1,6 @@
 # Builds Manimble.app and publishes it as a GitHub Release.
 #
-#   Release:  bump VERSION, commit, then  git tag v0.2.0 && git push origin v0.2.0
+#   Release:  bump VERSION, commit, then  git tag v0.1.0 && git push origin v0.1.0
 #   Dry run:  Actions -> release -> Run workflow (builds the app as a workflow artifact only)
 #
 # The asset keeps the same name in every release, so this link always points at the newest one:
@@ -24,6 +24,10 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    # `secrets` can't be read in a step's `if:`, so expose whether signing is configured here.
+    env:
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_ID != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +38,7 @@ jobs:
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag is $GITHUB_REF_NAME but VERSION says $v"; exit 1; }
 
       - name: Import the Developer ID certificate
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: env.HAS_CERT == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -55,7 +59,7 @@ jobs:
         run: apps/macos/build_app.sh
 
       - name: Notarize
-        if: ${{ secrets.APPLE_ID != '' }}
+        if: env.HAS_NOTARY == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
