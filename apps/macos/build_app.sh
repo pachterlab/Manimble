@@ -49,8 +49,13 @@ PL
 # Sign with a stable local identity when one exists (tools/make_signing_identity.sh).
 # macOS ties folder-access grants (Desktop, Documents, ...) to the signature;
 # an ad-hoc signature changes on every build, so each rebuild would re-prompt.
+# A "Developer ID Application" identity (release builds) also gets the hardened runtime, a secure timestamp
+# and the entitlements Apple's notarization requires, and a failure stops the build instead of falling back.
 SIGN_ID="${MANIMBLE_SIGN_IDENTITY:-Manimble Local Signing}"
-if security find-identity -p codesigning | grep -q "\"$SIGN_ID\""; then
+if [[ "$SIGN_ID" == "Developer ID Application"* ]]; then
+  codesign -s "$SIGN_ID" --force --options runtime --timestamp --entitlements "$ROOT/Manimble.entitlements" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+elif security find-identity -p codesigning | grep -q "\"$SIGN_ID\""; then
   codesign -s "$SIGN_ID" --force "$APP" >/dev/null 2>&1 || codesign -s - --force "$APP" >/dev/null 2>&1 || true
 else
   codesign -s - --force "$APP" >/dev/null 2>&1 || true
