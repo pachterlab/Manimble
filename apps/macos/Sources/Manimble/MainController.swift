@@ -75,6 +75,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let hRuler = RulerView(.horizontal), vRuler = RulerView(.vertical), rulerCorner = NSView()
     var rulerThickness: [NSLayoutConstraint] = []
     let terminal = TerminalPanel()
+    var sourceBox: NSView?                 // the PYTHON card's contents (PaneOverlay.swift swaps them out)
+    var paneOverlay: AuxPaneView?
+    var paneOverlayMonitor: Any?
     var centerSplit: NSSplitView?
     var formatBar: FormatBar!
     /// Width and height fields change an object proportionally (true) or stretch it (false).
@@ -321,6 +324,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         card.layer?.backgroundColor = sourceView.backgroundColor.cgColor
         srcBox.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(srcBox)
+        sourceBox = srcBox
+        installPaneShortcut()
         NSLayoutConstraint.activate([
             srcBox.leadingAnchor.constraint(equalTo: card.leadingAnchor), srcBox.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             srcBox.topAnchor.constraint(equalTo: card.topAnchor), srcBox.bottomAnchor.constraint(equalTo: card.bottomAnchor),
