@@ -75,6 +75,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let hRuler = RulerView(.horizontal), vRuler = RulerView(.vertical), rulerCorner = NSView()
     var rulerThickness: [NSLayoutConstraint] = []
     let terminal = TerminalPanel()
+    var sourceBox: NSView?                 // the PYTHON card's contents (PaneOverlay.swift swaps them out)
+    var paneOverlay: AuxPaneView?
+    var paneOverlayMonitor: Any?
     var centerSplit: NSSplitView?
     var formatBar: FormatBar!
     /// Width and height fields change an object proportionally (true) or stretch it (false).
@@ -94,6 +97,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.title = "Manimble"
         window.titlebarSeparatorStyle = .line
         window.delegate = self
+        window.isReleasedWhenClosed = false     // closing it closes the deck; the window comes back for the next one
         window.minSize = NSSize(width: 1000, height: 600)
         window.setFrameAutosaveName("manimble.main")
         window.contentView = buildUI()
@@ -321,6 +325,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         card.layer?.backgroundColor = sourceView.backgroundColor.cgColor
         srcBox.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(srcBox)
+        sourceBox = srcBox
+        installPaneShortcut()
         NSLayoutConstraint.activate([
             srcBox.leadingAnchor.constraint(equalTo: card.leadingAnchor), srcBox.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             srcBox.topAnchor.constraint(equalTo: card.topAnchor), srcBox.bottomAnchor.constraint(equalTo: card.bottomAnchor),
@@ -408,7 +414,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             open(deck: d)
         } else {
             let last = UserDefaults.standard.string(forKey: "lastDeck")
-            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { openDeck() }
+            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { chooseDeck() }
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == 0 { await self?.reloadState() } }
@@ -432,13 +438,22 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         p.canChooseDirectories = true; p.canChooseFiles = true
         if let last = UserDefaults.standard.string(forKey: "lastDeck") { p.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent() }
         guard p.runModal() == .OK, let u = p.url else { return }
+        openProject(at: u)
+    }
+
+    /// Open what File ▸ Open, a launch argument or the Dock/Finder hands over: a deck folder, a Manimble project
+    /// folder, a .manimble package, or a file inside a deck folder (its deck is opened).
+    func openProject(at u: URL) {
         do {
-            if u.pathExtension.lowercased() == "manimble" {
+            let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if u.pathExtension.lowercased() == "manimble" && !isDir {
                 open(deck: try PortableProject.unpackArchive(u).path)
-            } else if let deck = try PortableProject.deckURL(in: u) {
+            } else if isDir, let deck = try PortableProject.deckURL(in: u) {
                 open(deck: deck.path)
-            } else if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            } else if isDir {
                 open(deck: u.path)
+            } else if FileManager.default.fileExists(atPath: u.deletingLastPathComponent().appendingPathComponent("order.txt").path) {
+                open(deck: u.deletingLastPathComponent().path)
             } else {
                 alert("Could not open project", "Choose a deck folder or a .manimble package.")
             }
@@ -507,13 +522,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    func open(deck: String) {
+    /// `confirmed`: the caller already asked about unsaved edits to the open deck.
+    func open(deck: String, confirmed: Bool = false) {
         guard engine.isRunning else {
             pendingDeck = deck
             busyPill.show("Waiting for Manimble engine…", symbol: nil, tint: nil, spinning: true)
             return
         }
-        guard confirmClose(for: "opening another deck") else { return }
+        guard confirmed || confirmClose(for: "opening another deck") else { return }
+        if !window.isVisible { window.makeKeyAndOrderFront(nil) }
         closeAnimationPreview()
         window.makeFirstResponder(canvas)
         Task { @MainActor in
@@ -685,7 +702,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 let n = ev["slides"] as? Int ?? 0
                 let warn = (ev["warnings"] as? [String]) ?? []
                 toast("Imported \(n) slides" + (warn.isEmpty ? "" : " — " + warn.prefix(2).joined(separator: "; ")), error: !warn.isEmpty)
-                if let d = ev["deck"] as? String { open(deck: d) }
+                if let d = ev["deck"] as? String { open(deck: d, confirmed: true) }
             default:
                 busyPill.hide(); toast(ev["error"] as? String ?? "import failed", error: true)
             }
@@ -752,6 +769,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     // MARK: state / scenes
 
     func reloadState() async {
+        guard workspace != nil else { return }
         guard let st = try? await engine.call("state", ["current": sceneName ?? ""], as: StateInfo.self) else { return }
         let old = state
         state = st
@@ -2031,5 +2049,5 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { confirmClose(for: "closing") }
-    func windowWillClose(_ n: Notification) { finish() }
+    func windowWillClose(_ n: Notification) { closeDeck() }
 }
