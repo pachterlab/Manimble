@@ -18,7 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.start()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { controller.reopenWindow() }
+        return true
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         controller.confirmClose(for: "quitting") ? .terminateNow : .terminateCancel
     }
@@ -58,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exportMenu.addItem(item("Python (whole deck in one file)…", #selector(MainController.exportPythonPressed), "", []))
         let exportItem = NSMenuItem(title: "Export To", action: nil, keyEquivalent: ""); exportItem.submenu = exportMenu
         add("File", [
+            item("New Deck…", #selector(MainController.newDeck), "n"),
             item("Open Deck or Project…", #selector(MainController.openDeck), "o"),
             importItem,
             .separator(),
