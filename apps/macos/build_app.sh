@@ -45,13 +45,29 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Manimble uses Keynote to import and export Keynote files.</string>
+<key>CFBundleDocumentTypes</key><array>
+  <dict><key>CFBundleTypeName</key><string>Manimble Project</string><key>CFBundleTypeRole</key><string>Editor</string>
+    <key>LSHandlerRank</key><string>Owner</string><key>LSItemContentTypes</key><array><string>com.manimble.project</string></array></dict>
+  <dict><key>CFBundleTypeName</key><string>Deck Folder</string><key>CFBundleTypeRole</key><string>Editor</string>
+    <key>LSHandlerRank</key><string>Alternate</string><key>LSItemContentTypes</key><array><string>public.folder</string></array></dict>
+</array>
+<key>UTExportedTypeDeclarations</key><array>
+  <dict><key>UTTypeIdentifier</key><string>com.manimble.project</string><key>UTTypeDescription</key><string>Manimble Project</string>
+    <key>UTTypeConformsTo</key><array><string>public.zip-archive</string></array>
+    <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>manimble</string></array></dict></dict>
+</array>
 </dict></plist>
 PL
 # Sign with a stable local identity when one exists (tools/make_signing_identity.sh).
 # macOS ties folder-access grants (Desktop, Documents, ...) to the signature;
 # an ad-hoc signature changes on every build, so each rebuild would re-prompt.
+# A "Developer ID Application" identity (release builds) also gets the hardened runtime, a secure timestamp
+# and the entitlements Apple's notarization requires, and a failure stops the build instead of falling back.
 SIGN_ID="${MANIMBLE_SIGN_IDENTITY:-Manimble Local Signing}"
-if security find-identity -p codesigning | grep -q "\"$SIGN_ID\""; then
+if [[ "$SIGN_ID" == "Developer ID Application"* ]]; then
+  codesign -s "$SIGN_ID" --force --options runtime --timestamp --entitlements "$ROOT/Manimble.entitlements" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+elif security find-identity -p codesigning | grep -q "\"$SIGN_ID\""; then
   codesign -s "$SIGN_ID" --force "$APP" >/dev/null 2>&1 || codesign -s - --force "$APP" >/dev/null 2>&1 || true
 else
   codesign -s - --force "$APP" >/dev/null 2>&1 || true
