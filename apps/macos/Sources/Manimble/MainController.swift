@@ -105,6 +105,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.colorView = DarkMode.mode; canvas.darkImages = DarkMode.images
         canvas.onDraw = { [weak self] kind, sx, sy, ex, ey in self?.drawFinished(kind, sx, sy, ex, ey) }
         canvas.onPen = { [weak self] pts in self?.penFinished(pts) }
+        canvas.registerForDraggedTypes([BioCartoonPanel.dragType])
+        canvas.onIconDrop = { [weak self] data, p in self?.biocartoonDropped(data, at: p) ?? false }
         canvas.penColor = NSColor(hex: UserDefaults.standard.string(forKey: "penColor") ?? "#FF3B30")
         canvas.onDrawToolChange = { [weak self] in self?.syncFormatBar() }
         canvas.onGuidesChange = { [weak self] in self?.saveGuides() }
@@ -404,7 +406,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             open(deck: pending)
         } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"]
                     ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"]
-                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_EXTRACT"] {
+                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_EXTRACT"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_BIOCARTOON"] {
             open(deck: d)
         } else {
             let last = UserDefaults.standard.string(forKey: "lastDeck")
@@ -840,6 +842,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] != nil, !testRan { testRan = true; formatTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] != nil, !testRan { testRan = true; toolsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_EXTRACT"] != nil, !testRan { testRan = true; extractTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BIOCARTOON"] != nil, !testRan { testRan = true; biocartoonTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -1527,6 +1530,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     // MARK: LaTeX sheet
 
     var latexSheet: LatexSheet?
+    var biocartoonPanel: BioCartoonPanel?
     var backgroundSheet: BackgroundSheet?
     func openLatex(_ oid: Int) {
         guard let o = scene?.objects?[String(oid)], o.kind == "tex" else { return }
@@ -1981,7 +1985,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             item.state = showUnusedSlides ? .on : .off
             return workspace != nil
         case #selector(playFromCurrent), #selector(insertTextPressed), #selector(insertFormulaPressed), #selector(insertTablePressed),
-             #selector(insertImagePressed), #selector(insertShapePressed(_:)), #selector(formatBackground):
+             #selector(insertImagePressed), #selector(insertShapePressed(_:)), #selector(formatBackground), #selector(showBioCartoon):
             return sceneName != nil && player == nil
         case #selector(playCurrentSlideAnimations): return sceneName != nil && sourceDraft == nil && player == nil && previewScene == nil
         case #selector(toggleTerminal):

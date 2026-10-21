@@ -9,6 +9,7 @@ private extension NSToolbarItem.Identifier {
     static let insShape = NSToolbarItem.Identifier("insShape")
     static let insTable = NSToolbarItem.Identifier("insTable")
     static let insImage = NSToolbarItem.Identifier("insImage")
+    static let insBioCartoon = NSToolbarItem.Identifier("insBioCartoon")
     static let zoom = NSToolbarItem.Identifier("zoom")
     static let share = NSToolbarItem.Identifier("share")
     static let terminal = NSToolbarItem.Identifier("terminal")
@@ -29,7 +30,7 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newSlide, .space, .insTable, .insText, .insFormula, .insShape, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
+        [.newSlide, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(t) }
 
@@ -71,6 +72,13 @@ extension MainController: NSToolbarDelegate {
         case .insText: return button(id, "Text", "textformat", #selector(insertTextPressed))
         case .insFormula: return button(id, "Formula", "function", #selector(insertFormulaPressed))
         case .insImage: return button(id, "Image", "photo", #selector(insertImagePressed))
+        case .insBioCartoon:
+            let i = button(id, "BioCartoon", "paintpalette", #selector(showBioCartoon))
+            i.toolTip = "Search BioCartoon's science icons and drag them onto the slide"
+            let logo = BioCartoonCLI.logo.copy() as! NSImage
+            logo.size = NSSize(width: 22, height: 22)
+            i.image = logo
+            return i
         case .insShape:
             let i = NSMenuToolbarItem(itemIdentifier: id)
             i.label = "Shape"; i.paletteLabel = "Shape"; i.toolTip = "Insert shape"

@@ -27,7 +27,7 @@ Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
   [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), creates a Python environment in
   `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides (no Qt / PySide6: Manimble plays animations itself), Pillow,
-  python-pptx and FFmpeg when they are missing. For formulas it installs
+  python-pptx, the [BioCartoon](https://biocartoon.com) icon search (`biocartoon`) and FFmpeg when they are missing. For formulas it installs
   [BasicTeX](https://www.tug.org/mactex/morepackages.html) plus the LaTeX packages manim uses (about 400 MB, against
   several GB for the full MacTeX), and asks for your password once because TeX lives in a system folder. An
   existing TeX installation such as MacTeX is used as it is. A deck that needs another LaTeX package can add it with
@@ -375,7 +375,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 ## License
 
 BSD 2-Clause, see [LICENSE](LICENSE). Manimble links against [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
-(MIT) and installs Manim, manim-slides and python-pptx into its app environment, each under its own license.
+(MIT) and installs Manim, manim-slides, python-pptx and biocartoon into its app environment, each under its own license.
 
 ## Layout of this repository
 

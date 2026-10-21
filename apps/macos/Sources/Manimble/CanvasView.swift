@@ -189,6 +189,8 @@ final class CanvasView: MTKView {
     var penColor = NSColor(hex: "#FF3B30") { didSet { needsDisplay2() } }
     var penWidth: Double = 6                        // manim stroke_width
     var onPen: (([CGPoint]) -> Void)?
+    /// A BioCartoon icon dropped on the slide (pasteboard data, frame px); returns whether it was taken.
+    var onIconDrop: ((Data, CGPoint) -> Bool)?
     private var penPoints: [CGPoint] = [] { didSet { needsDisplay2() } }
     /// Strokes handed to the engine whose render has not arrived yet (drawn so they never flicker away).
     var pendingStrokes: [[CGPoint]] = [] { didSet { needsDisplay2() } }
@@ -680,6 +682,19 @@ final class CanvasView: MTKView {
     }
 
     override func mouseExited(with event: NSEvent) { onCursorMove?(nil) }
+
+    override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
+        s.draggingPasteboard.data(forType: BioCartoonPanel.dragType) != nil ? .copy : []
+    }
+    override func draggingUpdated(_ s: NSDraggingInfo) -> NSDragOperation {
+        onCursorMove?(framePoint(window: s.draggingLocation))
+        return s.draggingPasteboard.data(forType: BioCartoonPanel.dragType) != nil ? .copy : []
+    }
+    override func draggingExited(_ s: NSDraggingInfo?) { onCursorMove?(nil) }
+    override func performDragOperation(_ s: NSDraggingInfo) -> Bool {
+        guard let d = s.draggingPasteboard.data(forType: BioCartoonPanel.dragType) else { return false }
+        return onIconDrop?(d, framePoint(window: s.draggingLocation)) ?? false
+    }
 
     private func hit(_ p: CGPoint) -> Int? {
         guard let stop = stop else { return nil }

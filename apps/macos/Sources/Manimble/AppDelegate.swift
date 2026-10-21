@@ -113,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Formula…", #selector(MainController.insertFormulaPressed), "e", [.command, .shift]),
             shapeItem,
             drawItem,
+            item("BioCartoon Icons…", #selector(MainController.showBioCartoon), "", []),
             item("Table…", #selector(MainController.insertTablePressed), "", []),
             item("Image…", #selector(MainController.insertImagePressed), "i", [.command, .shift]),
             item("Extract Elements from Image…", #selector(MainController.extractElementsPressed), "", []),

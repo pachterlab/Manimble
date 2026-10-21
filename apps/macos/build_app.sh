@@ -28,6 +28,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Manimble "$APP/Contents/MacOS/Manimble"
 rsync -a --exclude __pycache__ "$ROOT/../../engine/" "$APP/Contents/Resources/engine/"
 cp assets/Manimble.icns "$APP/Contents/Resources/manimble.icns"
+cp assets/biocartoon.png "$APP/Contents/Resources/biocartoon.png"
 
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
