@@ -2,6 +2,7 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: MainController!
+    private var launchURLs: [URL] = []     // decks handed over before the window exists
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
@@ -15,7 +16,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wire(NSApp.mainMenu)
         controller.showWindow()
         NSApp.activate(ignoringOtherApps: true)
+        // a deck given at launch wins over the last one; the engine opens it once it is running
+        if let u = (launchURLs + commandLineDecks()).first { controller.openProject(at: u) }
         controller.start()
+    }
+
+    /// `open -a Manimble <deck>`, a drop on the Dock icon, Finder's Open With.
+    func application(_ app: NSApplication, open urls: [URL]) {
+        guard let c = controller else { launchURLs += urls; return }
+        if let u = urls.first { c.openProject(at: u) }
+    }
+
+    /// Paths on the command line (`Manimble.app/Contents/MacOS/Manimble <deck>`), skipping `-Key value` defaults.
+    private func commandLineDecks() -> [URL] {
+        var urls: [URL] = [], args = CommandLine.arguments.dropFirst()[...]
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        while let a = args.popFirst() {
+            if a.hasPrefix("-") {
+                if let v = args.first, !v.hasPrefix("-") { args.removeFirst() }
+                continue
+            }
+            let u = URL(fileURLWithPath: (a as NSString).expandingTildeInPath, relativeTo: cwd).standardizedFileURL
+            if FileManager.default.fileExists(atPath: u.path) { urls.append(u) }
+        }
+        return urls
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }

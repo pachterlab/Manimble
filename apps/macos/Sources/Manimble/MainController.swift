@@ -438,13 +438,22 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         p.canChooseDirectories = true; p.canChooseFiles = true
         if let last = UserDefaults.standard.string(forKey: "lastDeck") { p.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent() }
         guard p.runModal() == .OK, let u = p.url else { return }
+        openProject(at: u)
+    }
+
+    /// Open what File ▸ Open, a launch argument or the Dock/Finder hands over: a deck folder, a Manimble project
+    /// folder, a .manimble package, or a file inside a deck folder (its deck is opened).
+    func openProject(at u: URL) {
         do {
-            if u.pathExtension.lowercased() == "manimble" {
+            let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if u.pathExtension.lowercased() == "manimble" && !isDir {
                 open(deck: try PortableProject.unpackArchive(u).path)
-            } else if let deck = try PortableProject.deckURL(in: u) {
+            } else if isDir, let deck = try PortableProject.deckURL(in: u) {
                 open(deck: deck.path)
-            } else if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            } else if isDir {
                 open(deck: u.path)
+            } else if FileManager.default.fileExists(atPath: u.deletingLastPathComponent().appendingPathComponent("order.txt").path) {
+                open(deck: u.deletingLastPathComponent().path)
             } else {
                 alert("Could not open project", "Choose a deck folder or a .manimble package.")
             }

@@ -44,6 +44,17 @@ cat > "$APP/Contents/Info.plist" <<PL
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Manimble uses Keynote to import and export Keynote files.</string>
+<key>CFBundleDocumentTypes</key><array>
+  <dict><key>CFBundleTypeName</key><string>Manimble Project</string><key>CFBundleTypeRole</key><string>Editor</string>
+    <key>LSHandlerRank</key><string>Owner</string><key>LSItemContentTypes</key><array><string>com.manimble.project</string></array></dict>
+  <dict><key>CFBundleTypeName</key><string>Deck Folder</string><key>CFBundleTypeRole</key><string>Editor</string>
+    <key>LSHandlerRank</key><string>Alternate</string><key>LSItemContentTypes</key><array><string>public.folder</string></array></dict>
+</array>
+<key>UTExportedTypeDeclarations</key><array>
+  <dict><key>UTTypeIdentifier</key><string>com.manimble.project</string><key>UTTypeDescription</key><string>Manimble Project</string>
+    <key>UTTypeConformsTo</key><array><string>public.zip-archive</string></array>
+    <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>manimble</string></array></dict></dict>
+</array>
 </dict></plist>
 PL
 # Sign with a stable local identity when one exists (tools/make_signing_identity.sh).
