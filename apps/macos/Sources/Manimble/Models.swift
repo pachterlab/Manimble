@@ -98,6 +98,19 @@ struct SceneData: Decodable {
     var source: SourceInfo?
     var error: String?
     var notes: String?               // speaker notes (self.next_slide(notes=...) at the top of construct)
+    var placeholders: [Placeholder]? // empty layout boxes ("Click to add title"), drawn by the editor only
+    var font: String?                // the deck's FONT constant
+}
+
+/// An empty text box of a new slide's layout (a `# manimble placeholder` comment): nothing renders until it is typed into.
+struct Placeholder: Decodable {
+    var line: Int                    // its line in the slide's file
+    var role: String                 // "title", "subtitle" or "body"
+    var prompt: String
+    var size: Int                    // font_size of the text typed into it
+    var box: [Double]                // x0, y0, x1, y1 in frame px
+
+    var rect: Box { Box(x0: box[0], y0: box[1], x1: box[2], y1: box[3]) }
 }
 
 struct EditResult: Decodable {

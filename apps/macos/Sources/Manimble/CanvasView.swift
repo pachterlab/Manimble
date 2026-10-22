@@ -47,7 +47,7 @@ fragment float4 fs_gradient2(VOut in [[stage_in]], constant U2 &u [[buffer(0)]])
     float3 top = u.color.rgb, bottom = u.rect.xyz;
     float t = clamp(in.uv.y, 0.0, 1.0);
     float2 c = in.uv - 0.5;
-    float vignette = 1.0 - 0.38 * smoothstep(0.15, 0.85, length(c * float2(1.0, 1.15)));
+    float vignette = 1.0 - u.pad.x * smoothstep(0.15, 0.85, length(c * float2(1.0, 1.15)));
     return float4(mix(top, bottom, t) * vignette, 1.0);
 }
 fragment float4 fs_disc2(VOut in [[stage_in]], constant U2 &u [[buffer(0)]]) {
@@ -167,9 +167,30 @@ final class CanvasView: MTKView {
 
     // content
     var frameSize = CGSize(width: 1280, height: 720) { didSet { onGeometryChange?() } }
-    var stop: StopInfo? { didSet { if let e = inline, stop?.box(of: e.oid) == nil { finishTextEdit(commit: true) }; needsDisplay2(); onGeometryChange?() } }
+    var stop: StopInfo? { didSet { if let e = inline, e.placeholder == nil, stop?.box(of: e.oid) == nil { finishTextEdit(commit: true) }; needsDisplay2(); onGeometryChange?() } }
     var sceneObjects: [String: ObjInfo] = [:]
-    var selection: Int? { didSet { if let e = inline, selection != e.oid { finishTextEdit(commit: true) }; needsDisplay2(); onGeometryChange?() } }
+    var selection: Int? { didSet {
+        if let e = inline, selection != (e.placeholder == nil ? e.oid : nil) { finishTextEdit(commit: true) }
+        if !keepOthers && selection != oldValue { others = [] }      // a plain new selection stands alone
+        needsDisplay2(); onGeometryChange?()
+    } }
+    /// Objects selected along with `selection` (a marquee drag or shift-click); they move, nudge and delete together.
+    var others: Set<Int> = [] { didSet { if others != oldValue { needsDisplay2() } } }
+    private var keepOthers = false
+    /// Every selected object, the primary one (inspector, handles) first.
+    var selectedIDs: [Int] { (selection.map { [$0] } ?? []) + others.filter { $0 != selection }.sorted() }
+    /// Select several objects at once: the first is the primary, the rest become `others`.
+    func selectGroup(_ ids: [Int]) {
+        guard let first = ids.first else { others = []; if selection != nil { selection = nil; onSelect?(nil) }; return }
+        others = Set(ids.dropFirst()).subtracting([first])
+        keepOthers = true; selection = first; keepOthers = false
+        onSelect?(first)
+    }
+    /// The slide's empty layout boxes, drawn dashed with their "Click to add …" prompt (never part of the render).
+    var placeholders: [Placeholder] = [] { didSet { needsDisplay2() } }
+    var onPlaceholder: ((Placeholder) -> Void)?
+    /// Backspace in an empty layout box: remove the box (its line).
+    var onPlaceholderDelete: ((Int) -> Void)?
     var hover: Int?
     var overrides: [Int: Override] = [:] { didSet { needsDisplay2(); onGeometryChange?() } }
     var showObjects = false { didSet { needsDisplay2() } }
@@ -243,8 +264,16 @@ final class CanvasView: MTKView {
     /// The text box's outline while a side handle is dragged.
     private var wrapBand: Box? { didSet { needsDisplay2() } }
     private var dragBase = (dx: 0.0, dy: 0.0)   // the object's previewed offset when this drag began (moves still rendering)
+    /// The other selected objects moving with the dragged one, with their previewed offsets when the drag began.
+    private var dragGroup: [Int: (dx: Double, dy: Double)] = [:]
+    /// Rubber-band selection (a drag on empty slide): where it began, its box, and whether shift keeps the old selection.
+    private var marqueeStart: CGPoint?
+    private var marqueeAdds = false
+    private var marquee: Box? { didSet { needsDisplay2() } }
     /// The object being dragged right now, if any.
     var dragging: Int? { dragOID }
+    /// Whether the object moves with the current drag (dragged itself or selected along with it).
+    func isDragging(_ oid: Int) -> Bool { dragOID == oid || dragGroup[oid] != nil }
 
     /// A fresh render now shows part of this object's previewed offset: keep previewing only the rest.
     func settle(_ oid: Int, shownDx: Double, shownDy: Double) {
@@ -252,6 +281,7 @@ final class CanvasView: MTKView {
         o.dx -= shownDx; o.dy -= shownDy
         overrides[oid] = o
         if dragOID == oid { dragBase = (dragBase.dx - shownDx, dragBase.dy - shownDy) }
+        if let base = dragGroup[oid] { dragGroup[oid] = (base.dx - shownDx, base.dy - shownDy) }
     }
     private var tracking: NSTrackingArea?
 
@@ -265,10 +295,14 @@ final class CanvasView: MTKView {
         var original: String
         var done: ((String?, @escaping () -> Void) -> Void)?
         var cell: (row: Int, col: Int, area: Box)?   // typing into one cell of a table; the rest of it stays drawn
+        var placeholder: Int?                // typing into the layout box on this line (oid is -1)
+        var anchor: (x: Double, y: Double, top: Bool)?   // frame px: the text's left edge, at its top or vertical centre
     }
     fileprivate var inline: InlineEdit?
+    private var colorCache: [String: NSColor] = [:]
+    private var promptCache: [String: MTLTexture] = [:]
     /// The object whose text is being edited on the slide, if any.
-    var editingText: Int? { inline?.oid }
+    var editingText: Int? { inline?.placeholder == nil ? inline?.oid : nil }
     /// The table cell being typed into, if any.
     var editingCell: (oid: Int, row: Int, col: Int)? { inline.flatMap { e in e.cell.map { (e.oid, $0.row, $0.col) } } }
     fileprivate var textEditorChanged: ((String) -> Void)?
@@ -291,6 +325,7 @@ final class CanvasView: MTKView {
     required init(coder: NSCoder) { fatalError() }
 
     private func needsDisplay2() { layoutTextEditor(); setNeedsDisplay(bounds) }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay2() }
 
     private func buildPipelines(_ dev: MTLDevice) {
         let lib = try! dev.makeLibrary(source: shaderSource, options: nil)
@@ -501,11 +536,16 @@ final class CanvasView: MTKView {
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
-        geo(gradPipe, Uniforms2(rect: SIMD4(0.085, 0.088, 0.112, 0), color: SIMD4(0.205, 0.210, 0.255, 1), frame: view,
-                                geo: SIMD4(0, 0, Float(bounds.width), Float(bounds.height))))
+        // the stage follows the app's light/dark appearance (the slide's own dark mode is separate)
+        let lightStage = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) != .darkAqua
+        geo(gradPipe, lightStage
+            ? Uniforms2(rect: SIMD4(0.900, 0.900, 0.912, 0), color: SIMD4(0.955, 0.955, 0.963, 1), frame: view,
+                        pad: SIMD2(0.05, 0), geo: SIMD4(0, 0, Float(bounds.width), Float(bounds.height)))
+            : Uniforms2(rect: SIMD4(0.085, 0.088, 0.112, 0), color: SIMD4(0.205, 0.210, 0.255, 1), frame: view,
+                        pad: SIMD2(0.38, 0), geo: SIMD4(0, 0, Float(bounds.width), Float(bounds.height))))
         let m: CGFloat = 46
         let sw = r.width + 2 * m, sh = r.height + 2 * m
-        geo(shadowPipe, Uniforms2(rect: .zero, color: SIMD4(0, 0, 0, 0.62), frame: view,
+        geo(shadowPipe, Uniforms2(rect: .zero, color: SIMD4(0, 0, 0, lightStage ? 0.16 : 0.62), frame: view,
                                   pad: SIMD2(Float(m / (sw / 2)), Float(m / (sh / 2))),
                                   geo: SIMD4(Float(r.minX - m), Float(bounds.height - r.maxY - m + 14), Float(sw), Float(sh))))
         // hairline around the slide so black slides still read as a card
@@ -516,7 +556,7 @@ final class CanvasView: MTKView {
                          SIMD4<Float>(Float(r.minX - t), top + Float(r.height), Float(r.width + 2 * t), Float(t)),
                          SIMD4<Float>(Float(r.minX - t), top, Float(t), Float(r.height)),
                          SIMD4<Float>(Float(r.maxX), top, Float(t), Float(r.height))] {
-                var u = Uniforms(rect: rect, color: SIMD4(1, 1, 1, 0.16), frame: view)
+                var u = Uniforms(rect: rect, color: lightStage ? SIMD4(0, 0, 0, 0.10) : SIMD4(1, 1, 1, 0.16), frame: view)
                 enc.setRenderPipelineState(solidPipe)
                 enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
                 enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
@@ -728,6 +768,23 @@ final class CanvasView: MTKView {
                     outline(Box(x0: min(d.0, d.2), y0: min(d.1, d.3), x1: max(d.0, d.2), y1: max(d.1, d.3)), c, th * 1.4)
                 }
             }
+            for ph in placeholders where ph.line != inline?.placeholder {
+                let b = ph.rect
+                let light = shownLight(b)
+                let grey: Float = light ? 0.55 : 0.6
+                let c = SIMD4<Float>(grey, grey, grey, 0.9)
+                let dash = 5 * pxPerPoint, gap = 3.5 * pxPerPoint, t = max(1.0, 1.2 * pxPerPoint)
+                var x = b.x0
+                while x < b.x1 { let l = min(dash, b.x1 - x); drawSolid(x, b.y0, l, t, c); drawSolid(x, b.y1 - t, l, t, c); x += dash + gap }
+                var y = b.y0
+                while y < b.y1 { let l = min(dash, b.y1 - y); drawSolid(b.x0, y, t, l, c); drawSolid(b.x1 - t, y, t, l, c); y += dash + gap }
+                let px = Double(ph.size) / 72 * unitPx
+                if let tex = promptTexture(ph.prompt, px: px, light: light) {
+                    let w = Double(tex.width) / 2, h = Double(tex.height) / 2
+                    let a = placeholderAnchor(ph)
+                    drawTex(tex, a.x, a.top ? a.y : a.y - h / 2, w, h, map: false)
+                }
+            }
             if let w = wrapBand { outline(w, SIMD4(0.486, 0.361, 1, 1), th * 1.4) }
             if let g = ghost {
                 outline(Box(x0: g.cx - g.w / 2, y0: g.cy - g.h / 2, x1: g.cx + g.w / 2, y1: g.cy + g.h / 2), SIMD4(0.486, 0.361, 1, 1), th * 1.6)
@@ -735,7 +792,7 @@ final class CanvasView: MTKView {
             if showObjects {
                 for v in stop.visible {
                     let oid = Int(v[0])
-                    if oid == selection { continue }
+                    if oid == selection || others.contains(oid) { continue }
                     if let b = currentBox(oid) { outline(b, SIMD4(0.486, 0.361, 1, oid == hover ? 0.95 : 0.35), oid == hover ? th * 1.4 : th * 0.7) }
                 }
             } else if let h = hover, let b = currentBox(h) {
@@ -759,6 +816,13 @@ final class CanvasView: MTKView {
                     enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
                     enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
                 }
+            }
+            for oid in others where oid != selection {
+                if let b = currentBox(oid) { outline(b, SIMD4(0.486, 0.361, 1, 1), th * 1.6) }
+            }
+            if let m = marquee {                                   // the rubber band: a faint fill with a thin edge
+                drawSolid(m.x0, m.y0, m.w, m.h, SIMD4(0.486, 0.361, 1, 0.12))
+                outline(m, SIMD4(0.486, 0.361, 1, 0.9), max(1.0, pxPerPoint))
             }
         }
     }
@@ -787,15 +851,22 @@ final class CanvasView: MTKView {
         return onIconDrop?(d, framePoint(window: s.draggingLocation)) ?? false
     }
 
+    /// The frontmost object under a point, as drawn: an icon on top wins over whatever it covers.
+    /// Objects drawn as part of a parent (a table's labels; no sprite of their own) sit just in front of it.
     private func hit(_ p: CGPoint) -> Int? {
         guard let stop = stop else { return nil }
-        var best: (Int, Double)?
+        var z: [Int: Int] = [:]
+        for sp in stop.sprites { z[sp.oid] = max(z[sp.oid] ?? .min, sp.z) }
+        var hits: [(oid: Int, z: Int?, area: Double)] = []
         for v in stop.visible {
             let oid = Int(v[0])
             guard let b = currentBox(oid), b.contains(Double(p.x), Double(p.y)) else { continue }
-            if best == nil || b.area < best!.1 { best = (oid, b.area) }
+            hits.append((oid, z[oid], b.area))
         }
-        return best?.0
+        let ranked = hits.map { h -> (oid: Int, z: Int, area: Double) in
+            (h.oid, h.z ?? hits.filter { $0.z != nil && $0.area > h.area }.map { $0.z! }.max() ?? .min, h.area)
+        }
+        return ranked.max { a, b in a.z != b.z ? a.z < b.z : a.area > b.area }?.oid
     }
 
     /// Plain text whose string is in the source: its box can be made wider or narrower (re-wrapping it).
@@ -808,8 +879,13 @@ final class CanvasView: MTKView {
         let tol = 9 * pxPerPoint
         var corners: [(Handle, Double, Double)] = [(.nw, b.x0, b.y0), (.ne, b.x1, b.y0), (.sw, b.x0, b.y1), (.se, b.x1, b.y1)]
         if sides { corners += [(.w, b.x0, b.cy), (.e, b.x1, b.cy)] }
-        for (h, x, y) in corners where abs(Double(p.x) - x) <= tol && abs(Double(p.y) - y) <= tol { return h }
-        return nil
+        // the nearest one: on a one-line text box the side handles sit within reach of the corners
+        var best: (Handle, Double)?
+        for (h, x, y) in corners where abs(Double(p.x) - x) <= tol && abs(Double(p.y) - y) <= tol {
+            let d = hypot(Double(p.x) - x, Double(p.y) - y)
+            if best == nil || d < best!.1 { best = (h, d) }
+        }
+        return best?.0
     }
 
     /// Index of the user guide under a point, if any.
@@ -833,7 +909,14 @@ final class CanvasView: MTKView {
         else if h != nil { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? { onContextMenu?() }
+    /// Right-click: the object under the pointer is selected first, so the menu is about it.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        if drawTool == nil {           // on the empty slide nothing stays selected: the menu is the slide's
+            let oid = hit(framePoint(event))
+            if oid != selection, !(oid.map { others.contains($0) } ?? false) { selection = oid; onSelect?(oid) }
+        }
+        return onContextMenu?()
+    }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
@@ -847,7 +930,7 @@ final class CanvasView: MTKView {
             drawBand = (Double(p.x), Double(p.y), Double(p.x), Double(p.y))
             return
         }
-        if event.clickCount == 2, let oid = hit(p) { onSelect?(oid); onEdit?(oid, event.locationInWindow); return }
+        if event.clickCount == 2, let oid = hit(p) { others = []; onSelect?(oid); onEdit?(oid, event.locationInWindow); return }
         if let i = guideAt(p) { dragGuide = i; needsDisplay2(); return }
         if let s = selection, let e = lineEnds(s) {
             let tol = 10 * pxPerPoint
@@ -862,11 +945,29 @@ final class CanvasView: MTKView {
             return
         }
         let oid = hit(p)
-        if oid != selection { selection = oid; onSelect?(oid) }
-        if let oid = oid {
-            dragStart = p; dragOID = oid; dragHandle = nil; dragBox = currentBox(oid)
-            dragBase = overrides[oid].map { ($0.dx, $0.dy) } ?? (0, 0)
+        let shift = event.modifierFlags.contains(.shift)
+        if oid == nil, let ph = placeholders.first(where: { $0.rect.contains(Double(p.x), Double(p.y)) }) {
+            onPlaceholder?(ph)                       // like PowerPoint: one click puts the caret in the empty box
+            return
         }
+        guard let oid = oid else {
+            // like PowerPoint: a click on nothing clears the selection; dragging there draws a box that selects
+            // everything it encloses (shift keeps what was selected and adds to it)
+            if !shift, selection != nil { selection = nil; onSelect?(nil) }
+            marqueeStart = p; marqueeAdds = shift && selection != nil
+            return
+        }
+        if shift {                                   // shift-click: add to or take out of the selection
+            if oid == selection { selectGroup(selectedIDs.filter { $0 != oid }) }
+            else if others.contains(oid) { others.remove(oid) }
+            else { selectGroup([oid] + selectedIDs) }
+            return
+        }
+        if oid != selection, !others.contains(oid) { selection = oid; onSelect?(oid) }
+        dragStart = p; dragOID = oid; dragHandle = nil; dragBox = currentBox(oid)
+        dragBase = overrides[oid].map { ($0.dx, $0.dy) } ?? (0, 0)
+        dragGroup = [:]
+        for m in selectedIDs where m != oid { dragGroup[m] = overrides[m].map { ($0.dx, $0.dy) } ?? (0, 0) }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -890,6 +991,12 @@ final class CanvasView: MTKView {
                 }
             }
             drawBand = (Double(s.x), Double(s.y), x, y)
+            return
+        }
+        if let s = marqueeStart {
+            let p = framePoint(event)
+            marquee = Box(x0: min(Double(s.x), Double(p.x)), y0: min(Double(s.y), Double(p.y)),
+                          x1: max(Double(s.x), Double(p.x)), y1: max(Double(s.y), Double(p.y)))
             return
         }
         if let i = dragGuide, userGuides.indices.contains(i) {
@@ -933,6 +1040,9 @@ final class CanvasView: MTKView {
                 (dx, dy, guides) = snapDelta(oid, b, dx, dy)
             } else if !guides.isEmpty { guides = [] }
             o.dx = dragBase.dx + dx; o.dy = dragBase.dy + dy
+            for (m, base) in dragGroup {             // the rest of the selection follows by the same amount
+                var g = overrides[m] ?? Override(); g.dx = base.dx + dx; g.dy = base.dy + dy; overrides[m] = g
+            }
         }
         overrides[oid] = o
     }
@@ -943,7 +1053,7 @@ final class CanvasView: MTKView {
         guard let stop = stop else { return (dx, dy, []) }
         let fw = Double(frameSize.width), fh = Double(frameSize.height)
         var xs: [Double] = [0, fw / 2, fw], ys: [Double] = [0, fh / 2, fh]
-        for v in stop.visible where Int(v[0]) != oid {
+        for v in stop.visible where Int(v[0]) != oid && dragGroup[Int(v[0])] == nil {
             guard let ob = rawBox(Int(v[0])) else { continue }
             xs += [ob.x0, ob.cx, ob.x1]; ys += [ob.y0, ob.cy, ob.y1]
         }
@@ -969,8 +1079,30 @@ final class CanvasView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = []; wrapBand = nil }
+        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = []; wrapBand = nil; dragGroup = [:] }
         if dragGuide != nil { endGuideDrag(); return }
+        if marqueeStart != nil {
+            marqueeStart = nil
+            let band = marquee; marquee = nil
+            guard let m = band, let stop = stop, max(m.w, m.h) >= 3 * pxPerPoint else { return }
+            // everything the box fully encloses, as in PowerPoint; a parent's own parts (a table's labels, which have no
+            // sprite of their own) come along with the parent rather than being selected twice
+            var z: [Int: Int] = [:]
+            for sp in stop.sprites { z[sp.oid] = sp.z }
+            var inside: [(oid: Int, box: Box)] = []
+            for v in stop.visible {
+                let oid = Int(v[0])
+                guard let b = rawBox(oid), b.x0 >= m.x0, b.x1 <= m.x1, b.y0 >= m.y0, b.y1 <= m.y1 else { continue }
+                inside.append((oid, b))
+            }
+            let ids = inside.filter { i in
+                z[i.oid] != nil || !inside.contains { $0.oid != i.oid && $0.box.x0 <= i.box.x0 && $0.box.x1 >= i.box.x1 && $0.box.y0 <= i.box.y0 && $0.box.y1 >= i.box.y1 }
+            }.map { $0.oid }
+            if ids.isEmpty && !marqueeAdds { return }
+            let kept = marqueeAdds ? selectedIDs : []
+            selectGroup(kept + ids.filter { !kept.contains($0) })
+            return
+        }
         if drawTool == "pen" {
             let pts = CanvasView.simplify(penPoints, tolerance: 1.2)
             penPoints = []
@@ -1003,9 +1135,15 @@ final class CanvasView: MTKView {
             if abs(o.scale - 1) > 0.002 { onResize?(oid, o.scale) } else if idle { overrides[oid] = nil }
         } else {
             let dx = o.dx - dragBase.dx, dy = o.dy - dragBase.dy      // this drag alone; earlier moves are already on their way
-            if abs(dx) + abs(dy) >= 1 { onMove?(oid, dx, dy) }
+            let moved = abs(dx) + abs(dy) >= 1
+            if moved { onMove?(oid, dx, dy) }
             else if dragBase.dx == 0 && dragBase.dy == 0 && o.scale == 1 && o.replacement == nil { overrides[oid] = nil }
             else { o.dx = dragBase.dx; o.dy = dragBase.dy; overrides[oid] = o }
+            for (m, base) in dragGroup.sorted(by: { $0.key < $1.key }) {      // the rest of the selection went along
+                if moved { onMove?(m, dx, dy) }
+                else if let g = overrides[m], base.dx == 0 && base.dy == 0 && g.scale == 1 && g.replacement == nil { overrides[m] = nil }
+                else if var g = overrides[m] { g.dx = base.dx; g.dy = base.dy; overrides[m] = g }
+            }
         }
     }
 
@@ -1030,13 +1168,16 @@ final class CanvasView: MTKView {
         let n: Double = event.modifierFlags.contains(.shift) ? 10 : 1
         if event.keyCode == 53, drawTool != nil { drawTool = nil; drawStart = nil; drawBand = nil; penPoints = []; return }
         guard let s = selection else { super.keyDown(with: event); return }
+        let all = selectedIDs
         switch event.keyCode {
-        case 123: onNudge?(s, -n, 0)
-        case 124: onNudge?(s, n, 0)
-        case 126: onNudge?(s, 0, -n)
-        case 125: onNudge?(s, 0, n)
+        case 123: for id in all { onNudge?(id, -n, 0) }
+        case 124: for id in all { onNudge?(id, n, 0) }
+        case 126: for id in all { onNudge?(id, 0, -n) }
+        case 125: for id in all { onNudge?(id, 0, n) }
         case 36: onEdit?(s, nil)
-        case 51, 117: onDelete?(s)
+        case 51, 117:                                  // highest id first: ids follow creation order, so the rest keep theirs
+            for id in all.sorted(by: >) { onDelete?(id) }
+            others = []
         case 53: selection = nil; onSelect?(nil)
         default: super.keyDown(with: event)
         }
@@ -1051,6 +1192,20 @@ fileprivate final class InlineTextView: NSTextView {
     var onCancel: (() -> Void)?
     var onBlur: (() -> Void)?
     var onTab: (() -> Void)?
+    /// Start every new line with a bullet (content boxes, and text whose lines all have one).
+    var bullets = false
+    /// Backspace / Delete with nothing typed (an empty layout box): remove the box instead.
+    var onDeleteEmpty: (() -> Void)?
+    override func insertNewline(_ sender: Any?) {
+        super.insertNewline(sender)
+        if bullets { insertText(CanvasView.bullet, replacementRange: selectedRange()) }
+    }
+    override func deleteBackward(_ sender: Any?) {
+        if let d = onDeleteEmpty, string.isEmpty || string == CanvasView.bullet { d() } else { super.deleteBackward(sender) }
+    }
+    override func deleteForward(_ sender: Any?) {
+        if let d = onDeleteEmpty, string.isEmpty || string == CanvasView.bullet { d() } else { super.deleteForward(sender) }
+    }
     override func insertTab(_ sender: Any?) { if let t = onTab { t() } else { super.insertTab(sender) } }
     override func insertBacktab(_ sender: Any?) { if let t = onTab { t() } else { super.insertBacktab(sender) } }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -1081,17 +1236,19 @@ extension CanvasView: NSTextViewDelegate {
     /// With `cell`, types into that cell of a table instead (`sizing`: the text its ink shows, when not `text`).
     func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool, color: String?,
                        at: CGPoint?, cell: (row: Int, col: Int, cell: Box, ink: Box)? = nil, sizing: String? = nil,
+                       placeholder: Placeholder? = nil,
                        changed: @escaping (String) -> Void,
                        done: @escaping (String?, @escaping () -> Void) -> Void) -> Bool {
         if let e = inline { e.view.removeFromSuperview(); inline = nil }
-        guard let b = cell?.ink ?? rawBox(oid), b.w > 0, b.h > 0 else { return false }
+        guard let b = placeholder?.rect ?? cell?.ink ?? rawBox(oid), b.w > 0, b.h > 0 else { return false }
         // size the font so the widest line spans the object's ink width (height when the text is blank)
         let lines = (sizing ?? text).components(separatedBy: "\n")
         let ref = CanvasView.editorFont(family, bold: bold, italic: italic, size: 100)
         let widest = lines.map { ($0 as NSString).size(withAttributes: [.font: ref]).width }.max() ?? 0
         let lineH = NSLayoutManager().defaultLineHeight(for: ref)
         let byHeight = 100 * CGFloat(b.h) / (CGFloat(lines.count) * lineH * 0.8)
-        let fontPx = widest > 1 ? min(max(100 * CGFloat(b.w) / widest, byHeight * 0.5), byHeight * 2) : byHeight
+        let fontPx = placeholder.map { CGFloat(Double($0.size) / 72 * unitPx) }
+            ?? (widest > 1 ? min(max(100 * CGFloat(b.w) / widest, byHeight * 0.5), byHeight * 2) : byHeight)
 
         var c = NSColor(hex: color ?? "#FFFFFF").usingColorSpace(.sRGB) ?? .white
         if colorView != .normal {
@@ -1110,6 +1267,11 @@ extension CanvasView: NSTextViewDelegate {
         tv.isHorizontallyResizable = false; tv.isVerticallyResizable = false
         tv.textColor = c; tv.insertionPointColor = c
         tv.string = text
+        tv.bullets = placeholder?.role == "body"
+            || (!text.isEmpty && text.components(separatedBy: "\n").allSatisfy { $0.hasPrefix(CanvasView.bullet) })
+        if let line = placeholder?.line {
+            tv.onDeleteEmpty = { [weak self] in self?.finishTextEdit(commit: false); self?.onPlaceholderDelete?(line) }
+        }
         tv.delegate = self
         tv.onCommit = { [weak self] in self?.finishTextEdit(commit: true) }
         tv.onBlur = { [weak self] in self?.finishTextEdit(commit: true) }
@@ -1123,12 +1285,15 @@ extension CanvasView: NSTextViewDelegate {
         if cell != nil { tv.onTab = { [weak self] in self?.finishTextEdit(commit: true) } }
         inline = InlineEdit(oid: oid, view: tv, center: CGPoint(x: area?.cx ?? b.cx, y: area?.cy ?? b.cy), fontPx: fontPx,
                             family: family, bold: bold, italic: italic, original: text, done: done,
-                            cell: cell.map { ($0.row, $0.col, area!) })
+                            cell: cell.map { ($0.row, $0.col, area!) }, placeholder: placeholder?.line,
+                            anchor: placeholder.map { placeholderAnchor($0) })
         addSubview(tv)
         layoutTextEditor()
         setNeedsDisplay(bounds)
         window?.makeFirstResponder(tv)
-        if let at = at {
+        if placeholder != nil {
+            tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+        } else if let at = at {
             let i = tv.characterIndexForInsertion(at: tv.convert(at, from: nil))
             tv.setSelectedRange(NSRange(location: min(max(0, i), (tv.string as NSString).length), length: 0))
         } else {
@@ -1173,8 +1338,82 @@ extension CanvasView: NSTextViewDelegate {
         let w = max(used.width, 2) + 2, h = max(used.height, lm.defaultLineHeight(for: font))
         let r = slideRect
         let cx = r.minX + e.center.x * s, cy = r.maxY - e.center.y * s
-        let f = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
+        var f = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
+        if let a = e.anchor {                     // a layout box: grows rightwards (and down) from its left edge
+            let ay = r.maxY - CGFloat(a.y) * s
+            f = CGRect(x: r.minX + CGFloat(a.x) * s, y: a.top ? ay - h : ay - h / 2, width: w, height: h)
+        }
         if e.view.frame != f { e.view.frame = f }
+    }
+
+    /// Where text typed into a layout box starts (frame px), matching the engine's placement: 0.1 units in from
+    /// the left edge, vertically centred for a title and 0.1 units below the top otherwise.
+    func placeholderAnchor(_ ph: Placeholder) -> (x: Double, y: Double, top: Bool) {
+        let b = ph.rect, pad = 0.1 * unitPx
+        return ph.role == "title" ? (b.x0 + pad, b.cy, false) : (b.x0 + pad, b.y0 + pad, true)
+    }
+
+    static let bullet = "\u{2022} "
+
+    /// Whether the slide's backdrop is light at the centre of `b` (from the current build's background image).
+    func backdropIsLight(_ b: Box) -> Bool { backdropColor(b).map { luma($0) > 0.5 } ?? false }
+
+    /// Whether the backdrop at the centre of `b` looks light as shown (dark mode / inverted view applied).
+    func shownLight(_ b: Box) -> Bool { backdropColor(b).map { luma(colorView == .normal ? $0 : DarkMode.map($0)) > 0.5 } ?? false }
+
+    /// The slide's background colour as shown (sampled at its centre), for the layout icons.
+    var shownBackground: NSColor? {
+        let fw = Double(frameSize.width), fh = Double(frameSize.height)
+        return backdropColor(Box(x0: 0, y0: 0, x1: fw, y1: fh)).map { colorView == .normal ? $0 : DarkMode.map($0) }
+    }
+
+    private func luma(_ c: NSColor) -> Double {
+        0.2126 * Double(c.redComponent) + 0.7152 * Double(c.greenComponent) + 0.0722 * Double(c.blueComponent)
+    }
+
+    /// The backdrop's colour at the centre of `b` (from the current build's background image).
+    func backdropColor(_ b: Box) -> NSColor? {
+        guard let path = stop?.bg else { return nil }
+        let key = "\(path)@\(Int(b.cx)),\(Int(b.cy))"
+        if let v = colorCache[key] { return v }
+        var px = [UInt8](repeating: 0, count: 4)
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              let ctx = CGContext(data: &px, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let sx = Double(img.width) / Double(frameSize.width), sy = Double(img.height) / Double(frameSize.height)
+        // draw the image shifted so the sampled pixel lands on the 1x1 context
+        ctx.draw(img, in: CGRect(x: -b.cx * sx, y: -(Double(img.height) - b.cy * sy), width: Double(img.width), height: Double(img.height)))
+        let c = NSColor(srgbRed: CGFloat(px[0]) / 255, green: CGFloat(px[1]) / 255, blue: CGFloat(px[2]) / 255, alpha: 1)
+        if colorCache.count > 64 { colorCache.removeAll() }
+        colorCache[key] = c
+        return c
+    }
+
+    /// A placeholder's grey prompt rasterised at twice `px` (its font size in frame px), cached.
+    fileprivate func promptTexture(_ text: String, px: Double, light: Bool) -> MTLTexture? {
+        let key = "prompt:\(text)@\(Int(px * 10))\(light ? "L" : "D")"
+        if let t = promptCache[key] { return t }
+        let font = NSFont.systemFont(ofSize: CGFloat(px * 2))
+        let grey: CGFloat = light ? 0.45 : 0.62
+        let attr = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor(white: grey, alpha: 1)])
+        let size = attr.size()
+        let w = max(1, Int(ceil(size.width))), h = max(1, Int(ceil(size.height)))
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        attr.draw(at: .zero)
+        NSGraphicsContext.restoreGraphicsState()
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+        d.usage = .shaderRead
+        guard let t = device?.makeTexture(descriptor: d) else { return nil }
+        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: bytes, bytesPerRow: w * 4)
+        promptCache[key] = t
+        return t
     }
 
     /// The editor's area in frame px (it stands in for the object's box while typing).

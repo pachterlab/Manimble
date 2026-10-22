@@ -98,7 +98,7 @@ import AppKit
         canvas.translatesAutoresizingMaskIntoConstraints = false
         canvas.wantsLayer = true
         canvas.layer?.cornerRadius = 6; canvas.layer?.masksToBounds = true
-        canvas.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        Theme.layerColors(canvas) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
 
         hint.textColor = .secondaryLabelColor; hint.font = Theme.font(11.5)
         hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

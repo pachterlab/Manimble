@@ -322,7 +322,9 @@ final class BuildPanel: NSView {
         toolTip = "Build \(index + 1)"
     }
     required init?(coder: NSCoder) { fatalError() }
-    override var acceptsFirstResponder: Bool { true }
+    /// Clicks still land here (see `SlideTable.validateProposedFirstResponder`), but key focus stays on the table:
+    /// the panel is rebuilt on every build change, and a focused panel would take the keyboard with it.
+    override var acceptsFirstResponder: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
     override func mouseDown(with event: NSEvent) { handler() }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
@@ -336,7 +338,7 @@ final class StepButton: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: 80, height: 45))
         wantsLayer = true
         layer?.borderWidth = active ? 2 : 1
-        layer?.borderColor = (active ? Theme.accent : NSColor(white: 1, alpha: 0.14)).cgColor
+        Theme.layerColors(self) { $0.layer?.borderColor = (active ? Theme.accent : Theme.ink(0.14)).cgColor }
         layer?.cornerRadius = 6; layer?.masksToBounds = true
         let iv = NSImageView(image: DarkMode.image(path: path) ?? NSImage())
         iv.imageScaling = .scaleAxesIndependently

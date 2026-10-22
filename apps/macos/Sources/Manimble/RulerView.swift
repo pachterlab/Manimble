@@ -15,7 +15,8 @@ final class RulerView: NSView {
     static let thickness: CGFloat = 20
 
     private let bg = Theme.canvasBottom
-    private let guideColor = NSColor(srgbRed: 0.25, green: 0.85, blue: 1.0, alpha: 1)
+    private let guideColor = Theme.dynamic(light: NSColor(srgbRed: 0.0, green: 0.55, blue: 0.75, alpha: 1),
+                                           dark: NSColor(srgbRed: 0.25, green: 0.85, blue: 1.0, alpha: 1))
     private var tracking: NSTrackingArea?
     private var dragging = false
 
@@ -28,6 +29,7 @@ final class RulerView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { false }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
     var horizontal: Bool { orientation == .horizontal }
 
     // MARK: geometry
@@ -78,7 +80,7 @@ final class RulerView: NSView {
         let s0 = viewPos(framePx: 0)
         let s1 = viewPos(framePx: Double(horizontal ? c.frameSize.width : c.frameSize.height))
         let slideLo = min(s0, s1), slideHi = max(s0, s1)
-        NSColor(white: 1, alpha: 0.075).setFill()
+        Theme.ink(0.075).setFill()
         along(from: slideLo, to: slideHi, thickness: thick).fill()
 
         // selection extent
@@ -95,9 +97,9 @@ final class RulerView: NSView {
         let minorStep = major / CGFloat(minorN)
         let firstUnit = floor((0 - center) / ppu / minorStep) * minorStep
         let lastUnit = ceil((length - center) / ppu / minorStep) * minorStep
-        let minorColor = NSColor(white: 1, alpha: 0.28), majorColor = NSColor(white: 1, alpha: 0.6)
+        let minorColor = Theme.ink(0.28), majorColor = Theme.ink(0.6)
         let font = Theme.mono(8.5)
-        let labelAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(white: 1, alpha: 0.72)]
+        let labelAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Theme.ink(0.72)]
         let decimals = major >= 1 ? 0 : (major == 0.25 ? 2 : 1)
         var u = firstUnit
         let eps = minorStep / 1000
@@ -146,12 +148,12 @@ final class RulerView: NSView {
         // cursor position
         if let cur = cursor {
             let pos = viewPos(framePx: Double(horizontal ? cur.x : cur.y))
-            NSColor(white: 1, alpha: 0.85).setFill()
+            Theme.ink(0.85).setFill()
             tick(at: pos, length: thick, thickness: thick).fill()
         }
 
         // edge next to the canvas
-        NSColor(white: 1, alpha: 0.14).setFill()
+        Theme.ink(0.14).setFill()
         if horizontal { NSRect(x: 0, y: 0, width: b.width, height: 1).fill() }
         else { NSRect(x: b.width - 1, y: 0, width: 1, height: b.height).fill() }
     }

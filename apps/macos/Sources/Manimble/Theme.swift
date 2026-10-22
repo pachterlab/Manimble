@@ -5,11 +5,57 @@ enum Theme {
     static let accent = NSColor(srgbRed: 0.486, green: 0.361, blue: 1.0, alpha: 1)          // #7C5CFF
     static let accentSoft = NSColor(srgbRed: 0.486, green: 0.361, blue: 1.0, alpha: 0.18)
     static let warm = NSColor(srgbRed: 1.0, green: 0.424, blue: 0.047, alpha: 1)             // manim-orange, used sparingly
-    static let canvasTop = NSColor(srgbRed: 0.145, green: 0.150, blue: 0.178, alpha: 1)
-    static let canvasBottom = NSColor(srgbRed: 0.075, green: 0.078, blue: 0.098, alpha: 1)
+    static let canvasTop = dynamic(light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.972, alpha: 1),
+                                   dark: NSColor(srgbRed: 0.145, green: 0.150, blue: 0.178, alpha: 1))
+    /// The stage around the slide, the rulers and the drawer.
+    static let canvasBottom = dynamic(light: NSColor(srgbRed: 0.918, green: 0.918, blue: 0.929, alpha: 1),
+                                      dark: NSColor(srgbRed: 0.075, green: 0.078, blue: 0.098, alpha: 1))
+    /// The code card and the terminals.
+    static let codeBackground = dynamic(light: NSColor(srgbRed: 0.988, green: 0.988, blue: 0.992, alpha: 1),
+                                        dark: NSColor(srgbRed: 0.098, green: 0.102, blue: 0.125, alpha: 1))
+    /// Header strips above the code and in the drawer.
+    static let barBackground = dynamic(light: NSColor(srgbRed: 0.945, green: 0.945, blue: 0.955, alpha: 1),
+                                       dark: NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1))
+
+    /// A colour that follows the window's light/dark appearance.
+    static func dynamic(light: NSColor, dark: NSColor) -> NSColor {
+        NSColor(name: nil) { $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light }
+    }
+    /// Foreground ink on the dark/light chrome: white at `alpha` in dark mode, black in light mode.
+    static func ink(_ alpha: CGFloat) -> NSColor { dynamic(light: NSColor(white: 0, alpha: alpha), dark: NSColor(white: 1, alpha: alpha)) }
+
+    /// Layer colours are CGColors fixed when they are set; `apply` sets them now and again whenever light/dark changes.
+    /// The view is handed back to `apply`, so the closure need not (and must not) capture it.
+    static func layerColors<V: NSView>(_ view: V, _ apply: @escaping (V) -> Void) {
+        AppearanceWatch.shared.add(view) { [weak view] in if let v = view { apply(v) } }
+    }
 
     static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont { .systemFont(ofSize: size, weight: weight) }
     static func mono(_ size: CGFloat) -> NSFont { .monospacedSystemFont(ofSize: size, weight: .regular) }
+}
+
+private final class AppearanceWatch {
+    static let shared = AppearanceWatch()
+    private struct Entry { weak var view: NSView?; let apply: () -> Void }
+    private var entries: [Entry] = []
+    private var observation: NSKeyValueObservation?
+
+    func add(_ view: NSView, _ apply: @escaping () -> Void) {
+        entries.removeAll { $0.view == nil }
+        entries.append(Entry(view: view, apply: apply))
+        view.effectiveAppearance.performAsCurrentDrawingAppearance(apply)
+        if observation == nil {
+            observation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+                // the views' own effective appearance updates after the app's
+                DispatchQueue.main.async { self?.refresh() }
+            }
+        }
+    }
+
+    private func refresh() {
+        entries.removeAll { $0.view == nil }
+        for e in entries { e.view?.effectiveAppearance.performAsCurrentDrawingAppearance(e.apply) }
+    }
 }
 
 /// Small uppercase section label used in the inspector.

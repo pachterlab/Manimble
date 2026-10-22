@@ -57,9 +57,10 @@ final class PresenterWindow: NSWindow {
     override func keyDown(with event: NSEvent) { onKey?(event) }
 }
 
-/// Presenter view: drives a `PresenterSource` (the audience display on another screen, or an invisible one for
-/// rehearsing on a single screen) from a window that shows the notes and what comes next. With the animated show
-/// the current slide plays live, mirroring the audience display.
+/// Presenter view: two windows. The audience display is the regular full-screen show (on the second screen when
+/// there is one, else on the same screen); the presenter window shows the notes, what comes next and the timer.
+/// On a single screen it floats above the show, so both are in view. With the animated show the current slide
+/// plays live, mirroring the audience display.
 @MainActor
 final class PresenterController: NSObject, NSWindowDelegate {
     let source: PresenterSource
@@ -82,36 +83,46 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private var cache: [String: NSImage] = [:]
     private var pendingFrames: Set<String> = []
     private let animated: Bool
+    private let presenterScreen: NSScreen
 
     /// The stills slideshow: one PNG per build.
     convenience init(slides: [[String]], notes: [String], startSlide: Int, presenterScreen: NSScreen, audienceScreen: NSScreen?) {
         let p = SlidePlayer(screen: audienceScreen ?? presenterScreen)
         p.notes = notes
-        self.init(source: p, animated: false, presenterScreen: presenterScreen, rehearsal: audienceScreen == nil)
-        p.play(slides: slides, startSlide: startSlide, screen: audienceScreen, visible: audienceScreen != nil)
+        self.init(source: p, animated: false, presenterScreen: presenterScreen, sharedScreen: audienceScreen == nil)
+        p.play(slides: slides, startSlide: startSlide, screen: audienceScreen ?? presenterScreen)
         begin()
     }
 
     /// The animated show: the Manim Slides clips, played natively.
     convenience init(deck: PresentDeck, startScene: Int, presenterScreen: NSScreen, audienceScreen: NSScreen?) {
         let p = AnimatedPlayer(screen: audienceScreen ?? presenterScreen)
-        self.init(source: p, animated: true, presenterScreen: presenterScreen, rehearsal: audienceScreen == nil)
-        p.play(deck, startScene: startScene, screen: audienceScreen, visible: audienceScreen != nil)
+        self.init(source: p, animated: true, presenterScreen: presenterScreen, sharedScreen: audienceScreen == nil)
+        p.play(deck, startScene: startScene, screen: audienceScreen ?? presenterScreen)
         begin()
     }
 
-    private init(source: PresenterSource, animated: Bool, presenterScreen: NSScreen, rehearsal: Bool) {
+    /// The presenter window is an ordinary window of about two thirds of its display, never the whole display.
+    /// `sharedScreen`: the show is full screen on the same display, so the window floats above it.
+    private init(source: PresenterSource, animated: Bool, presenterScreen: NSScreen, sharedScreen: Bool) {
         self.source = source
         self.animated = animated
-        let frame = presenterScreen.visibleFrame
+        self.presenterScreen = presenterScreen
+        let frame = Self.floatingFrame(on: presenterScreen)
         window = PresenterWindow(contentRect: frame, styleMask: [.titled, .closable, .resizable, .miniaturizable],
                                  backing: .buffered, defer: false)
         super.init()
-        window.title = (animated ? "Presenter View with Animations" : "Presenter View") + (rehearsal ? " (rehearsal)" : "")
+        window.title = animated ? "Presenter View with Animations" : "Presenter View"
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = NSColor(white: 0.07, alpha: 1)
         window.minSize = NSSize(width: 820, height: 520)
         window.isReleasedWhenClosed = false
+        // Joins whatever Space its display shows, including a full-screen one (the editor or another app in native
+        // full screen). Without .fullScreenAuxiliary macOS cannot place the window on such a Space and moves it to
+        // the other display, where it lands behind the show.
+        window.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces]
+        // on a shared display, above the show (PlayerWindow sits at mainMenu + 1)
+        if sharedScreen { window.level = .mainMenu + 2 }
         window.delegate = self
         window.contentView = buildContent()
         window.onKey = { [weak self] e in self?.key(e) }
@@ -119,8 +130,27 @@ final class PresenterController: NSObject, NSWindowDelegate {
         source.onExit = { [weak self] in self?.finish() }
     }
 
+    /// Where the presenter window goes: about two thirds of its display, centred (never below the window's minimum
+    /// size), so on a shared display the show stays visible around it.
+    private static func floatingFrame(on screen: NSScreen) -> NSRect {
+        let s = screen.visibleFrame
+        let w = max(820, min(s.width * 0.68, s.width - 48))
+        let h = max(520, min(s.height * 0.68, s.height - 48))
+        return NSRect(x: s.midX - w / 2, y: s.midY - h / 2, width: w, height: h).integral
+    }
+
+    /// The display behind an NSScreen (NSScreen objects are not reliably comparable across calls).
+    private static func id(of screen: NSScreen) -> UInt32 {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+    }
+
     private func begin() {
         window.makeKeyAndOrderFront(nil)
+        // If the system still moved the window to another display, put it back where the presenter is.
+        if let s = window.screen, Self.id(of: s) != Self.id(of: presenterScreen) {
+            window.setFrame(Self.floatingFrame(on: presenterScreen), display: true)
+            window.makeKeyAndOrderFront(nil)
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }

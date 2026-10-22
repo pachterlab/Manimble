@@ -264,10 +264,14 @@ extension MainController {
         }
     }
 
-    /// Right-click on the slide.
+    /// Right-click: on an object, only what applies to it; on the empty slide, the slide's own options.
     func canvasMenu() -> NSMenu? {
         guard sceneName != nil, player == nil else { return nil }
         let m = NSMenu()
+        if objInfo != nil {
+            if let item = bioCartoonMenuItem() { m.addItem(item) }
+            return m.items.isEmpty ? nil : m
+        }
         let bg = NSMenuItem(title: "Format Background…", action: #selector(formatBackground), keyEquivalent: "")
         bg.target = self
         m.addItem(bg)

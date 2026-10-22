@@ -30,8 +30,9 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `insert_many` | `scene`, `stop`, `items` (a list of `insert` arguments without `scene`/`stop`), `replace_image?` (`{oid, file}`: point that picture at `file` in the deck folder, e.g. Extract Elements' filled-in background) | `{ok, message, file, changed}`; one undo step and one re-render for all of them. A direct `ImageMobject(...)` gets the new file as its first argument; a helper given the file name gets the new name, with the file copied next to the old picture |
 | `insert_sprite` | same as `insert` | a sprite (below) previewing what the insert will look like |
 | `sprite` | `kind` (`text`, `tex` or `code`), `value`/`code`, `font_size`, `color?`, `font?`, `weight?`, `slant?` | `{file, path, x, y, w, h, cx, cy}` (a transparent PNG, `cx`/`cy` = offset of its centre from the frame centre) |
-| `slide` | `op` (`new`, `duplicate`, `delete`, `up`, `down`, `restore`, `hide`, `unhide`, `reorder`), `scene`, `index?`, `layout?` | `{ok, message, select}` (`select` = slide to show afterwards); `new` takes `layout` (`title`, `title_content` (default), `section`, `two_content`, `title_only`, `blank`: placeholder `Text` elements, or nothing); `restore` appends a scene that is not in `order.txt` to it; `hide` / `unhide` toggle a `# manimble hidden` comment on the class line (the slide stays in the show's order and the navigator but is left out of slideshows, the presenter, PDF, PowerPoint and Keynote exports); `reorder` inserts the scene at the zero-based slot `index` in the original list. When the deck has slide numbers they are renumbered in the same undo step |
+| `slide` | `op` (`new`, `duplicate`, `delete`, `up`, `down`, `restore`, `hide`, `unhide`, `reorder`), `scene`, `index?`, `layout?` | `{ok, message, select}` (`select` = slide to show afterwards); `new` takes `layout` (`title`, `title_content` (default), `two_content`, `title_only`, `blank`): PowerPoint's Office Theme boxes written as `# manimble placeholder <role> x0 y0 x1 y1 size` comments (manim units), which render nothing and which the editor draws as "Click to add …" boxes; `restore` appends a scene that is not in `order.txt` to it; `hide` / `unhide` toggle a `# manimble hidden` comment on the class line (the slide stays in the show's order and the navigator but is left out of slideshows, the presenter, PDF, PowerPoint and Keynote exports); `reorder` inserts the scene at the zero-based slot `index` in the original list. When the deck has slide numbers they are renumbered in the same undo step |
 | `page_numbers` | `op` (`get`, `set`, `remove`, `spread`), for `spread`: `scene` (its number line, as moved or restyled, is copied to every numbered slide, each keeping its own label); for `set`: `scene` (re-rendered to verify), `pos` (`DR`, `DOWN`, `DL`), `start`, `skip` (no number on the first slide), `total` (`3 / 10`), `size`, `sub` (sub-slide numbers: a slide with several builds shows `3 / 10 · 1/3`, counting on at every `next_slide()` through `sub_slides` in `manimble_helpers.py`; the count follows the slide's renders) | `get`: `{on, pos, start, skip, total, size, sub}`; otherwise `{ok, message, changed}`. Writes `self.add(Text("3 / 10", ...).to_corner(DR, ...))  # manimble page number ...` at the top of every construct() of the show; a moved or restyled number keeps its tweaks when renumbered. An `edit` that changed a number line returns `pageNumber: true` |
+| `placeholder` | `scene`, `line`, `text`, `color?`, `op?` (`remove`) | `{ok, message, line, file, changed}`: replaces the placeholder comment on `line` with `self.add(Text(...).move_to(..., aligned_edge=LEFT/UL))  # manimble` at the box's left edge (empty text or `op: remove` deletes it) |
 | `notes` | `op` (`get`, `set`), `scene`, `text?` | `get`: `{text}`; `set`: `{ok, message, changed}`. Speaker notes live in `self.next_slide(notes="...")  # manimble notes` as the first statement of construct(), which manim-slides' presenter shows for the first build; empty text removes it |
 | `undo`, `redo` | | `{ok, label}` or `{ok: false, error}` |
 | `present` | `scene?`, `height?` (720, 1080, 1440 or 2160; default 720) | `{ok}`; builds out-of-date slides (`python -m manim render`, no Qt needed) and sends their clips to the app's native player in a `present` `ready` event; with `scene`, only that scene |
@@ -47,7 +48,8 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 ### `scene` result
 
 ```
-{name, status: "ready", size: [w, h], frame: [fw, fh], notes,
+{name, status: "ready", size: [w, h], frame: [fw, fh], notes, font (the deck's FONT or null),
+ placeholders: [{line, role, prompt, size, box: [x0, y0, x1, y1] frame px}],   empty layout boxes
  stops: [ {png,                      full exact frame for this build
            bg,                       backdrop: everything that is not a tracked object
            visible: [[oid, x0, y0, x1, y1], ...],
@@ -71,7 +73,8 @@ previews an edit.
 
 `text {value, shared?}`, `font {value}`, `style {font?, weight?, slant?, shared?}`, `color {value: "#RRGGBB"}`,
 `move {dx, dy}` (frame pixels), `resize {ratio}`, `endpoints {sx, sy, ex, ey}` (lines), `table {rows}`, `delete`
-(elements inserted by Manimble only), `decorate {kind: underline|strike, on}`, `highlight {color?: "#RRGGBB", opacity?}`
+(cuts the element out of the code that makes and shows it; a named element that other code depends on keeps its
+name and only stops being shown), `decorate {kind: underline|strike, on}`, `highlight {color?: "#RRGGBB", opacity?}`
 (no colour removes it), `align {value: left|center|right}`, `columns {value}`, `spacing {value}` (manim `line_spacing`),
 `clear_format`, `size {width?, height?}` (frame pixels, each dimension on its own), `rotate {degrees}` (absolute).
 Every edit is verified by re-rendering and rolled back if later code overrides it.

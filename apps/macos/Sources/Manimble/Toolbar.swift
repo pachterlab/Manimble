@@ -63,7 +63,7 @@ extension MainController: NSToolbarDelegate {
             for (title, layout, _) in MainController.slideLayouts {
                 let mi = NSMenuItem(title: title, action: #selector(newSlideLayout(_:)), keyEquivalent: "")
                 mi.representedObject = layout; mi.target = self
-                mi.image = symbol(MainController.layoutSymbols[layout] ?? "rectangle", title)
+                mi.image = MainController.layoutIcon(layout)
                 m.addItem(mi)
             }
             i.menu = m

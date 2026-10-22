@@ -19,13 +19,13 @@ final class BottomDrawer: NSView {
         self.notes = notes; self.terminal = terminal
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = Theme.canvasBottom.cgColor
+        Theme.layerColors(self) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
 
         // header: the tabs, then the active page's tools, then hide
         let bar = NSView(); bar.wantsLayer = true
-        bar.layer?.backgroundColor = drawerBarBackground.cgColor
+        Theme.layerColors(bar) { $0.layer?.backgroundColor = Theme.barBackground.cgColor }
         strip.spacing = 0; strip.alignment = .centerY
-        notesHint.font = Theme.font(10); notesHint.textColor = NSColor(white: 1, alpha: 0.3)
+        notesHint.font = Theme.font(10); notesHint.textColor = Theme.ink(0.4)
         notesHint.lineBreakMode = .byTruncatingTail
         notesHint.setContentCompressionResistancePriority(.init(100), for: .horizontal)
         let plus = barButton("plus", "New terminal (⇧⌥⌘T)", self, #selector(plusPressed))
@@ -101,8 +101,8 @@ private final class DrawerTab: NSView {
         toolTip = tip.isEmpty ? nil : tip
         let label = NSTextField(labelWithString: title)
         label.font = Theme.font(11, selected ? .semibold : .regular)
-        label.textColor = NSColor(white: 1, alpha: selected ? 0.9 : 0.5)
-        close.isBordered = false; close.toolTip = "Kill terminal"; close.contentTintColor = NSColor(white: 1, alpha: 0.6)
+        label.textColor = Theme.ink(selected ? 0.9 : 0.5)
+        close.isBordered = false; close.toolTip = "Kill terminal"; close.contentTintColor = Theme.ink(0.6)
         close.symbolConfiguration = .init(pointSize: 8, weight: .semibold)
         close.target = self; close.action = #selector(closePressed)
         close.isHidden = true

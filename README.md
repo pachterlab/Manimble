@@ -212,9 +212,10 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Built-in full-screen slideshow (Play menu: ⌥⌘P from the current slide, ⌥⌘⇧P from the beginning) with fades,
   progress bar, counter, click/keyboard navigation and blank screen.
 - **Presenter View** (Play menu, ⌃⌘P): the current slide, the next slide or build, the speaker notes in large type,
-  the slide counter, a clock and an elapsed-time timer (click it, or press R, to reset). With a second display the
-  audience sees the full-screen slideshow there while you see the presenter window; with one display it is a
-  rehearsal view. Both follow the same keys: → / space / click next, ← back, N next slide, B blank, esc end.
+  the slide counter, a clock and an elapsed-time timer (click it, or press R, to reset). It opens two windows: the
+  regular full-screen slideshow for the audience and the presenter window. With a second display the slideshow goes
+  there; with one display it fills the screen and the presenter window floats above it. Both follow the same keys:
+  → / space / click next, ← back, N next slide, B blank, esc end.
 - **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
   real animations and builds inside the editor. Each build pauses at its end; click the slide or press → to play the
   next build. Use the player controls to pause or scrub, and ← to go back.
@@ -227,7 +228,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   dark mode / inverted colours apply as in the slideshow. **Presenter View with Animations** (Play menu, ⌃⌘A) is
   the same Presenter View over the animated show: the current slide plays live (mirroring the audience display, with
   a playing / paused / build-done badge), the next panel shows how the next build ends, and notes, counter, clock and
-  timer work as above; with one display it is a rehearsal view. Chapters and clickable link regions come from the deck's `present.json`
+  timer work as above, in the same two windows. Chapters and clickable link regions come from the deck's `present.json`
   (`{"sections": [scene indices], "links": {"<scene index>": [[x0, x1, y0, y1, url], ...]}}`, fractions of the
   slide, y from the top, scene indices counting `order.txt`) or, without one, the `SECTION_SCENE_INDICES` /
   `REFERENCE_LINKS` constants of a custom `present.py`; clicking the bottom 6% of the slide jumps to the chapter
@@ -311,8 +312,10 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   other slides. Only the slide on screen is re-rendered, so the breakage shows later as an error badge. A "re-render
   the other slides that use this constant and warn" check is not built.
 - Text produced by f-strings or other computation cannot be retyped on the canvas; edit its Python code in the source pane.
-- Delete only works for elements inserted with the toolbar. Elements that were already in your code must be removed
-  in the source.
+- Delete cuts an element out of the code that makes and shows it. When other code depends on a named element
+  (`SurroundingRectangle(t)`, `t.get_right()`, `Transform(t, ...)`) the name and its statements stay and only the
+  places that show it are removed; an element built in a loop goes with all its siblings, and one made inside a
+  comprehension or another larger expression still has to be removed in the source.
 - Table editing needs literal table data; cells are rendered as math.
 - Images cannot be replaced, cropped or re-linked from the UI.
 - Drawing order is approximated when text sits between filled shapes; the canvas is exact when idle.
@@ -336,7 +339,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   them. Manimble's own renders keep manim's Text/TeX cache under `~/Library/Application Support/Manimble/cache`; presenting and exporting render through manim-slides' `Slide`, which writes the deck's `../media` folder.
 - The animated player shows no pointer cursor over link regions, and V replays forwards when Manim Slides did not
   write a separate reversed clip. In Presenter View, R resets the timer, so replaying a build is done with ← then →.
-  Presenter View with Animations is untested on a real second display (checked as a one-display rehearsal).
+  Presenter View with Animations is untested on a real second display (checked with both windows on one display).
 - New or duplicated slides are added to `order.txt` only: decks that keep their own hand-written lists (build
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still

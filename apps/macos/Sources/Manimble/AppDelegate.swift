@@ -155,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let mi = NSMenuItem(title: title, action: #selector(MainController.newSlideLayout(_:)), keyEquivalent: key)
             mi.keyEquivalentModifierMask = key.isEmpty ? [] : [.command, .shift]
             mi.representedObject = layout
+            mi.image = MainActor.assumeIsolated { MainController.layoutIcon(layout) }
             layouts.addItem(mi)
         }
         let newSlideItem = NSMenuItem(title: "New Slide", action: nil, keyEquivalent: ""); newSlideItem.submenu = layouts
@@ -264,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .separator(),
             item("Play from Beginning", #selector(MainController.playMenuFromBeginning), "p", [.command, .option, .shift]),
             item("Play from Current Slide", #selector(MainController.playMenuFromCurrent), "p", [.command, .option]),
-            item("Presenter View (notes, next slide, timer)", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
+            item("Presenter View", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
             animationsItem,

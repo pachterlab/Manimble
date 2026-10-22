@@ -495,6 +495,12 @@ class Manimble:
             "objects": objects,
             "source": self.api_source(name),
             "notes": self._notes_of(name),
+            "placeholders": [{"line": p["line"], "role": p["role"], "size": p["size"],
+                              "prompt": self.PLACEHOLDER_PROMPTS.get(p["role"], "Click to add text"),
+                              "box": [(p["box"][0] + fw / 2) * pw / fw, (fh / 2 - p["box"][1]) * ph / fh,
+                                      (p["box"][2] + fw / 2) * pw / fw, (fh / 2 - p["box"][3]) * ph / fh]}
+                             for p in self._placeholders(name)],
+            "font": self._font_value(),
         }
 
     def api_source(self, name: str) -> dict:
@@ -637,7 +643,7 @@ class Manimble:
                     attempts = [(label, self.planner.plan_table(obj, req["rows"]))]
                 elif op == "delete":
                     label = "delete element"
-                    attempts = [(label, self.planner.plan_delete(obj))]
+                    attempts = [("removed it from the slide's code", self.planner.plan_delete(obj))]
                 elif op == "endpoints":
                     label = "line ends"
                     cx = lambda px: (px - pw / 2) * ux          # noqa: E731
@@ -716,7 +722,7 @@ class Manimble:
                         return {"ok": False, "error": "The slide no longer renders with this change, so it was undone: "
                                 + last_error[-300:] + hint}
                     continue
-                ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy)
+                ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy, before=data)
                 if ok and op == "wrap":
                     written, new = self._keep_edge(name, oid, req, stop, before_box, new, ux, uy, written)
                 if ok:
@@ -887,7 +893,20 @@ class Manimble:
             merged[rel] = (written[rel][0], a) if rel in written else (b, a)
         return merged, sorted(moved, key=int), []
 
-    def _verify(self, op, req, oid, stop, before_box, data, ux, uy):
+    def _verify(self, op, req, oid, stop, before_box, data, ux, uy, before=None):
+        if op == "delete":
+            # objects are renumbered on every render and the cut shifts the lines below it, so the deleted one is
+            # known by its kind and content: fewer such objects must be visible than before
+            target = before["objects"][oid]
+
+            def visible_alike(d):
+                st = d["stops"][min(stop, len(d["stops"]) - 1)]
+                return sum(1 for v in st["visible"] if (o := d["objects"].get(str(v[0])))
+                           and o["kind"] == target["kind"] and o.get("value") == target.get("value"))
+            n0 = visible_alike(before)
+            if n0 and visible_alike(data) >= n0:
+                return False, "the slide's code still shows this element"
+            return True, ""
         if op == "endpoints":
             ln = data["stops"][min(stop, len(data["stops"]) - 1)].get("lines", {}).get(oid)
             if not ln:
@@ -974,7 +993,7 @@ class Manimble:
                     nn = fresh("NewSlide")
                     i = names.index(name) if name in names else len(names) - 1
                     final = names[:i + 1] + [nn] + names[i + 1:]
-                    body = "".join(f"        {ln}\n" for ln in self._layout_body(str(req.get("layout") or "title_content")))
+                    body = "".join(f"        {ln}\n" for ln in self._layout_body(str(req.get("layout") or "title_content"), name))
                     text = f"\n\nclass {nn}({base}):\n    def construct(self):\n{body}"
                     if numbering:
                         text = self._page_patch_text(text, numbering["start"] + final.index(nn), numbering["start"] + len(final) - 1, numbering)
@@ -1080,29 +1099,119 @@ class Manimble:
             self.enqueue_all()
             return {"ok": True, "message": label, "select": select}
 
-    LAYOUTS = ("title", "title_content", "section", "two_content", "title_only", "blank")
+    LAYOUTS = ("title", "title_content", "two_content", "title_only", "blank")
+    # PowerPoint's Office Theme boxes on a 13.333 x 7.5 in slide: (left, top, width, height) in inches, font size in pt
+    LAYOUT_BOXES = {
+        "title": [("title", (1.667, 1.227, 10.0, 2.61), 60), ("subtitle", (1.667, 3.938, 10.0, 1.81), 24)],
+        "title_content": [("title", (0.917, 0.399, 11.5, 1.45), 44), ("body", (0.917, 1.996, 11.5, 4.76), 28)],
+        "two_content": [("title", (0.917, 0.399, 11.5, 1.45), 44), ("body", (0.917, 1.996, 5.667, 4.76), 28),
+                        ("body", (6.75, 1.996, 5.667, 4.76), 28)],
+        "title_only": [("title", (0.917, 0.399, 11.5, 1.45), 44)],
+    }
+    PLACEHOLDER_MARK = "# manimble placeholder"
+    PLACEHOLDER_RE = re.compile(r"^([ \t]*)# manimble placeholder (\w+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (\d+)[ \t]*$")
+    PLACEHOLDER_PROMPTS = {"title": "Click to add title", "subtitle": "Click to add subtitle", "body": "Click to add text"}
 
-    def _layout_body(self, layout: str) -> list[str]:
-        """construct() statements (unindented) of a new slide with a PowerPoint-style layout."""
-        font = ", font=FONT" if self._font_const() else ""
+    def _layout_body(self, layout: str, scene: str | None = None) -> list[str]:
+        """construct() statements (unindented) of a new slide with a PowerPoint-style layout: its empty text boxes
+        are `# manimble placeholder` comments, which only the editor shows (nothing renders until one is typed into)."""
+        boxes = self.LAYOUT_BOXES.get(layout, [] if layout == "blank" else self.LAYOUT_BOXES["title_content"])
+        ux, uy, pw, ph = self._units(scene)
+        fw, fh = ux * pw, uy * ph
+        kx, ky = fw / 13.333, fh / 7.5                     # manim units per inch
+        out = []
+        for role, (l, t, w, h), pt in boxes:
+            x0, y0 = l * kx - fw / 2, fh / 2 - t * ky
+            out.append(f"{self.PLACEHOLDER_MARK} {role} {fmt(x0)} {fmt(y0)} {fmt(x0 + w * kx)} {fmt(y0 - h * ky)} {round(pt * ky)}")
+        return out + ["pass"]
 
-        def element(var, text, size, x, y, color=None):
-            c = f", color={color}" if color else ""
-            return [f"{var} = Text({py_str(text)}, font_size={size}{font}{c}).move_to(({fmt(x)}, {fmt(y)}, 0))  # manimble",
-                    f"self.add({var})  # manimble"]
-        bullets = "\u2022 First point\n\u2022 Second point\n\u2022 Third point"
-        if layout == "title":
-            return element("title", "Title", 64, 0, 0.7) + element("subtitle", "Subtitle", 32, 0, -0.8, "GREY_B")
-        if layout == "section":
-            return element("title", "Section title", 56, 0, 0.5) + element("subtitle", "Subtitle", 30, 0, -0.9, "GREY_B")
-        if layout == "title_only":
-            return element("title", "Title", 48, 0, 3.0)
-        if layout == "two_content":
-            return (element("title", "Title", 48, 0, 3.0) + element("left", bullets, 30, -3.4, 0.2)
-                    + element("right", bullets, 30, 3.4, 0.2))
-        if layout == "blank":
-            return ["pass"]
-        return element("title", "Title", 48, 0, 3.0) + element("body", bullets, 32, 0, 0.2)      # title and content
+    def _placeholders(self, name: str) -> list[dict]:
+        """The slide's empty layout boxes: {line, role, box: [x0, y0, x1, y1] (manim units, y up), size}."""
+        try:
+            s = self.scene(name)
+            src, fn = self._construct(s)
+        except Exception:                           # noqa: BLE001
+            return []
+        lines = src.data.decode("utf-8").split("\n")
+        out = []
+        for ln in range(fn.lineno + 1, self._body_end(lines, fn) + 1):
+            m = self.PLACEHOLDER_RE.match(lines[ln - 1])
+            if m:
+                out.append({"line": ln, "role": m.group(2), "box": [float(m.group(i)) for i in range(3, 7)],
+                            "size": int(m.group(7))})
+        return out
+
+    @staticmethod
+    def _body_end(lines: list[str], fn) -> int:
+        """Last line of a function's body, comments after its last statement included."""
+        end = fn.end_lineno
+        while end < len(lines):
+            ln = lines[end]
+            if ln.strip() and len(ln) - len(ln.lstrip()) <= fn.col_offset:
+                break
+            end += 1
+        while end > fn.end_lineno and not lines[end - 1].strip():
+            end -= 1
+        return end
+
+    def placeholder(self, req: dict) -> dict:
+        """Type into a layout placeholder (`line`): it becomes a left-aligned Text anchored at the box's left edge
+        (vertically centred for a title, at the top otherwise), so it grows to the right like PowerPoint's.
+        op=remove deletes the placeholder."""
+        from .srcedit import Edit
+        name = req["scene"]
+        with self.edit_lock:
+            self.refresh_scenes()
+            try:
+                src, fn = self._construct(self.scene(name))
+            except (EditError, KeyError) as exc:
+                return {"ok": False, "error": str(exc)}
+            ln = int(req.get("line", 0))
+            lines = src.data.decode("utf-8").split("\n")
+            m = self.PLACEHOLDER_RE.match(lines[ln - 1]) if fn.lineno < ln <= self._body_end(lines, fn) else None
+            if not m:
+                return {"ok": False, "error": "that placeholder is gone; the slide changed"}
+            a = src.line_starts[ln - 1]
+            b = src.line_starts[ln] if ln < len(src.line_starts) else len(src.data)
+            text = str(req.get("text") or "")
+            if req.get("op") == "remove" or not text.strip():
+                edits = [Edit(src.rel, a, b, "")]
+                label = "remove placeholder"
+            else:
+                indent, role = m.group(1), m.group(2)
+                x0, y0, x1, y1 = (float(m.group(i)) for i in range(3, 7))
+                pad = 0.1
+                font = ", font=FONT" if self._font_const() else ""
+                color = req.get("color")
+                c = f", color={py_str(color)}" if isinstance(color, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", color) else ""
+                if role == "title":
+                    at, edge = (x0 + pad, (y0 + y1) / 2), "LEFT"
+                else:
+                    at, edge = (x0 + pad, y0 - pad), "UL"
+                code = (f"Text({py_str(text)}, font_size={int(m.group(7))}{font}{c})"
+                        f".move_to(({fmt(at[0])}, {fmt(at[1])}, 0), aligned_edge={edge})")
+                edits = [Edit(src.rel, a, b, f"{indent}self.add({code})  # manimble\n")]
+                label = "add text"
+            # the layout's `pass` stays last while placeholders remain (comments after a class's last statement
+            # fall outside its span, so moving or duplicating the slide would leave them behind); then it goes
+            if not any(p["line"] != ln for p in self._placeholders(name)):
+                body = [st for st in fn.body if not self._is_preamble(src, st)]
+                passes = [st for st in body if isinstance(st, ast.Pass)]
+                if passes and (label == "add text" or len(body) > len(passes)):
+                    edits += [Edit(src.rel, *_stmt_lines(src, st), "") for st in passes]
+            try:
+                written = self.project.apply(edits)
+                self._sig_at = 0
+            except Exception as exc:                # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": new["error"][-300:]}
+            self._commit(label, written)
+            return {"ok": True, "message": label, "line": ln, "file": src.rel, "changed": self.last_changed}
 
     # ------------------------------------------------------- slide numbers
     PAGE_MARK = "# manimble page number"
@@ -1592,6 +1701,11 @@ class Manimble:
     # ------------------------------------------------------------ insert
     def _font_const(self) -> bool:
         return bool(self.project.top_level_assigns("FONT"))
+
+    def _font_value(self) -> str | None:
+        """The deck's FONT constant, when it is a plain string."""
+        hits = self.project.top_level_assigns("FONT")
+        return hits[0][1].value if hits and isinstance(hits[0][1], ast.Constant) and isinstance(hits[0][1].value, str) else None
 
     def _units(self, name: str | None):
         """(ux, uy, pw, ph): manim units per frame pixel and the frame size in pixels."""

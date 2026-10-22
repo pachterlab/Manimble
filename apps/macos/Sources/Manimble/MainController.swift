@@ -52,7 +52,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var thumbCache = NSCache<NSString, NSImage>()
     var refreshTimer: Timer?
     var pendingStateRefresh = false
-    var nudge = (dx: 0.0, dy: 0.0)
+    var nudge: [Int: (dx: Double, dy: Double)] = [:]      // arrow-key moves not yet sent, by object
     var nudgeWork: DispatchWorkItem?
     var sharedChoice = true
     var suppressTable = false
@@ -170,6 +170,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.onWrap = { [weak self] oid, w, side in self?.commitWrap(oid, w, side) }
         canvas.onEndpoints = { [weak self] oid, e in self?.commitEndpoints(oid, e) }
         canvas.onEdit = { [weak self] oid, at in self?.beginEdit(oid, at: at) }
+        canvas.onPlaceholder = { [weak self] ph in self?.beginPlaceholder(ph) }
+        canvas.onPlaceholderDelete = { [weak self] line in self?.removePlaceholder(line) }
         canvas.onNudge = { [weak self] oid, dx, dy in self?.nudgeObject(oid, dx, dy) }
         stepsBar.orientation = .horizontal; stepsBar.spacing = 8
         stepsBar.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
@@ -197,7 +199,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         ])
         stageArea.addSubview(canvas)
         for v in [hRuler, vRuler, rulerCorner] { stageArea.addSubview(v); v.translatesAutoresizingMaskIntoConstraints = false }
-        rulerCorner.wantsLayer = true; rulerCorner.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        rulerCorner.wantsLayer = true
+        Theme.layerColors(rulerCorner) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
         hRuler.canvas = canvas; vRuler.canvas = canvas
         canvas.translatesAutoresizingMaskIntoConstraints = false
         rulerThickness = [hRuler.heightAnchor.constraint(equalToConstant: RulerView.thickness),
@@ -230,11 +233,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         // the slide area sits in an inset rounded card with a slim light edge, matching the code card on the right
         let stageCard = NSView(); stageCard.wantsLayer = true
         stageCard.layer?.cornerRadius = 12; stageCard.layer?.masksToBounds = true
-        stageCard.layer?.borderWidth = 1; stageCard.layer?.borderColor = NSColor(white: 1, alpha: 0.22).cgColor
-        stageCard.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        stageCard.layer?.borderWidth = 1
+        Theme.layerColors(stageCard) { v in
+            v.layer?.borderColor = Theme.ink(0.22).cgColor; v.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        }
         stageCard.translatesAutoresizingMaskIntoConstraints = false
         center.wantsLayer = true
-        center.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        Theme.layerColors(center) { $0.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
         center.addSubview(stageCard)
         stageCard.addSubview(cs)
         center.addSubview(toastPill); center.addSubview(busyPill)
@@ -275,8 +280,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         sourceView.onBlur = { [weak self] in self?.endSourceEditing() }
         sourceView.onChange = { [weak self] in self?.sourceTextChanged() }
         sourceView.font = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
-        sourceView.backgroundColor = NSColor(srgbRed: 0.098, green: 0.102, blue: 0.125, alpha: 1)
-        sourceView.textColor = .init(white: 0.88, alpha: 1)
+        sourceView.backgroundColor = Theme.codeBackground
+        sourceView.textColor = MainController.pyText
         // no wrapping: long lines scroll sideways
         sourceView.isHorizontallyResizable = true; sourceView.isVerticallyResizable = true
         sourceView.minSize = NSSize(width: 0, height: 0)
@@ -289,13 +294,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let srcScroll = NSScrollView(); srcScroll.documentView = sourceView
         srcScroll.hasVerticalScroller = true; srcScroll.hasHorizontalScroller = true
         srcScroll.scrollerStyle = .legacy; srcScroll.autohidesScrollers = false      // always-visible bars
-        srcScroll.appearance = NSAppearance(named: .darkAqua)        // dark track, light knob on the dark card
-        srcScroll.scrollerKnobStyle = .light
         srcScroll.drawsBackground = true; srcScroll.backgroundColor = sourceView.backgroundColor
         srcScroll.borderType = .noBorder
-        srcHeader.font = Theme.font(10, .semibold); srcHeader.textColor = NSColor(white: 1, alpha: 0.5)
+        srcHeader.font = Theme.font(10, .semibold); srcHeader.textColor = Theme.ink(0.5)
         let headBar = NSView(); headBar.wantsLayer = true
-        headBar.layer?.backgroundColor = NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1).cgColor
+        Theme.layerColors(headBar) { $0.layer?.backgroundColor = Theme.barBackground.cgColor }
         srcHeader.translatesAutoresizingMaskIntoConstraints = false; headBar.addSubview(srcHeader)
         sourceErrorButton.target = self
         sourceErrorButton.action = #selector(showSourceErrorDetails)
@@ -324,8 +327,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         // the code sits in an inset card with its own edge
         let card = NSView(); card.wantsLayer = true
         card.layer?.cornerRadius = 10; card.layer?.masksToBounds = true
-        card.layer?.borderWidth = 1; card.layer?.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
-        card.layer?.backgroundColor = sourceView.backgroundColor.cgColor
+        card.layer?.borderWidth = 1
+        Theme.layerColors(card) { v in
+            v.layer?.borderColor = Theme.ink(0.12).cgColor; v.layer?.backgroundColor = Theme.codeBackground.cgColor
+        }
         srcBox.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(srcBox)
         sourceBox = srcBox
@@ -335,7 +340,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             srcBox.topAnchor.constraint(equalTo: card.topAnchor), srcBox.bottomAnchor.constraint(equalTo: card.bottomAnchor),
         ])
         let cardHolder = NSView(); cardHolder.wantsLayer = true
-        cardHolder.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        Theme.layerColors(cardHolder) { $0.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
         card.translatesAutoresizingMaskIntoConstraints = false
         cardHolder.addSubview(card)
         NSLayoutConstraint.activate([
@@ -659,10 +664,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func closeAnimationPreview() {
         previewScene = nil
+        // only hand focus back when a preview actually had it; otherwise keep it (e.g. on the slide navigator)
+        let wasOpen = animationPreview != nil
         animationPreview?.stop()
         animationPreview?.removeFromSuperview()
         animationPreview = nil
-        if window.isVisible { window.makeFirstResponder(canvas) }
+        if wasOpen, window.isVisible { window.makeFirstResponder(canvas) }
     }
 
     func showAnimationPreview(scene: String, clips: [AnimationClip]) {
@@ -873,6 +880,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TABLE"] != nil, !testRan { testRan = true; tableTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BIOCARTOON"] != nil, !testRan { testRan = true; biocartoonTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OFFSLIDE"] != nil, !testRan { testRan = true; offSlideTest() }
         rebuildSteps()
         renderSource()
@@ -884,6 +892,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.frameSize = CGSize(width: sc.size?[0] ?? 1280, height: sc.size?[1] ?? 720)
         canvas.unitPx = (sc.size?[0] ?? 1280) / (sc.frame?[0] ?? 14.2222)
         canvas.sceneObjects = sc.objects ?? [:]
+        canvas.placeholders = sc.placeholders ?? []
         canvas.stop = stops[stopIndex]
         canvas.selection = selection
     }
@@ -1052,7 +1061,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    /// MANIMBLE_TEST_PRESENT=presenter: Presenter View over the animated show (a rehearsal on one display).
+    /// MANIMBLE_TEST_PRESENT=presenter: Presenter View over the animated show (both windows on one display).
     private func presenterAnimatedTest(dir: String, log: String) async {
         presenterViewAnimated()
         for _ in 0..<600 { try? await Task.sleep(nanoseconds: 500_000_000); if presenter != nil { break } }
@@ -1151,7 +1160,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let unused = row >= (state?.scenes.count ?? 0)
         let expanded: Bool? = s.name == sceneName && hasBuildsList ? !collapsedBuilds.contains(s.name) : nil
         cell.configure(number: unused ? 0 : row + 1, name: s.name, image: img, status: s.status, stops: s.stops ?? 0, active: s.name == sceneName, unused: unused, hidden: s.hidden == true, expanded: expanded)
-        cell.onBuild = { [weak self] i in self?.goToStop(i) }
+        cell.onBuild = { [weak self] i in
+            guard let self = self else { return }
+            self.window.makeFirstResponder(self.table)     // so ↑/↓ keep stepping from the clicked build
+            self.goToStop(i)
+        }
         if row == buildsRow { cell.setBuilds(buildImages(), active: stopIndex) }
         return cell
     }
@@ -1206,6 +1219,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         collapsedBuilds.remove(next)
         Task { @MainActor in
             await selectScene(next)
+            if window.firstResponder !== table { window.makeFirstResponder(table) }
             if d < 0, sceneName == next, scene?.name == next, let last = scene?.stops?.indices.last, last > 0 { goToStop(last) }
         }
     }
@@ -1304,7 +1318,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         stepsBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
         refreshBuildRows()
         guard let stops = scene?.stops, stops.count > 1 else { return }
-        let l = NSTextField(labelWithString: "BUILDS"); l.textColor = NSColor(white: 1, alpha: 0.45); l.font = Theme.font(10, .semibold)
+        let l = NSTextField(labelWithString: "BUILDS"); l.textColor = Theme.ink(0.45); l.font = Theme.font(10, .semibold)
         stepsBar.addArrangedSubview(l)
         for (i, st) in stops.enumerated() {
             let b = StepButton(path: st.png, index: i, active: i == stopIndex) { [weak self] in self?.goToStop(i) }
@@ -1538,7 +1552,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let oid = oid, sceneName == name { settlePreview(name, oid, ok: ok, before: before) }
         await reloadState()
         // a restyled or moved slide number: offer it to the other slides once the series of edits is done
-        if ok, result?.pageNumber == true, let oid = oid, pendingMoves["\(name):\(oid)"] == nil, canvas.dragging != oid {
+        if ok, result?.pageNumber == true, let oid = oid, pendingMoves["\(name):\(oid)"] == nil, !canvas.isDragging(oid) {
             offerPageNumberSpread(name)
         }
     }
@@ -1561,7 +1575,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// moves are queued or it is being dragged, it keeps previewing only what the slide does not show yet.
     func settlePreview(_ scene: String, _ oid: Int, ok: Bool, before: StopInfo?) {
         canvas.lineOverrides[oid] = nil
-        let live = pendingMoves["\(scene):\(oid)"] != nil || canvas.dragging == oid
+        let live = pendingMoves["\(scene):\(oid)"] != nil || canvas.isDragging(oid)
         guard ok, live, let a = before?.box(of: oid), let b = canvas.stop?.box(of: oid) else {
             canvas.overrides[oid] = nil
             if !ok { pendingMoves["\(scene):\(oid)"] = nil }
@@ -1582,15 +1596,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func nudgeObject(_ oid: Int, _ dx: Double, _ dy: Double) {
-        nudge.dx += dx; nudge.dy += dy
+        let p = nudge[oid] ?? (0, 0); nudge[oid] = (p.dx + dx, p.dy + dy)
         var o = canvas.overrides[oid] ?? Override()
         o.dx += dx; o.dy += dy                 // on top of whatever is still previewed (moves not yet rendered)
         canvas.overrides[oid] = o
         nudgeWork?.cancel()
         let w = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            let (a, b) = (self.nudge.dx, self.nudge.dy); self.nudge = (0, 0)
-            self.commitMove(oid, a, b)
+            let all = self.nudge; self.nudge = [:]
+            for (id, d) in all.sorted(by: { $0.key < $1.key }) { self.commitMove(id, d.dx, d.dy) }
         }
         nudgeWork = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: w)
@@ -1708,6 +1722,48 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                                         guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
                                         self.commitText(oid, v, shared: self.sharedChoice, previewed: release)
                                     })
+    }
+    /// Type into an empty layout box; the text lands left-aligned at the box's left edge, as in PowerPoint.
+    func beginPlaceholder(_ ph: Placeholder) {
+        guard let name = sceneName else { return }
+        selection = nil; canvas.selection = nil
+        let light = canvas.backdropIsLight(ph.rect)       // a white slide needs dark text (Text defaults to white)
+        _ = canvas.beginTextEdit(-1, text: ph.role == "body" ? CanvasView.bullet : "", family: scene?.font, bold: false, italic: false, color: light ? "#000000" : "#FFFFFF",
+                                 at: nil, placeholder: ph, changed: { _ in },
+                                 done: { [weak self] v, release in
+                                     // bullets left on empty lines are dropped
+                                     let v = v?.components(separatedBy: "\n")
+                                         .filter { !$0.trimmingCharacters(in: CharacterSet(charactersIn: "\u{2022}").union(.whitespaces)).isEmpty }
+                                         .joined(separator: "\n")
+                                     guard let self = self, let v = v, !v.isEmpty else { release(); return }
+                                     self.submit { [weak self] in
+                                         guard let self = self else { release(); return }
+                                         self.busy += 1
+                                         var req: [String: Any] = ["scene": name, "line": ph.line, "text": v]
+                                         if light { req["color"] = "#000000" }
+                                         let res = try? await self.engine.call("placeholder", req, as: EditResult.self)
+                                         self.busy -= 1
+                                         if res?.ok == true { self.lastChanged = res?.changed; self.toast("Saved · \(res?.message ?? "")") }
+                                         else { self.toast(res?.error ?? "could not add the text", error: true) }
+                                         await self.loadScene(name, keepStop: true, keepOverrides: true)
+                                         release()
+                                         await self.reloadState()
+                                     }
+                                 })
+    }
+    /// Remove an empty layout box (Backspace with nothing typed in it).
+    func removePlaceholder(_ line: Int) {
+        guard let name = sceneName else { return }
+        submit { [weak self] in
+            guard let self = self else { return }
+            self.busy += 1
+            let res = try? await self.engine.call("placeholder", ["scene": name, "line": line, "op": "remove"], as: EditResult.self)
+            self.busy -= 1
+            if res?.ok == true { self.lastChanged = res?.changed; self.toast("Saved · \(res?.message ?? "")") }
+            else { self.toast(res?.error ?? "could not remove the box", error: true) }
+            await self.loadScene(name, keepStop: true, keepOverrides: true)
+            await self.reloadState()
+        }
     }
     @objc func editLatexPressed() { if let s = selection { openLatex(s) } }
 
@@ -1853,8 +1909,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let n = src.start + i
             var bg: NSColor = .clear
             if changed.contains(n) { bg = NSColor.systemGreen.withAlphaComponent(0.28) } else if n == curLine { bg = NSColor.systemBlue.withAlphaComponent(0.25) }
-            let numAttr: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: NSColor(white: 0.5, alpha: 1), .backgroundColor: bg]
-            let txtAttr: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: NSColor(white: 0.9, alpha: 1), .backgroundColor: bg]
+            let numAttr: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: MainController.pyComment, .backgroundColor: bg]
+            let txtAttr: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: MainController.pyText, .backgroundColor: bg]
             numbered.append(NSAttributedString(string: String(format: "%5d  ", n), attributes: numAttr))
             numbered.append(highlight(t + "\n", bg: bg)); _ = txtAttr
         }
@@ -1867,7 +1923,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         if scene?.status == "error", let message = scene?.error { showSourceError(message) }
     }
-    // Python syntax colouring (dark palette)
+    // Python syntax colouring (a dark and a light palette)
+    private static func py(_ light: (CGFloat, CGFloat, CGFloat), _ dark: (CGFloat, CGFloat, CGFloat)) -> NSColor {
+        Theme.dynamic(light: NSColor(srgbRed: light.0, green: light.1, blue: light.2, alpha: 1),
+                      dark: NSColor(srgbRed: dark.0, green: dark.1, blue: dark.2, alpha: 1))
+    }
+    static let pyText = py((0.13, 0.13, 0.15), (0.88, 0.88, 0.88))
+    static let pyComment = py((0.48, 0.48, 0.52), (0.5, 0.5, 0.5))
+    static let pyConstColor = py((0.0, 0.38, 0.62), (0.55, 0.80, 0.95))
+    static let pyCallColor = py((0.0, 0.48, 0.42), (0.45, 0.85, 0.75))
+    static let pyKeywordColor = py((0.72, 0.08, 0.42), (1.0, 0.48, 0.70))
+    static let pyNumberColor = py((0.55, 0.42, 0.0), (0.85, 0.80, 0.50))
+    static let pyStringColor = py((0.70, 0.25, 0.08), (1.0, 0.58, 0.45))
     static let pyKeywords = try! NSRegularExpression(pattern: "\\b(def|class|self|for|in|if|elif|else|return|import|from|as|with|while|and|or|not|None|True|False|lambda|pass|yield|try|except|raise|is|assert|break|continue)\\b")
     static let pyNumbers = try! NSRegularExpression(pattern: "(?<![\\w.])\\d+(\\.\\d+)?")
     static let pyStrings = try! NSRegularExpression(pattern: "[rbf]?(\"[^\"\\n]*\"|'[^'\\n]*')")
@@ -1876,23 +1943,23 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func highlight(_ line: String, bg: NSColor) -> NSAttributedString {
         let mono = Theme.mono(11.5)
-        let out = NSMutableAttributedString(string: line, attributes: [.font: mono, .foregroundColor: NSColor(white: 0.88, alpha: 1), .backgroundColor: bg])
+        let out = NSMutableAttributedString(string: line, attributes: [.font: mono, .foregroundColor: MainController.pyText, .backgroundColor: bg])
         let ns = line as NSString
         func paint(_ re: NSRegularExpression, _ color: NSColor) {
             re.enumerateMatches(in: line, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
                 if let r = m?.range { out.addAttribute(.foregroundColor, value: color, range: r) }
             }
         }
-        paint(MainController.pyConsts, NSColor(srgbRed: 0.55, green: 0.80, blue: 0.95, alpha: 1))
-        paint(MainController.pyCalls, NSColor(srgbRed: 0.45, green: 0.85, blue: 0.75, alpha: 1))
-        paint(MainController.pyKeywords, NSColor(srgbRed: 1.0, green: 0.48, blue: 0.70, alpha: 1))
-        paint(MainController.pyNumbers, NSColor(srgbRed: 0.85, green: 0.80, blue: 0.50, alpha: 1))
-        paint(MainController.pyStrings, NSColor(srgbRed: 1.0, green: 0.58, blue: 0.45, alpha: 1))
+        paint(MainController.pyConsts, MainController.pyConstColor)
+        paint(MainController.pyCalls, MainController.pyCallColor)
+        paint(MainController.pyKeywords, MainController.pyKeywordColor)
+        paint(MainController.pyNumbers, MainController.pyNumberColor)
+        paint(MainController.pyStrings, MainController.pyStringColor)
         if let h = line.firstIndex(of: "#") {
             let loc = line.distance(from: line.startIndex, to: h)
             let before = String(line[..<h])
             if before.filter({ $0 == "\"" }).count % 2 == 0 && before.filter({ $0 == "'" }).count % 2 == 0 {
-                out.addAttribute(.foregroundColor, value: NSColor(white: 0.5, alpha: 1), range: NSRange(location: loc, length: (line as NSString).length - loc))
+                out.addAttribute(.foregroundColor, value: MainController.pyComment, range: NSRange(location: loc, length: (line as NSString).length - loc))
             }
         }
         return out
@@ -1974,7 +2041,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let p = PresenterController(deck: d, startScene: presentFrom, presenterScreen: here, audienceScreen: other)
             p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
             presenter = p
-            if other == nil { toast("One display: this is a rehearsal view. With a second display the audience sees the slides there.") }
+            if other == nil { toast("One display: the show is full screen behind the presenter window. With a second display it goes there.") }
             return
         }
         let p = AnimatedPlayer(screen: window.screen ?? NSScreen.main ?? NSScreen.screens[0])
@@ -2187,7 +2254,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(penColorChosen(_:)):
             item.state = (item.representedObject as? String)?.uppercased() == canvas.penColor.hexString.uppercased() ? .on : .off
             return true
-        case #selector(newSlide), #selector(newSlideLayout(_:)), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
+        case #selector(newSlideLayout(_:)):
+            if let layout = item.representedObject as? String {     // drawn on the current slide's background
+                item.image = MainController.layoutIcon(layout, background: canvas.shownBackground ?? .white)
+            }
+            return sceneName != nil && !selectedSlideIsUnused && player == nil
+        case #selector(newSlide), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
             return sceneName != nil && !selectedSlideIsUnused && player == nil
         case #selector(extractElementsPressed):
             return objInfo?.kind == "image" && objInfo?.imagePath != nil && player == nil

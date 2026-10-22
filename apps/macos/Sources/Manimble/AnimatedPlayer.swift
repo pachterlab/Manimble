@@ -114,8 +114,7 @@ final class AnimatedPlayer: NSObject {
         window.onMouse = { [weak self] e, primary in self?.click(e, primary: primary) }
     }
 
-    /// `screen`: where the audience display goes; `visible: false` plays without showing a window (Presenter View
-    /// rehearsal on a single screen, which shows the same clips in its own window).
+    /// `screen`: where the audience display goes; `visible: false` plays without showing a window.
     func play(_ d: PresentDeck, startScene: Int, screen: NSScreen? = nil, visible: Bool = true) {
         deck = d
         guard !slides.isEmpty else { return }

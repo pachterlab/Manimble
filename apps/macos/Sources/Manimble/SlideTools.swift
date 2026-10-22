@@ -7,16 +7,128 @@ extension MainController {
 
     /// (menu title, engine layout name, ⇧⌘ key)
     static let slideLayouts: [(String, String, String)] = [
-        ("Title Slide", "title", ""), ("Title and Content", "title_content", "n"), ("Section Header", "section", ""),
+        ("Title Slide", "title", ""), ("Title and Content", "title_content", "n"),
         ("Two Content", "two_content", ""), ("Title Only", "title_only", ""), ("Blank", "blank", ""),
     ]
-    static let layoutSymbols: [String: String] = [
-        "title": "rectangle.center.inset.filled", "title_content": "rectangle.topthird.inset.filled",
-        "section": "rectangle.lefthalf.inset.filled", "two_content": "rectangle.split.2x1",
-        "title_only": "rectangle.tophalf.inset.filled", "blank": "rectangle",
+    /// Each layout's text boxes on a 13.333 x 7.5 in slide (left, top, width, height in inches), as the engine writes them.
+    static let layoutBoxes: [String: [(Double, Double, Double, Double)]] = [
+        "title": [(1.667, 1.227, 10.0, 2.61), (1.667, 3.938, 10.0, 1.81)],
+        "title_content": [(0.917, 0.399, 11.5, 1.45), (0.917, 1.996, 11.5, 4.76)],
+        "two_content": [(0.917, 0.399, 11.5, 1.45), (0.917, 1.996, 5.667, 4.76), (6.75, 1.996, 5.667, 4.76)],
+        "title_only": [(0.917, 0.399, 11.5, 1.45)],
+        "blank": [],
     ]
 
+    private static var iconCache: [String: NSImage] = [:]
+
+    /// A miniature of the layout, as PowerPoint's layout gallery shows it: the slide's background with its dashed boxes.
+    static func layoutIcon(_ layout: String, width: CGFloat = 44, background: NSColor = .white) -> NSImage {
+        let bg = background.usingColorSpace(.sRGB) ?? .white
+        let key = "\(layout)@\(Int(width)) \(bg.hexString)"
+        if let img = iconCache[key] { return img }
+        let light = 0.2126 * bg.redComponent + 0.7152 * bg.greenComponent + 0.0722 * bg.blueComponent > 0.5
+        let size = NSSize(width: width, height: (width * 7.5 / 13.333).rounded())
+        let img = NSImage(size: size, flipped: true) { r in
+            let slide = r.insetBy(dx: 0.5, dy: 0.5)
+            bg.setFill(); slide.fill()
+            NSColor(white: light ? 0.55 : 0.45, alpha: 1).setStroke()
+            let frame = NSBezierPath(rect: slide); frame.lineWidth = 1; frame.stroke()
+            let k = slide.width / 13.333
+            for (l, t, w, h) in layoutBoxes[layout] ?? [] {
+                let box = NSRect(x: slide.minX + l * k, y: slide.minY + t * k, width: w * k, height: h * k)
+                let p = NSBezierPath(rect: box.insetBy(dx: 0.5, dy: 0.5))
+                p.lineWidth = 0.8; p.setLineDash([1.6, 1.0], count: 2, phase: 0)
+                NSColor(white: 0.6, alpha: 1).setStroke(); p.stroke()
+            }
+            return true
+        }
+        if iconCache.count > 40 { iconCache.removeAll() }
+        iconCache[key] = img
+        return img
+    }
+
     @objc func newSlideLayout(_ m: NSMenuItem) { slideOp("new", layout: m.representedObject as? String ?? "title_content") }
+
+    /// Headless check of new-slide layouts and typing into their placeholders: MANIMBLE_TEST_LAYOUTS=deck,
+    /// output (layouts.log, layout-*.png, the menu icons) in MANIMBLE_TEST_OUT.
+    func layoutsTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "layouts.log") }
+        func save(_ img: NSImage, _ name: String) {
+            if let t = img.tiffRepresentation, let png = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: dir + name + ".png"))
+            }
+        }
+        func shot(_ name: String) {
+            guard let img = canvas.snapshotView() else { return }
+            let out = NSImage(size: canvas.bounds.size)
+            out.lockFocus()
+            NSImage(cgImage: img, size: canvas.bounds.size).draw(in: canvas.bounds)
+            for v in canvas.subviews where v is NSTextView {
+                if let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                    v.cacheDisplay(in: v.bounds, to: rep)
+                    NSImage(cgImage: rep.cgImage!, size: v.bounds.size).draw(in: v.frame)
+                }
+            }
+            out.unlockFocus()
+            save(out, name)
+        }
+        for (_, layout, _) in MainController.slideLayouts { save(MainController.layoutIcon(layout, width: 132), "icon-" + layout) }
+        Task { @MainActor in
+            var made: [String: String] = [:]
+            for (_, layout, _) in MainController.slideLayouts {
+                slideOp("new", layout: layout)
+                await queueTail?.value
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                made[layout] = sceneName
+                log("\(layout): \(sceneName ?? "-") placeholders=\(canvas.placeholders.map { "\($0.role)@\($0.line)" }) objects=\(scene?.objects?.count ?? -1)")
+                shot("layout-" + layout)
+            }
+            await selectScene(made["title_content"] ?? "")
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            for (_, layout, _) in MainController.slideLayouts {
+                save(MainController.layoutIcon(layout, width: 132, background: canvas.shownBackground ?? .white), "icon-shown-" + layout)
+            }
+            for (i, text) in ["Results", "First finding\nSecond finding"].enumerated() {
+                guard let ph = canvas.placeholders.first else { log("no placeholder left"); return }
+                let r = canvas.slideRect, sc = canvas.effectiveScale
+                let wp = canvas.convert(CGPoint(x: r.minX + ph.rect.cx * sc, y: r.maxY - ph.rect.cy * sc), to: nil)
+                canvas.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: wp, modifierFlags: [], timestamp: 0,
+                                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                                          clickCount: 1, pressure: 1)!)
+                guard let tv = window.firstResponder as? NSTextView else { log("editor not focused"); return }
+                log("editing \(ph.role): editor frame=\(tv.frame) font=\(tv.font?.pointSize ?? 0)")
+                for (j, part) in text.components(separatedBy: "\n").enumerated() {
+                    if j > 0 { tv.insertNewline(nil) }
+                    tv.insertText(part, replacementRange: tv.selectedRange())
+                }
+                log("typed: '\(tv.string)'")
+                shot("typing-\(i)")
+                window.makeFirstResponder(canvas)
+                await queueTail?.value
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                log("after: placeholders=\(canvas.placeholders.map { $0.role }) texts=\(scene?.objects?.values.map { $0.value } ?? [])")
+                shot("typed-\(i)")
+            }
+            log("source:\n\(scene?.source?.text ?? "-")")
+            // an empty box: click it, press backspace -> it is removed
+            await selectScene(made["two_content"] ?? "")
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if let ph = canvas.placeholders.last {
+                let r = canvas.slideRect, sc = canvas.effectiveScale
+                let wp = canvas.convert(CGPoint(x: r.minX + ph.rect.cx * sc, y: r.maxY - ph.rect.cy * sc), to: nil)
+                canvas.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: wp, modifierFlags: [], timestamp: 0,
+                                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                                          clickCount: 1, pressure: 1)!)
+                (window.firstResponder as? NSTextView)?.deleteBackward(nil)
+                await queueTail?.value
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                log("after backspace: placeholders=\(canvas.placeholders.map { "\($0.role)@\($0.line)" }) editing=\(window.firstResponder is NSTextView)")
+                shot("backspaced")
+            }
+            log("done")
+        }
+    }
 
     // MARK: pen
 
@@ -149,10 +261,10 @@ extension MainController {
 
     func buildNotesPane() {
         notesPane.wantsLayer = true
-        notesPane.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        Theme.layerColors(notesPane) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
         notesBox.font = Theme.font(13)
-        notesBox.textColor = NSColor(white: 0.92, alpha: 1)
-        notesBox.editorBackground = NSColor(white: 1, alpha: 0.07)
+        notesBox.textColor = Theme.ink(0.92)
+        notesBox.editorBackground = Theme.dynamic(light: .white, dark: NSColor(white: 1, alpha: 0.07))
         notesBox.borderType = .noBorder
         notesBox.wantsLayer = true; notesBox.layer?.cornerRadius = 6; notesBox.layer?.masksToBounds = true
         notesBox.onCommit = { [weak self] text in self?.commitNotes(text) }
@@ -383,6 +495,7 @@ extension MainController {
         let layouts = NSMenu()
         for (title, layout, _) in MainController.slideLayouts {
             let mi = NSMenuItem(title: title, action: #selector(newSlideLayout(_:)), keyEquivalent: ""); mi.target = self; mi.representedObject = layout
+            mi.image = MainController.layoutIcon(layout)
             layouts.addItem(mi)
         }
         let newItem = NSMenuItem(title: "New Slide After This", action: nil, keyEquivalent: ""); newItem.submenu = layouts
@@ -542,7 +655,7 @@ extension MainController {
                                         startSlide: start, presenterScreen: here, audienceScreen: other)
             p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
             presenter = p
-            if other == nil { toast("One display: this is a rehearsal view. With a second display the audience sees the slides there.") }
+            if other == nil { toast("One display: the show is full screen behind the presenter window. With a second display it goes there.") }
         }
     }
 }

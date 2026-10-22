@@ -83,7 +83,7 @@ final class FormatBar: NSView {
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        Theme.layerColors(self) { $0.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
         fontPopup.translatesAutoresizingMaskIntoConstraints = false
         fontPopup.widthAnchor.constraint(equalToConstant: 150).isActive = true
         fontPopup.toolTip = "Font family (usually a deck-wide constant, so it changes every slide)"

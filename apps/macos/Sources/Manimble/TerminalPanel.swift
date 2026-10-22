@@ -1,12 +1,10 @@
 import AppKit
 import SwiftTerm
 
-private let termBackground = NSColor(srgbRed: 0.098, green: 0.102, blue: 0.125, alpha: 1)
-let drawerBarBackground = NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1)
 
 func barButton(_ symbol: String, _ tip: String, _ target: AnyObject, _ sel: Selector) -> NSButton {
     let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: tip) ?? NSImage(), target: target, action: sel)
-    b.isBordered = false; b.toolTip = tip; b.contentTintColor = NSColor(white: 1, alpha: 0.6)
+    b.isBordered = false; b.toolTip = tip; b.contentTintColor = Theme.ink(0.6)
     b.symbolConfiguration = .init(pointSize: 11, weight: .medium)
     return b
 }
@@ -40,7 +38,7 @@ final class TerminalPanel: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = termBackground.cgColor
+        Theme.layerColors(self) { $0.layer?.backgroundColor = Theme.codeBackground.cgColor }
         let claude = NSButton(title: "Run claude", target: self, action: #selector(runClaude))
         claude.bezelStyle = .inline; claude.controlSize = .small; claude.font = Theme.font(11, .medium)
         claude.contentTintColor = Theme.accent
@@ -199,11 +197,15 @@ final class TerminalSession: NSView, LocalProcessTerminalViewDelegate {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = termBackground.cgColor
-
         term.processDelegate = self
-        term.nativeBackgroundColor = termBackground
-        term.nativeForegroundColor = NSColor(white: 0.9, alpha: 1)
+        // the terminal keeps resolved RGB colours, so set them again on a light/dark switch
+        Theme.layerColors(self) { s in
+            s.layer?.backgroundColor = Theme.codeBackground.cgColor
+            let fg = Theme.dynamic(light: NSColor(white: 0.12, alpha: 1), dark: NSColor(white: 0.9, alpha: 1))
+            s.term.nativeBackgroundColor = Theme.codeBackground.usingColorSpace(.sRGB) ?? Theme.codeBackground
+            s.term.nativeForegroundColor = fg.usingColorSpace(.sRGB) ?? fg
+            s.term.needsDisplay = true
+        }
         term.font = Theme.mono(12)
         term.caretViewTracksFocus = true
         marker.wantsLayer = true; marker.layer?.backgroundColor = Theme.accent.cgColor; marker.isHidden = true

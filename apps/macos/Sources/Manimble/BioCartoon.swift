@@ -15,9 +15,41 @@ struct BCIcon: Codable, Equatable {
     var png_local: String?
     var width: Double?
     var height: Double?
+    var svg_key: String?        // set when the icon is published as SVG
+    var variant: String?
+    var taxa: [BCTaxon]?        // its place in BioCartoon's taxonomy (biocartoon 0.3.4+)
 
     /// The database the icon is listed under: BioCartoon's own drawings are uploads (source `user`) by "BioCartoon".
     var database: String { source == "user" && author == "BioCartoon" ? "biocartoon" : source }
+
+    /// What the BioCartoon editor shows on hovering a tile: the title, its categories, the database's own category,
+    /// "Reactome Icon Library  ·  CC-BY-4.0  ·  SVG  ·  1024 × 569 px", and the credit line.
+    var info: NSAttributedString {
+        let out = NSMutableAttributedString()
+        func line(_ s: String, _ font: NSFont, _ color: NSColor = .labelColor, after: CGFloat = 3) {
+            let para = NSMutableParagraphStyle(); para.paragraphSpacing = after
+            out.append(NSAttributedString(string: (out.length == 0 ? "" : "\n") + s, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para]))
+        }
+        line(title, Theme.font(13, .semibold))
+        if let v = variant, !v.isEmpty { line("Variant: \(v)", Theme.font(12)) }
+        let taxa = (taxa ?? []).map { $0.subcategory.isEmpty ? $0.category : "\($0.category) › \($0.subcategory)" }
+        if !taxa.isEmpty { line("Category: " + taxa.joined(separator: ", "), Theme.font(12)) }
+        if let c = category, !c.isEmpty { line("Database category: \(c)", Theme.font(12)) }
+        var last = [database == "biocartoon" ? "BioCartoon" : source_name ?? source]
+        if let l = license, !l.isEmpty { last.append(l) }
+        last.append(svg_key != nil ? "SVG" : "PNG")
+        if let w = width, let h = height, w > 0, h > 0 { last.append("\(Int(w)) × \(Int(h)) px") }
+        line(last.joined(separator: "  ·  "), Theme.font(12), after: 5)
+        if let c = credit, !c.isEmpty { line(c, Theme.font(10), .secondaryLabelColor) }
+        return out
+    }
+}
+
+/// A category and subcategory of BioCartoon's taxonomy ("Cells", "Organelles and cell components").
+struct BCTaxon: Codable, Equatable {
+    var category: String
+    var subcategory: String
+    var slug: String?
 }
 
 /// A category of BioCartoon's taxonomy (`biocartoon --categories --json`); a slug with a dot is a subcategory.
@@ -35,12 +67,14 @@ struct BCFacets: Decodable {
         var license: String?
         var slug: String?
         var category: String?
+        var file_type: String?
         var icons: Int
     }
     var sources: [Row]
     var licenses: [Row]
     var categories: [Row]
-    var db_categories: [Row]
+    var source_categories: [Row]       // the databases' own categories
+    var file_types: [Row]
 
     func source(_ key: String) -> Int { sources.first { $0.source == key }?.icons ?? 0 }
     func taxon(_ slug: String) -> Int { categories.first { $0.slug == slug }?.icons ?? 0 }
@@ -108,9 +142,13 @@ enum BioCartoonCLI {
         try await Task.detached(priority: .userInitiated) { try runSync(exe, args, timeout: timeout) }.value
     }
 
-    /// The first version whose `search` takes the author, category, DB-category and license filters and counts their
-    /// choices (`--facets`).
-    static let filtersSince = "0.3.1"
+    /// The oldest `biocartoon` Manimble works with: it lists icons' taxonomy (`taxa`) and calls the databases' own
+    /// categories source categories (`--source-category`, `source_categories`). Keep in step with engine/requirements.txt.
+    static let minimumVersion = "0.3.4"
+
+    static func supported(_ version: String) -> Bool {
+        version.compare(minimumVersion, options: .numeric) != .orderedAscending
+    }
 
     /// `biocartoon --version --json`: the program's version ("0.3.0").
     static func version(_ exe: String) async throws -> String {
@@ -135,12 +173,13 @@ enum BioCartoonCLI {
         for a in filter.authorParts { args += ["--author", a] }
         for c in filter.categories.sorted() { args += ["--category", c] }
         for s in filter.subcategories.sorted() { args += ["--subcategory", s] }
-        for k in filter.dbCats.sorted() { let d = BCFilter.split(k); args += ["--db-category", "\(d.database):\(d.category)"] }
+        for k in filter.dbCats.sorted() { let d = BCFilter.split(k); args += ["--source-category", "\(d.database):\(d.category)"] }
         for l in filter.licenses.sorted() { args += ["--license", l] }
+        for t in filter.fileTypes.sorted() { args += ["--file-type", t] }
         return args
     }
 
-    /// How many icons each dropdown's choices find under `query` and the other filters (`search --facets`, 0.3.1+).
+    /// How many icons each dropdown's choices find under `query` and the other filters (`search --facets`).
     static func facets(_ exe: String, query: String, filter: BCFilter) async throws -> BCFacets {
         var args = ["search"]
         if !query.isEmpty { args.append(query) }
@@ -152,10 +191,10 @@ enum BioCartoonCLI {
         try JSONDecoder().decode([BCCategory].self, from: try await run(exe, ["--categories", "--json"]))
     }
 
-    /// Each database's own categories with their icon counts (`biocartoon --db-categories --json`).
-    static func dbCategories(_ exe: String) async throws -> [(database: String, category: String, count: Int)] {
+    /// Each database's own categories with their icon counts (`biocartoon --source-categories --json`).
+    static func sourceCategories(_ exe: String) async throws -> [(database: String, category: String, count: Int)] {
         struct Row: Decodable { var source: String; var category: String; var icons: Int? }
-        return try JSONDecoder().decode([Row].self, from: try await run(exe, ["--db-categories", "--json"]))
+        return try JSONDecoder().decode([Row].self, from: try await run(exe, ["--source-categories", "--json"]))
             .map { ($0.source, $0.category, $0.icons ?? 0) }
     }
 
@@ -196,6 +235,47 @@ enum BioCartoonCLI {
         _ = try await run(exe, ["fetch", id, "--out", dest.path, "--max-side", String(maxSide), "--json"])
     }
 
+    /// Write the icon into the PNG's metadata (its title, author, license and credit, and the whole record in the
+    /// comment), so a picture placed from the catalog keeps its credit wherever the file goes.
+    static func tag(_ url: URL, with icon: BCIcon) {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+              let json = try? JSONEncoder().encode(icon), let record = String(data: json, encoding: .utf8) else { return }
+        var png: [CFString: Any] = [kCGImagePropertyPNGTitle: icon.title, kCGImagePropertyPNGComment: tagPrefix + record]
+        if let c = icon.credit { png[kCGImagePropertyPNGDescription] = c }
+        if let a = icon.author { png[kCGImagePropertyPNGAuthor] = a }
+        if let l = icon.license { png[kCGImagePropertyPNGCopyright] = l }
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).tagging")
+        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, "public.png" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, img, [kCGImagePropertyPNGDictionary: png] as CFDictionary)
+        if CGImageDestinationFinalize(dest) { _ = try? FileManager.default.replaceItemAt(url, withItemAt: tmp) }
+        try? FileManager.default.removeItem(at: tmp)
+    }
+    private static let tagPrefix = "biocartoon:"
+
+    /// The catalog icon a picture file was placed from (what `tag` wrote), nil for any other picture.
+    static func origin(ofImageAt path: String) -> BCIcon? {
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        // ImageIO keeps the PNG comment as the EXIF user comment
+        let comments = [(props[kCGImagePropertyPNGDictionary] as? [CFString: Any])?[kCGImagePropertyPNGComment],
+                        (props[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifUserComment]]
+        for case let c as String in comments where c.hasPrefix(tagPrefix) {
+            if let icon = try? JSONDecoder().decode(BCIcon.self, from: Data(c.dropFirst(tagPrefix.count).utf8)) { return icon }
+        }
+        return nil
+    }
+
+    /// Submit a picture to the shared library (`biocartoon upload`); it waits for review before joining the catalog.
+    static func upload(_ exe: String, file: String, title: String, credit: String, license: String, category: String,
+                       description: String, dryRun: Bool = false) async throws {
+        var args = ["upload", file, "--license", license, "--title", title]
+        if !credit.isEmpty { args += ["--credit", credit] }
+        if !category.isEmpty { args += ["--category", category] }
+        if !description.isEmpty { args += ["--description", description] }
+        if dryRun { args.append("--dry-run") }
+        _ = try await run(exe, args)
+    }
+
     /// Crop the fully transparent border many catalog PNGs carry, so the picture's box hugs the drawing.
     /// Returns the picture's size afterwards.
     static func trimTransparentMargins(_ url: URL) -> CGSize {
@@ -219,9 +299,26 @@ enum BioCartoonCLI {
         return r.size
     }
 
-    /// `pip install --upgrade biocartoon` into Manimble's Python environment.
+    static func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+    }
+
+    /// `pip install --upgrade "biocartoon>=minimumVersion"` into Manimble's Python environment.
     static func install() async throws {
-        _ = try await run(python, ["-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "biocartoon"], timeout: 600)
+        _ = try await run(python, ["-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "biocartoon>=\(minimumVersion)"], timeout: 600)
+    }
+
+    /// The command line when it is installed and new enough, else why not (for the user).
+    static func usable() async -> Result<String, Failure> {
+        guard let exe = await Task.detached(operation: { find() }).value else {
+            return .failure(Failure(description: "The BioCartoon command line is not installed. Install it into Manimble's Python environment (pip install \"biocartoon>=\(minimumVersion)\") to search 15,000+ open-licensed science icons."))
+        }
+        let version = (try? await BioCartoonCLI.version(exe)) ?? "an unknown version"
+        guard supported(version) else {
+            return .failure(Failure(description: "biocartoon \(version) is installed; Manimble needs \(minimumVersion) or newer (pip install --upgrade \"biocartoon>=\(minimumVersion)\")."))
+        }
+        return .success(exe)
     }
 
     /// Badge colours of the BioCartoon app, one per collection.
@@ -318,10 +415,6 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
         badge.stringValue = code
         badge.backgroundColor = BioCartoonCLI.badgeColor(icon.database)
         badge.isHidden = code.isEmpty
-        var tip = icon.title
-        if let c = icon.category, !c.isEmpty { tip += "\n" + c }
-        if let c = icon.credit { tip += "\n\n" + c }
-        view.toolTip = tip + "\n\nClick to insert, or drag onto the slide."
         thumb.image = nil
         BCThumbs.shared.image(for: icon) { [weak self] img in
             if self?.icon?.id == icon.id { self?.thumb.image = img }
@@ -334,9 +427,28 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
             trackingAreas.forEach(removeTrackingArea)
             addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self))
         }
-        override func mouseEntered(with e: NSEvent) { layer?.borderColor = Theme.accent.cgColor; layer?.borderWidth = 2 }
-        override func mouseExited(with e: NSEvent) { layer?.borderColor = NSColor.separatorColor.cgColor; layer?.borderWidth = 1 }
-        override func mouseDown(with e: NSEvent) { owner?.downAt = e.locationInWindow }
+        override func mouseEntered(with e: NSEvent) {
+            layer?.borderColor = Theme.accent.cgColor; layer?.borderWidth = 2
+            if let icon = owner?.icon { BCInfoTip.shared.schedule(icon, beside: self) }
+        }
+        override func mouseExited(with e: NSEvent) {
+            layer?.borderColor = NSColor.separatorColor.cgColor; layer?.borderWidth = 1
+            BCInfoTip.shared.hide()
+        }
+        override func viewDidMoveToWindow() { if window == nil { BCInfoTip.shared.hide() } }
+        override func mouseDown(with e: NSEvent) { BCInfoTip.shared.hide(); owner?.downAt = e.locationInWindow }
+
+        /// Right-click: insert it, or copy its name or credit (as the BioCartoon editor's tile menu).
+        override func menu(for event: NSEvent) -> NSMenu? {
+            BCInfoTip.shared.hide()
+            guard let o = owner, let icon = o.icon else { return nil }
+            let m = NSMenu()
+            m.addItem(BCMenuItem("Insert on Slide") { [weak o] in o?.onClick?(icon) })
+            m.addItem(.separator())
+            m.addItem(BCMenuItem("Copy Name") { BioCartoonCLI.copy(icon.title) })
+            if let c = icon.credit, !c.isEmpty { m.addItem(BCMenuItem("Copy Credit") { BioCartoonCLI.copy(c) }) }
+            return m
+        }
         override func mouseDragged(with e: NSEvent) {
             guard let o = owner, let start = o.downAt, let icon = o.icon,
                   hypot(e.locationInWindow.x - start.x, e.locationInWindow.y - start.y) > 4 else { return }
@@ -363,6 +475,78 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
     }
 }
 
+/// A menu item that runs a closure.
+final class BCMenuItem: NSMenuItem {
+    private let run: () -> Void
+    init(_ title: String, _ run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func fire() { run() }
+}
+
+/// The card shown on hovering a result tile (the BioCartoon editor's hover info): a borderless panel beside the tile.
+@MainActor
+final class BCInfoTip {
+    static let shared = BCInfoTip()
+    private var panel: NSPanel?
+    private let label = NSTextField(labelWithString: "")
+    private var pending: DispatchWorkItem?
+    private static let maxWidth: CGFloat = 420, pad: CGFloat = 10
+
+    func schedule(_ icon: BCIcon, beside view: NSView) {
+        hide()
+        let w = DispatchWorkItem { [weak self, weak view] in
+            guard let v = view, v.window?.isVisible == true else { return }
+            self?.show(icon, beside: v)
+        }
+        pending = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: w)
+    }
+
+    func hide() { pending?.cancel(); pending = nil; panel?.orderOut(nil) }
+
+    /// The card's content for `icon` (the headless check's picture of it).
+    var contentView: NSView? { panel?.contentView }
+
+    func show(_ icon: BCIcon, beside view: NSView) {
+        guard let win = view.window else { return }
+        let p = panel ?? make()
+        label.attributedStringValue = icon.info
+        let text = icon.info.boundingRect(with: NSSize(width: Self.maxWidth, height: 10_000), options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let size = NSSize(width: ceil(text.width) + 2 * Self.pad + 6, height: ceil(text.height) + 2 * Self.pad + 2)
+        label.frame = NSRect(x: Self.pad, y: Self.pad, width: size.width - 2 * Self.pad, height: size.height - 2 * Self.pad)
+        // beside the tile, on the slide's side (the pane is at the window's right), top edges level
+        let tile = win.convertToScreen(view.convert(view.bounds, to: nil))
+        let screen = (win.screen ?? NSScreen.main)?.visibleFrame ?? .infinite
+        var x = tile.minX - size.width - 8
+        if x < screen.minX { x = tile.maxX + 8 }
+        let y = min(max(tile.maxY - size.height, screen.minY), screen.maxY - size.height)
+        p.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: true)
+        p.orderFront(nil)
+    }
+
+    private func make() -> NSPanel {
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 80), styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: true)
+        p.level = .popUpMenu
+        p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = true
+        p.ignoresMouseEvents = true
+        p.hidesOnDeactivate = true
+        let bg = NSVisualEffectView()
+        bg.material = .toolTip; bg.state = .active
+        bg.wantsLayer = true; bg.layer?.cornerRadius = 7; bg.layer?.masksToBounds = true
+        label.cell?.wraps = true
+        label.maximumNumberOfLines = 0
+        bg.addSubview(label)
+        p.contentView = bg
+        panel = p
+        return p
+    }
+}
+
 /// What the filter dropdowns keep (the funnel of the BioCartoon editor's search), as `biocartoon search` takes them: each
 /// one keeps what matches any of its entries (none keeps everything), and an icon has to pass all of them.
 struct BCFilter: Equatable {
@@ -372,12 +556,14 @@ struct BCFilter: Equatable {
     var subcategories: Set<String> = []  // subcategory slugs ("cells.cell_types")
     var dbCats: Set<String> = []          // a database's own categories, as `key(_:_:)` makes them
     var licenses: Set<String> = []
+    var fileTypes: Set<String> = []       // "svg" (published as SVG), "png" (a PNG only)
 
     var authorParts: [String] {
         authors.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
     }
     var isEmpty: Bool {
         sources.isEmpty && authorParts.isEmpty && categories.isEmpty && subcategories.isEmpty && dbCats.isEmpty && licenses.isEmpty
+            && fileTypes.isEmpty
     }
 
     static func key(_ database: String, _ category: String) -> String { database + "\t" + category }
@@ -467,6 +653,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private let subPopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let dbCatPopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let licensePopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let fileTypePopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let clearButton = NSButton(title: "Clear filters", target: nil, action: nil)
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let status = NSTextField(labelWithString: "")
@@ -478,7 +665,6 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private var creditBox: NSStackView!
 
     private(set) var exe: String?
-    private var filtersSupported = true     // a `biocartoon` from before 0.3.1 has no filter options (or their counts)
     private var sources: [BCSource] = []
     private var categories: [BCCategory] = []
     private var dbCategories: [(database: String, category: String, count: Int)] = []
@@ -530,19 +716,20 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         summary.isHidden = true
 
         // the filters, laid out like the BioCartoon editor's: a label and a dropdown per row
-        for p in [dbPopup, subPopup, dbCatPopup, licensePopup] { p.onChange = { [weak self] in self?.filtersEdited() } }
+        for p in [dbPopup, subPopup, dbCatPopup, licensePopup, fileTypePopup] { p.onChange = { [weak self] in self?.filtersEdited() } }
         catPopup.onChange = { [weak self] in self?.categoriesEdited() }
         authorField.placeholderString = "Any (commas for several)"
         authorField.font = Theme.font(11); authorField.controlSize = .small
         authorField.delegate = self
-        let dbCatLabel = fieldLabel("DB category")
+        let dbCatLabel = fieldLabel("Database category")
         dbCatLabel.toolTip = "A database's own categories, by its code (BA: NIAID NIH BioArt, …)"
         let rows: [[NSView]] = [[fieldLabel("Database"), dbPopup], [fieldLabel("Author"), authorField], [fieldLabel("Category"), catPopup],
-                                [fieldLabel("Subcategory"), subPopup], [dbCatLabel, dbCatPopup], [fieldLabel("License"), licensePopup]]
+                                [fieldLabel("Subcategory"), subPopup], [dbCatLabel, dbCatPopup], [fieldLabel("License"), licensePopup],
+                                [fieldLabel("File type"), fileTypePopup]]
         for r in rows { r[1].setContentHuggingPriority(.init(1), for: .horizontal) }
         let table = NSGridView(views: rows)
         table.rowSpacing = 6; table.columnSpacing = 8
-        table.column(at: 0).width = 78
+        table.column(at: 0).width = 104
         table.column(at: 1).xPlacement = .fill
         table.rowAlignment = .none
         for r in 0..<table.numberOfRows { table.row(at: r).yPlacement = .center }
@@ -565,7 +752,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             ])
         }
         filterBox.isHidden = true
-        setSources([]); setCategories([]); setLicenses([]); setDbCategories([])
+        setSources([]); setCategories([]); setLicenses([]); setDbCategories([]); refreshFileTypes()
 
         sortPopup.controlSize = .small
         sortPopup.font = Theme.font(11)
@@ -636,34 +823,26 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private func locate() {
         status.stringValue = "Looking for biocartoon…"
         Task {
-            let found = await Task.detached { BioCartoonCLI.find() }.value
-            exe = found
+            let found = await BioCartoonCLI.usable()
             facets = nil; facetsFor = nil
-            installButton.isHidden = found != nil
-            guard let exe = found else {
-                status.stringValue = ""
-                setMessage("The BioCartoon command line is not installed. Install it into Manimble's Python environment (pip install biocartoon) to search 15,000+ open-licensed science icons.")
+            guard case .success(let exe) = found else {
+                if case .failure(let why) = found {
+                    // missing, or too old: offer to install it (or update it) into Manimble's environment
+                    let missing = await Task.detached { BioCartoonCLI.find() == nil }.value
+                    installButton.title = missing ? "Install BioCartoon" : "Update BioCartoon"
+                    installButton.isHidden = false
+                    setMessage(why.description)
+                }
                 return
             }
+            self.exe = exe
+            installButton.isHidden = true
             // the first call downloads the catalog, so it goes alone; the dropdowns fill in behind the results
             if let s = try? await BioCartoonCLI.sources(exe) { setSources(s) }
-            let version = (try? await BioCartoonCLI.version(exe)) ?? "0"
-            filtersSupported = version.compare(BioCartoonCLI.filtersSince, options: .numeric) != .orderedAscending
-            funnel.isEnabled = filtersSupported
-            if !filtersSupported {
-                filter = BCFilter()
-                filterBox.isHidden = true
-                refreshFilterChrome()
-                installButton.title = "Update BioCartoon"
-                installButton.isHidden = false
-                creditLabel.stringValue = "biocartoon \(version) is installed; the filters need \(BioCartoonCLI.filtersSince) or newer (pip install --upgrade biocartoon)."
-                creditBox.isHidden = false
-                copyCredit.isHidden = true
-            }
             reload()
             async let cats = BioCartoonCLI.categories(exe)
             async let lics = BioCartoonCLI.licenseCounts(exe)
-            async let own = BioCartoonCLI.dbCategories(exe)
+            async let own = BioCartoonCLI.sourceCategories(exe)
             if let c = try? await cats { setCategories(c) }
             if let l = try? await lics { setLicenses(l) }
             if let d = try? await own { setDbCategories(d) }
@@ -740,6 +919,15 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         licensePopup.setChoices(counts.keys.sorted().map { ($0, $0, counts[$0]) })
     }
 
+    /// SVG (the database publishes an SVG) and PNG (a PNG only), counted once the search's counts come.
+    private func refreshFileTypes() {
+        var counts: [String: Int] = [:]
+        for r in facets?.file_types ?? [] { if let t = r.file_type?.lowercased() { counts[t] = r.icons } }
+        fileTypePopup.setChoices([("svg", "SVG"), ("png", "PNG")].compactMap { key, name in
+            shown(facets == nil ? nil : counts[key] ?? 0, catalog: nil, picked: fileTypePopup.picked.contains(key)).map { (key, name, $0) }
+        })
+    }
+
     private func setDbCategories(_ list: [(database: String, category: String, count: Int)]) {
         dbCategories = list
         refreshDbCategories()
@@ -749,7 +937,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private func refreshDbCategories() {
         var all = dbCategories
         if let fc = facets {
-            all = fc.db_categories.compactMap { r in r.source.flatMap { s in r.category.map { (s, $0, r.icons) } } }
+            all = fc.source_categories.compactMap { r in r.source.flatMap { s in r.category.map { (s, $0, r.icons) } } }
             for k in dbCatPopup.picked where !all.contains(where: { BCFilter.key($0.database, $0.category) == k }) {
                 let d = BCFilter.split(k)
                 all.append((d.database, d.category, 0))
@@ -765,7 +953,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
 
     /// Count the dropdowns' choices under the search and the filters, unless they are counted for these already.
     private func requestFacets() {
-        guard let exe = exe, filtersSupported else { return }
+        guard let exe = exe else { return }
         let query = search.stringValue.trimmingCharacters(in: .whitespaces), f = filter
         if let done = facetsFor, done.query == query, done.filter == f { return }
         facetsFor = (query, f)
@@ -776,7 +964,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
                 let fc = try await BioCartoonCLI.facets(exe, query: query, filter: f)
                 guard req == facetsRequest else { return }
                 facets = fc; facetsAnswered = req
-                refreshSources(); refreshCategories(); refreshSubcategories(); refreshLicenses(); refreshDbCategories()
+                refreshSources(); refreshCategories(); refreshSubcategories(); refreshLicenses(); refreshDbCategories(); refreshFileTypes()
             } catch {
                 if req == facetsRequest { facetsFor = nil }      // ask again with the next search
             }
@@ -796,7 +984,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
 
     @objc private func clearFilters() {
         filter = BCFilter()
-        for p in [dbPopup, catPopup, subPopup, dbCatPopup, licensePopup] { p.clear() }
+        for p in [dbPopup, catPopup, subPopup, dbCatPopup, licensePopup, fileTypePopup] { p.clear() }
         authorField.stringValue = ""
         refreshSubcategories()
         refreshDbCategories()
@@ -818,6 +1006,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         filter.subcategories = subPopup.picked
         filter.dbCats = dbCatPopup.picked
         filter.licenses = licensePopup.picked
+        filter.fileTypes = fileTypePopup.picked
         filter.authors = authorField.stringValue
         refreshFilterChrome()
         reload()
@@ -830,7 +1019,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         refreshSubcategories()
         subPopup.pick(f.subcategories)
         refreshDbCategories()
-        dbCatPopup.pick(f.dbCats); licensePopup.pick(f.licenses)
+        dbCatPopup.pick(f.dbCats); licensePopup.pick(f.licenses); fileTypePopup.pick(f.fileTypes)
         authorField.stringValue = f.authors
         filterBox.isHidden = false
         refreshFilterChrome()
@@ -841,7 +1030,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private func refreshFilterChrome() {
         let active = !filter.isEmpty
         funnel.contentTintColor = active || !filterBox.isHidden ? Theme.accent : .secondaryLabelColor
-        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category or license" : "Hide the filters"
+        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category, license or file type" : "Hide the filters"
         clearButton.isHidden = !active
         summary.stringValue = summaryText()
         summary.isHidden = !(active && filterBox.isHidden)
@@ -859,6 +1048,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             parts.append(filter.dbCats.sorted().map { let k = BCFilter.split($0); return "\(code(forDatabase: k.database)): \(k.category)" }.joined(separator: ", "))
         }
         if !filter.licenses.isEmpty { parts.append(filter.licenses.sorted().joined(separator: ", ")) }
+        if !filter.fileTypes.isEmpty { parts.append(filter.fileTypes.sorted().map { $0.uppercased() }.joined(separator: ", ")) }
         return parts.joined(separator: "  ·  ")
     }
 
@@ -915,6 +1105,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     }
 
     @objc private func scrolled() {
+        BCInfoTip.shared.hide()
         guard more, !loading, let doc = scroll.documentView else { return }
         if scroll.contentView.bounds.maxY > doc.frame.height - 3 * 102 { loadPage() }
     }
@@ -927,7 +1118,6 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             do {
                 try await BioCartoonCLI.install()
                 installButton.isEnabled = true
-                installButton.title = "Install BioCartoon"
                 creditBox.isHidden = true
                 exe = nil
                 locate()
@@ -950,6 +1140,8 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     var firstResult: BCIcon? { results.first }
     var allResults: [BCIcon] { results }
     var isLoading: Bool { loading }
+    var message: String { creditBox.isHidden ? "" : creditLabel.stringValue }
+    var offersInstall: String? { installButton.isHidden ? nil : installButton.title }
     var facetsSettled: Bool { facetsAnswered == facetsRequest }
     func type(_ query: String) { search.stringValue = query; reload() }
 
@@ -1005,6 +1197,7 @@ extension MainController {
 
     /// Back to the inspector.
     func hideBioCartoon() {
+        BCInfoTip.shared.hide()
         biocartoonPane?.view.isHidden = true
         inspectorScroll?.isHidden = false
     }
@@ -1031,7 +1224,11 @@ extension MainController {
             let size: CGSize
             do {
                 try await BioCartoonCLI.fetch(exe, id: icon.id, to: dest)
-                size = await Task.detached { BioCartoonCLI.trimTransparentMargins(dest) }.value
+                size = await Task.detached { () -> CGSize in
+                    let s = BioCartoonCLI.trimTransparentMargins(dest)
+                    BioCartoonCLI.tag(dest, with: icon)
+                    return s
+                }.value
             } catch { busyPill.hide(); toast("Could not download \(icon.title): \(error)", error: true); return }
             busyPill.hide()
             let half = 1.5 * canvas.unitPx * min(1, size.width / max(size.height, 1))
@@ -1040,6 +1237,133 @@ extension MainController {
             biocartoonPane?.showCredit(icon)
         }
     }
+}
+
+extension MainController {
+    // MARK: right-click on a picture
+
+    /// The right-click menu's BioCartoon item for the selected picture: its credit when it came from the catalog,
+    /// otherwise an offer to submit it to the shared library (as the BioCartoon editor's canvas menu).
+    func bioCartoonMenuItem() -> NSMenuItem? {
+        guard let o = objInfo, o.kind == "image", let path = o.imagePath, FileManager.default.fileExists(atPath: path) else { return nil }
+        if let icon = BioCartoonCLI.origin(ofImageAt: path) {
+            return BCMenuItem("Show Credit…") { [weak self] in self?.showBioCartoonCredit(icon) }
+        }
+        let item = BCMenuItem("Add to BioCartoon Library…") { [weak self] in self?.addToBioCartoon(path) }
+        item.toolTip = "Submit this picture to the shared BioCartoon library"
+        return item
+    }
+
+    /// Right-click ▸ Show Credit…: who made the artwork, ready to copy.
+    func showBioCartoonCredit(_ icon: BCIcon) {
+        let a = NSAlert()
+        a.messageText = icon.title
+        a.informativeText = icon.credit ?? icon.title
+        a.icon = BioCartoonCLI.logo
+        a.addButton(withTitle: "Copy Credit")
+        a.addButton(withTitle: "Done")
+        a.beginSheetModal(for: window) { [weak self] r in
+            guard r == .alertFirstButtonReturn else { return }
+            BioCartoonCLI.copy(icon.credit ?? icon.title)
+            self?.toast("Copied the credit")
+        }
+    }
+
+    /// Right-click ▸ Add to BioCartoon Library…: title, credit, license and category, then `biocartoon upload`.
+    func addToBioCartoon(_ path: String) {
+        Task { @MainActor in
+            let found = await BioCartoonCLI.usable()
+            guard case .success(let exe) = found else {
+                toast("BioCartoon needs installing or updating: open Insert ▸ BioCartoon Icons…", error: true)
+                return
+            }
+            let cats = (try? await BioCartoonCLI.categories(exe)) ?? []
+            let form = BCSubmitForm(file: path, categories: cats)
+            let a = NSAlert()
+            a.messageText = "Add to BioCartoon Library"
+            a.informativeText = "Submit this picture to the shared library, where everyone can find it. Submissions are reviewed before they are published (up to 20 a day)."
+            a.icon = BioCartoonCLI.logo
+            a.accessoryView = form.view
+            let submit = a.addButton(withTitle: "Submit for Review")
+            a.addButton(withTitle: "Cancel")
+            form.onValidity = { submit.isEnabled = $0 }
+            form.refresh()
+            a.beginSheetModal(for: window) { [weak self] r in
+                guard r == .alertFirstButtonReturn, let self = self else { return }
+                let v = form.values
+                UserDefaults.standard.set(v.credit, forKey: "biocartoonCredit")
+                self.busyPill.show("Submitting \(v.title)…", symbol: nil, tint: nil, spinning: true)
+                Task { @MainActor in
+                    do {
+                        try await BioCartoonCLI.upload(exe, file: path, title: v.title, credit: v.credit, license: v.license,
+                                                       category: v.category, description: v.description)
+                        self.busyPill.hide()
+                        self.toast("Submitted \(v.title) for review: it joins the BioCartoon library once approved")
+                    } catch {
+                        self.busyPill.hide()
+                        self.toast("Could not submit \(v.title): \(error)", error: true)
+                    }
+                }
+            }
+            window.makeFirstResponder(form.titleField)
+        }
+    }
+}
+
+/// The fields of Add to BioCartoon Library: what `biocartoon upload` takes.
+@MainActor
+final class BCSubmitForm: NSObject, NSTextFieldDelegate {
+    let view: NSView
+    let titleField = NSTextField()
+    private let creditField = NSTextField()
+    private let license = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let category = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let descriptionField = NSTextField()
+    private let confirm = NSButton(checkboxWithTitle: "I made this picture, or may share it under this license", target: nil, action: nil)
+    var onValidity: ((Bool) -> Void)?
+    private static let licenses = [("CC-BY-4.0", "CC BY 4.0 (users credit you)"), ("CC0-1.0", "CC0 (no credit needed)")]
+
+    init(file: String, categories: [BCCategory]) {
+        let stem = URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
+        titleField.stringValue = stem.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+        creditField.stringValue = UserDefaults.standard.string(forKey: "biocartoonCredit") ?? NSFullUserName()
+        creditField.placeholderString = "Anonymous"
+        descriptionField.placeholderString = "Optional"
+        for (key, name) in Self.licenses { license.addItem(withTitle: name); license.lastItem?.representedObject = key }
+        category.addItem(withTitle: "None")
+        let tops = Dictionary(categories.filter { !$0.slug.contains(".") }.map { ($0.slug, $0.name) }, uniquingKeysWith: { a, _ in a })
+        for c in categories {
+            let top = String(c.slug.prefix { $0 != "." })
+            category.addItem(withTitle: c.slug.contains(".") ? "\(tops[top] ?? top) › \(c.name)" : c.name)
+            category.lastItem?.representedObject = c.slug
+        }
+        let rows: [[NSView]] = [[Self.label("Title"), titleField], [Self.label("Credit"), creditField], [Self.label("License"), license],
+                                [Self.label("Category"), category], [Self.label("Description"), descriptionField]]
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 8; grid.columnSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        for f in [titleField, creditField, descriptionField] { f.widthAnchor.constraint(equalToConstant: 280).isActive = true }
+        let stack = NSStackView(views: [grid, confirm])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
+        stack.frame = NSRect(origin: .zero, size: stack.fittingSize)
+        view = stack
+        super.init()
+        titleField.delegate = self
+        confirm.target = self; confirm.action = #selector(changed)
+    }
+
+    private static func label(_ s: String) -> NSTextField { NSTextField(labelWithString: s) }
+
+    var values: (title: String, credit: String, license: String, category: String, description: String) {
+        let t = { (f: NSTextField) in f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return (t(titleField), t(creditField), license.selectedItem?.representedObject as? String ?? "CC-BY-4.0",
+                category.selectedItem?.representedObject as? String ?? "", t(descriptionField))
+    }
+
+    func refresh() { onValidity?(confirm.state == .on && !values.title.isEmpty) }
+    @objc private func changed() { refresh() }
+    func controlTextDidChange(_ n: Notification) { refresh() }
 }
 
 extension MainController {
@@ -1066,7 +1390,8 @@ extension MainController {
             showBioCartoon()
             guard let p = biocartoonPane else { log("no pane"); return }
             log("pane shown: \(!p.view.isHidden), inspector hidden: \(inspectorScroll?.isHidden == true)")
-            await wait("first page") { p.resultCount > 0 }
+            await wait("first page") { p.resultCount > 0 || p.offersInstall != nil }
+            if let b = p.offersInstall { log("offers \(b): \(p.message)"); log("done"); return }
             p.type("mitochondria")
             try? await Task.sleep(nanoseconds: 300_000_000)
             await wait("search") { p.resultCount > 0 && p.firstResult?.title.lowercased().contains("mito") == true }
@@ -1074,15 +1399,17 @@ extension MainController {
             // the dropdowns count what the search finds
             await wait("facets") { p.facetsSettled && p.facets != nil }
             log("facets for mitochondria: databases \(counts(p.facets?.sources ?? [], \.source))")
+            log("source categories for mitochondria: \(p.facets?.source_categories.count ?? 0)")
             // the filters go to the command line
             var f = BCFilter(); f.licenses = ["CC0-1.0"]; f.sources = ["bioicons", "healthicons", "scidraw"]; f.categories = ["cells"]
+            f.fileTypes = ["svg"]
             p.apply(f)
             try? await Task.sleep(nanoseconds: 300_000_000)
             await wait("filtered") { !p.isLoading && p.resultCount > 0 }
-            let bad = p.allResults.filter { $0.license != "CC0-1.0" || !f.sources.contains($0.database) }
+            let bad = p.allResults.filter { $0.license != "CC0-1.0" || !f.sources.contains($0.database) || $0.svg_key == nil }
             log("filtered: \(p.resultCount) of \(plain), off: \(bad.count)")
             await wait("filtered facets") { p.facetsSettled }
-            log("filtered facets: databases \(counts(p.facets?.sources ?? [], \.source)); licenses \(counts(p.facets?.licenses ?? [], \.license))")
+            log("filtered facets: databases \(counts(p.facets?.sources ?? [], \.source)); licenses \(counts(p.facets?.licenses ?? [], \.license)); file types \(counts(p.facets?.file_types ?? [], \.file_type))")
             try? await Task.sleep(nanoseconds: 2_000_000_000)      // thumbnails
             shot(p.view, "biocartoon_pane.png")
             shot(window.contentView, "biocartoon_filters_window.png")
@@ -1091,6 +1418,11 @@ extension MainController {
             await wait("unfiltered") { !p.isLoading && p.resultCount > 0 }
             guard let icon = p.firstResult, let data = try? JSONEncoder().encode(icon) else { log("no result"); return }
             log("first: \(icon.id) \(icon.title) \(Int(icon.width ?? 0))x\(Int(icon.height ?? 0))")
+            log("info: \(icon.info.string.replacingOccurrences(of: "\n", with: " | "))")
+            BCInfoTip.shared.show(icon, beside: p.view)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            shot(BCInfoTip.shared.contentView, "biocartoon_info.png")
+            BCInfoTip.shared.hide()
             let before = images()
             // as if dropped on the slide's upper-left quarter
             let taken = biocartoonDropped(data, at: CGPoint(x: canvas.frameSize.width / 4, y: canvas.frameSize.height / 4))
@@ -1100,6 +1432,21 @@ extension MainController {
             log("images: \(images())")
             if let o = scene?.objects?.values.first(where: { $0.kind == "image" && !before.contains($0.image ?? "") }) {
                 log("placed: \(o.loc)")
+            }
+            // right-click on the placed picture: its credit; on a picture of one's own: the library offer
+            if let (k, o) = scene?.objects?.first(where: { $0.value.kind == "image" && !before.contains($0.value.image ?? "") }),
+               let path = o.imagePath {
+                log("origin: \(BioCartoonCLI.origin(ofImageAt: path)?.id ?? "-")")
+                selection = Int(k)
+                log("menu: \(canvasMenu()?.items.map(\.title) ?? [])")
+                let plain = URL(fileURLWithPath: dir + "plain.png")
+                if let img = try? ImageExtractor.load(path: path), let data = ImageExtractor.png(img) { try? data.write(to: plain) }
+                log("plain origin: \(BioCartoonCLI.origin(ofImageAt: plain.path)?.id ?? "-")")
+                do {
+                    try await BioCartoonCLI.upload(BioCartoonCLI.find() ?? "", file: plain.path, title: "Test picture", credit: "Tester",
+                                                   license: "CC0-1.0", category: "cells", description: "", dryRun: true)
+                    log("upload dry run: ok")
+                } catch { log("upload dry run: \(error)") }
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             shot(window.contentView, "biocartoon_window.png")

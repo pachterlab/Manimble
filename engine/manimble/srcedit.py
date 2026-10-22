@@ -787,33 +787,135 @@ class Planner:
         at = src.line_starts[last.end_lineno] - 1 if last.end_lineno < len(src.line_starts) else len(src.data)
         return Edit(src.rel, at, at, "\n" + indent + line), last.end_lineno + 1
 
+    # animations that take the mobjects to show as their positional arguments, and the scene / group calls that do
+    DISPLAY_CALLS = {
+        "add", "remove", "play", "bring_to_front", "bring_to_back", "add_foreground_mobject", "add_foreground_mobjects",
+        "remove_foreground_mobject", "remove_foreground_mobjects", "Group", "VGroup", "AnimationGroup", "LaggedStart",
+        "Succession", "FadeIn", "FadeOut", "Write", "Unwrite", "Create", "Uncreate", "DrawBorderThenFill", "GrowArrow",
+        "GrowFromCenter", "GrowFromEdge", "GrowFromPoint", "SpinInFromNothing", "ShrinkToCenter", "Indicate",
+        "Circumscribe", "Wiggle", "Flash", "ShowPassingFlash", "ApplyWave", "AddTextLetterByLetter",
+        "RemoveTextLetterByLetter", "ShowIncreasingSubsets", "ShowSubmobjectsOneByOne",
+    }
+
     def plan_delete(self, obj: dict) -> list[Edit]:
-        """Remove an element that manimble inserted (its line carries the # manimble marker)."""
-        fr = obj["frames"][-1]
-        src = self.p.src(fr["file"])
-        call = src.find_call(fr["pos"])
-        if call is None:
-            raise EditError("call site not found")
-        stmt = call
-        while stmt is not None and not isinstance(src.parent.get(stmt), (ast.FunctionDef, ast.For, ast.While, ast.If, ast.With)):
-            stmt = src.parent.get(stmt)
-        if stmt is None:
-            raise EditError("statement not found")
+        """Remove an element from the slide.
+
+        An element that is a bare expression (`self.add(Circle())`, `self.play(FadeIn(Text("x")))`,
+        `Group(Circle(), ...)`) is cut out of the call that shows it. A named element (`t = Text(...)`) loses its
+        assignment, its own statements (`t.shift(...)`) and every place it is shown (`self.add(t)`, `FadeIn(t)`,
+        `VGroup(a, t)`), as long as nothing else depends on it. When other code uses it (`SurroundingRectangle(t)`,
+        `t.get_right()`, `Transform(t, ...)`) the name and its statements stay, so that code keeps working, and only
+        the places that show it are removed; the re-render then checks that it is really gone."""
+        src, call, top, stmt = self._creation(obj)
+        body = _body_of(src, stmt)
+        var = _assigned_name(stmt, top)
+        if var is None:
+            if isinstance(stmt, ast.Expr) and (stmt.value is top or _chain_root(stmt.value) is top):
+                edits = [self._cut_stmt(src, stmt)]
+            else:
+                edits = self._cut_node(src, top)
+                if edits is None:
+                    raise EditError("this element is part of a larger expression; remove it in the source instead")
+            return self._keep_block(src, body, edits)
+
+        fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+        scope = fdef if fdef is not None else src.tree
+        uses = [n for n in ast.walk(scope) if isinstance(n, ast.Name) and n.id == var and n is not stmt.targets[0]]
+        own, shown, other = [], [], []
+        for n in uses:
+            s = src.enclosing(n, ast.stmt)
+            if isinstance(n.ctx, ast.Store) or s is None or s is stmt or src.enclosing(n, (ast.Lambda, ast.FunctionDef,
+                                                                                         ast.AsyncFunctionDef)) is not fdef:
+                other.append(n)
+            elif isinstance(s, ast.Expr) and isinstance(_chain_root(s.value), ast.Name) and _chain_root(s.value).id == var:
+                own.append(s)                        # `var.shift(...)`, `var.add(Underline(var))`
+            elif self._cut_node(src, n) is not None:
+                shown.append(n)
+            else:
+                other.append(n)
+        edits = []
+        if not other:
+            edits.append(self._cut_stmt(src, stmt))
+            for s in own:
+                edits.append(self._cut_stmt(src, s))
+        gone = {id(stmt)} | {id(s) for s in own} if not other else set()
+        for n in shown:
+            if any(id(p) in gone for p in _ancestors(src, n)):
+                continue                             # inside a statement that goes anyway
+            cut = self._cut_node(src, n)
+            if cut:
+                edits += cut
+                gone.update(id(p) for p in _ancestors(src, n) if isinstance(p, ast.stmt)
+                            and any(e.start <= src.span(p)[0] and e.end >= src.span(p)[1] for e in cut))
+        if not edits:
+            raise EditError("could not find where this element is shown; remove it in the source instead")
+        return self._keep_block(src, body, _disjoint(edits))
+
+    def _cut_stmt(self, src: Src, stmt) -> Edit:
         a, b = _stmt_lines(src, stmt)
-        text = src.data[a:b].decode("utf-8")
-        if "# manimble" not in text or text.count("\n") > 1:
-            raise EditError("only elements inserted with the toolbar can be deleted; remove its lines in the source instead")
-        edits = [Edit(src.rel, a, b, "")]
-        var = _assigned_name(stmt, src.chain_top(call))
-        if var:
-            # `name = X  # manimble` was followed by `self.add(name)  # manimble` and decorations: drop those too
-            body = _body_of(src, stmt)
-            for s in body[body.index(stmt) + 1:]:
-                sa, sb = _stmt_lines(src, s)
-                t = src.data[sa:sb].decode("utf-8")
-                if "# manimble" in t and re.search(rf"\b{re.escape(var)}\b", t):
-                    edits.append(Edit(src.rel, sa, sb, ""))
+        return Edit(src.rel, a, b, "")
+
+    def _keep_block(self, src: Src, body: list, edits: list[Edit]) -> list[Edit]:
+        """An emptied construct() (or loop body) would not parse, so `pass` keeps the block."""
+        spans = [(src.span(s)[0], _stmt_lines(src, s)[1]) for s in body]
+        left = [s for s, (a, b) in zip(body, spans) if not any(e.start <= a and e.end >= b and not e.text for e in edits)]
+        if body and not left:
+            first = min(edits, key=lambda e: e.start)
+            edits[edits.index(first)] = Edit(first.rel, first.start, first.end, " " * body[0].col_offset + "pass\n")
         return edits
+
+    def _cut_node(self, src: Src, node) -> list[Edit] | None:
+        """Edits that drop `node` from the call or literal that shows it, cascading outwards when the container
+        becomes empty (`self.play(FadeIn(x))` goes as a whole). None when the node is not in such a place."""
+        p = src.parent.get(node)
+        if isinstance(p, ast.Expr):
+            return [self._cut_stmt(src, p)]
+        if isinstance(p, ast.Starred):
+            return None
+        if isinstance(p, (ast.List, ast.Tuple)) and isinstance(getattr(p, "ctx", None), ast.Load) and node in p.elts:
+            pp = src.parent.get(p)
+            shown = isinstance(pp, ast.Starred) and isinstance(src.parent.get(pp), ast.Call) \
+                and _func_name(src.parent.get(pp)) in self.DISPLAY_CALLS
+            kept = isinstance(pp, ast.Assign) and len(pp.targets) == 1 and isinstance(pp.targets[0], ast.Name)
+            if not (shown or kept):
+                return None                          # a table's labels, a list of points, ...
+            return [self._drop_item(src, p.elts, [], node)]
+        if isinstance(p, ast.Call) and node in p.args and _func_name(p) in self.DISPLAY_CALLS:
+            if len(p.args) == 1 and _func_name(p) not in ("Group", "VGroup"):
+                up = self._cut_node(src, p)
+                if up is not None:
+                    return up
+            return [self._drop_item(src, p.args, p.keywords, node)]
+        return None
+
+    @staticmethod
+    def _drop_item(src: Src, items: list, keywords: list, node) -> Edit:
+        """Remove one positional item from a call or literal, taking a separating comma with it."""
+        order = sorted(list(items) + [k.value for k in keywords], key=lambda n: src.span(n)[0])
+        i = order.index(node)
+        a, b = src.span(node)
+        if i > 0:
+            return Edit(src.rel, src.span(order[i - 1])[1], b, "")
+        if i + 1 < len(order):
+            nxt = order[i + 1]
+            kw = next((k for k in keywords if k.value is nxt), None)
+            start = src.off(kw.lineno, kw.col_offset) if kw is not None and getattr(kw, "lineno", None) else src.span(nxt)[0]
+            return Edit(src.rel, a, start, "")
+        # The only item: a trailing comma goes with it (`Group(\n    x,\n)` must not become `Group(\n    ,\n)`),
+        # and so does the whole line when nothing else is on it.
+        data, e = src.data, b
+        while e < len(data) and data[e:e + 1] in (b" ", b"\t"):
+            e += 1
+        if data[e:e + 1] == b",":
+            e += 1
+            while e < len(data) and data[e:e + 1] in (b" ", b"\t"):
+                e += 1
+        s = a
+        while s > 0 and data[s - 1:s] in (b" ", b"\t"):
+            s -= 1
+        if (s == 0 or data[s - 1:s] == b"\n") and data[e:e + 1] == b"\n":
+            return Edit(src.rel, s, e + 1, "")
+        return Edit(src.rel, a, e, "")
 
     def plan_image_file(self, obj: dict, file: str, deck_dir: str) -> list[Edit]:
         """Point a picture at another file (Extract Elements' filled-in background). `file` is in the deck folder.
@@ -1341,6 +1443,37 @@ def name_map(obj: dict, name: str):
 def _func_name(call) -> str | None:
     f = call.func
     return f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+
+
+def _chain_root(expr):
+    """The node a method chain hangs off: `a.b(c).d()` -> the node for `a`."""
+    n = expr
+    while True:
+        if isinstance(n, ast.Call):
+            n = n.func
+        elif isinstance(n, ast.Attribute):
+            n = n.value
+        else:
+            return n
+
+
+def _ancestors(src, node):
+    out = []
+    p = src.parent.get(node)
+    while p is not None:
+        out.append(p)
+        p = src.parent.get(p)
+    return out
+
+
+def _disjoint(edits):
+    """Drop edits lying inside another edit's range (a cut argument inside a cut statement)."""
+    out = []
+    for e in sorted(edits, key=lambda e: (e.start, -e.end)):
+        if out and out[-1].rel == e.rel and out[-1].start <= e.start and e.end <= out[-1].end:
+            continue
+        out.append(e)
+    return out
 
 
 def _assigned_name(stmt, top) -> str | None:

@@ -64,7 +64,7 @@ final class SlidePlayer: NSObject {
     }
 
     /// slides: for each slide the PNG of every build. `screen`: where the audience display goes; `visible: false`
-    /// keeps the pages and navigation without showing a window (presenter rehearsal on a single screen).
+    /// keeps the pages and navigation without showing a window.
     func play(slides: [[String]], startSlide: Int, screen: NSScreen? = nil, visible: Bool = true) {
         pages = []
         for (si, builds) in slides.enumerated() {

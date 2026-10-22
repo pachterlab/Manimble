@@ -70,6 +70,7 @@ def main():
         "background": lambda a: need().background(a),
         "page_numbers": lambda a: need().page_numbers(a),
         "notes": lambda a: need().notes(a),
+        "placeholder": lambda a: need().placeholder(a),
         "insert_many": lambda a: need().insert_many(a),
         "export_python": lambda a: need().export_python(a),
         "darkmode": lambda a: need().dark_mode(a),
