@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate {
+final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate, NSMenuItemValidation {
     let engine = Engine()
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 920),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -11,6 +11,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     private let slideDragType = NSPasteboard.PasteboardType("org.manimble.slide-reorder")
     let stepsBar = NSStackView()
     let inspector = NSStackView()
+    let inspectorHost = NSView()            // the inspector, or the BioCartoon search in its place
+    var inspectorScroll: NSScrollView?
     let sourceView = SourceCodeView()
     let srcHeader = NSTextField(labelWithString: "PYTHON")
     let sourceError = NSTextField(wrappingLabelWithString: "")
@@ -60,15 +62,24 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var sideScroll: NSScrollView?
     var player: SlidePlayer?
     var presenter: PresenterController?
+    var animatedPlayer: AnimatedPlayer?
+    private var presentFrom = 0              // scene (order.txt index) the animated show starts at
+    private var presentWithPresenter = false // the animated show opens in Presenter View
     var animationPreview: AnimationPreviewView?
-    /// Speaker notes of the slide on screen, below the canvas (View ▸ Speaker Notes).
+    /// Speaker notes of the slide on screen, a tab of the drawer below the canvas (View ▸ Speaker Notes).
     let notesBox = MultilineTextBox(string: "", maxLines: 4)
     let notesPane = NSView()
-    var notesSplit: NSSplitView?
-    var notesMinHeight: NSLayoutConstraint?
     var previewScene: String?
     let stageArea = NSView()
+    /// PowerPoint-style rulers above and left of the slide (View ▸ Ruler).
+    let hRuler = RulerView(.horizontal), vRuler = RulerView(.vertical), rulerCorner = NSView()
+    var rulerThickness: [NSLayoutConstraint] = []
     let terminal = TerminalPanel()
+    /// Below the slide: the notes and the terminals as tabs, with one divider above them.
+    lazy var drawer = BottomDrawer(notes: notesPane, terminal: terminal)
+    var sourceBox: NSView?                 // the PYTHON card's contents (PaneOverlay.swift swaps them out)
+    var paneOverlay: AuxPaneView?
+    var paneOverlayMonitor: Any?
     var centerSplit: NSSplitView?
     var formatBar: FormatBar!
     /// Width and height fields change an object proportionally (true) or stretch it (false).
@@ -77,7 +88,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     // inspector controls kept for reading
     var zoomPopup: NSPopUpButton?
-    var tableText: NSTextView?
+    var tableCells: [[NSTextField]] = []
+    var tableGrid: NSScrollView?
     var textField: MultilineTextBox?
     var sizeField: NSTextField?
     var colorWell: NSColorWell?
@@ -88,6 +100,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.title = "Manimble"
         window.titlebarSeparatorStyle = .line
         window.delegate = self
+        window.isReleasedWhenClosed = false     // closing it closes the deck; the window comes back for the next one
         window.minSize = NSSize(width: 1000, height: 600)
         window.setFrameAutosaveName("manimble.main")
         window.contentView = buildUI()
@@ -99,6 +112,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.colorView = DarkMode.mode; canvas.darkImages = DarkMode.images
         canvas.onDraw = { [weak self] kind, sx, sy, ex, ey in self?.drawFinished(kind, sx, sy, ex, ey) }
         canvas.onPen = { [weak self] pts in self?.penFinished(pts) }
+        canvas.registerForDraggedTypes([BioCartoonPane.dragType])
+        canvas.onIconDrop = { [weak self] data, p in self?.biocartoonDropped(data, at: p) ?? false }
         canvas.penColor = NSColor(hex: UserDefaults.standard.string(forKey: "penColor") ?? "#FF3B30")
         canvas.onDrawToolChange = { [weak self] in self?.syncFormatBar() }
         canvas.onGuidesChange = { [weak self] in self?.saveGuides() }
@@ -124,6 +139,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         table.onMenu = { [weak self] row in self?.navigatorMenu(row: row) }
         table.target = table; table.action = #selector(SlideTable.rowClicked(_:))
         table.onReclick = { [weak self] _ in self?.toggleBuildsList() }
+        table.onArrow = { [weak self] d in self?.stepNavigator(d) }
         table.registerForDraggedTypes([slideDragType])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.style = .plain
@@ -144,15 +160,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: side, queue: .main) { [weak self, weak side] _ in
             guard let side = side, let self = self else { return }
             self.table.tableColumns.first?.width = side.contentSize.width
-            self.noteBuildsRowHeight()
+            self.noteSlideRowHeights()
         }
 
         // centre: canvas + builds
         canvas.onSelect = { [weak self] oid in self?.selection = oid }
         canvas.onMove = { [weak self] oid, dx, dy in self?.commitMove(oid, dx, dy) }
         canvas.onResize = { [weak self] oid, r in self?.commitResize(oid, r) }
+        canvas.onWrap = { [weak self] oid, w, side in self?.commitWrap(oid, w, side) }
         canvas.onEndpoints = { [weak self] oid, e in self?.commitEndpoints(oid, e) }
-        canvas.onEdit = { [weak self] oid in self?.beginEdit(oid) }
+        canvas.onEdit = { [weak self] oid, at in self?.beginEdit(oid, at: at) }
         canvas.onNudge = { [weak self] oid, dx, dy in self?.nudgeObject(oid, dx, dy) }
         stepsBar.orientation = .horizontal; stepsBar.spacing = 8
         stepsBar.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
@@ -163,41 +180,51 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let center = NSView()
         let stageColumn = NSView()
         buildNotesPane()
-        // the slide above the notes, with a draggable divider between them
-        let ns = GrabSplitView(); ns.isVertical = false; ns.dividerStyle = .thin
-        ns.addArrangedSubview(stageArea); ns.addArrangedSubview(notesPane)
-        ns.setHoldingPriority(.init(240), forSubviewAt: 0)
-        ns.setHoldingPriority(.init(260), forSubviewAt: 1)
-        ns.autosaveName = "manimble.notes"
-        notesSplit = ns
-        stageColumn.addSubview(ns)
+        // the slide with its build steps under it
+        stageColumn.addSubview(stageArea)
         stageColumn.addSubview(stepsScroll)
-        ns.translatesAutoresizingMaskIntoConstraints = false
+        stageArea.translatesAutoresizingMaskIntoConstraints = false
         stepsScroll.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            ns.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
-            ns.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
-            ns.topAnchor.constraint(equalTo: stageColumn.topAnchor),
-            ns.bottomAnchor.constraint(equalTo: stepsScroll.topAnchor),
+            stageArea.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
+            stageArea.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
+            stageArea.topAnchor.constraint(equalTo: stageColumn.topAnchor),
+            stageArea.bottomAnchor.constraint(equalTo: stepsScroll.topAnchor),
             stageArea.heightAnchor.constraint(greaterThanOrEqualToConstant: 160),
             stepsScroll.leadingAnchor.constraint(equalTo: stageColumn.leadingAnchor),
             stepsScroll.trailingAnchor.constraint(equalTo: stageColumn.trailingAnchor),
             stepsScroll.bottomAnchor.constraint(equalTo: stageColumn.bottomAnchor),
         ])
         stageArea.addSubview(canvas)
+        for v in [hRuler, vRuler, rulerCorner] { stageArea.addSubview(v); v.translatesAutoresizingMaskIntoConstraints = false }
+        rulerCorner.wantsLayer = true; rulerCorner.layer?.backgroundColor = Theme.canvasBottom.cgColor
+        hRuler.canvas = canvas; vRuler.canvas = canvas
         canvas.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            canvas.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor),
+        rulerThickness = [hRuler.heightAnchor.constraint(equalToConstant: RulerView.thickness),
+                          vRuler.widthAnchor.constraint(equalToConstant: RulerView.thickness)]
+        NSLayoutConstraint.activate(rulerThickness + [
+            rulerCorner.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor), rulerCorner.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            rulerCorner.widthAnchor.constraint(equalTo: vRuler.widthAnchor), rulerCorner.heightAnchor.constraint(equalTo: hRuler.heightAnchor),
+            hRuler.leadingAnchor.constraint(equalTo: vRuler.trailingAnchor), hRuler.trailingAnchor.constraint(equalTo: stageArea.trailingAnchor),
+            hRuler.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            vRuler.leadingAnchor.constraint(equalTo: stageArea.leadingAnchor), vRuler.topAnchor.constraint(equalTo: hRuler.bottomAnchor),
+            vRuler.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
+            canvas.leadingAnchor.constraint(equalTo: vRuler.trailingAnchor),
             canvas.trailingAnchor.constraint(equalTo: stageArea.trailingAnchor),
-            canvas.topAnchor.constraint(equalTo: stageArea.topAnchor),
+            canvas.topAnchor.constraint(equalTo: hRuler.bottomAnchor),
             canvas.bottomAnchor.constraint(equalTo: stageArea.bottomAnchor),
         ])
-        // slides on top, optional terminal below
+        applyRulerVisibility()
+        canvas.onGeometryChange = { [weak self] in self?.redrawRulers() }
+        canvas.onCursorMove = { [weak self] p in self?.hRuler.cursor = p; self?.vRuler.cursor = p }
+        // slides on top, the notes/terminal drawer below
         let cs = GrabSplitView(); cs.isVertical = false; cs.dividerStyle = .thin
-        cs.addArrangedSubview(stageColumn); cs.addArrangedSubview(terminal)
-        terminal.isHidden = true
-        terminal.onHide = { [weak self] in self?.toggleTerminal() }
+        cs.addArrangedSubview(stageColumn); cs.addArrangedSubview(drawer)
+        cs.setHoldingPriority(.init(240), forSubviewAt: 0)
+        cs.setHoldingPriority(.init(260), forSubviewAt: 1)
+        cs.autosaveName = "manimble.drawer"
         centerSplit = cs
+        installDrawer()
         cs.translatesAutoresizingMaskIntoConstraints = false
         for pill in [toastPill, busyPill] { pill.translatesAutoresizingMaskIntoConstraints = false }
         // the slide area sits in an inset rounded card with a slim light edge, matching the code card on the right
@@ -301,6 +328,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         card.layer?.backgroundColor = sourceView.backgroundColor.cgColor
         srcBox.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(srcBox)
+        sourceBox = srcBox
+        installPaneShortcut()
         NSLayoutConstraint.activate([
             srcBox.leadingAnchor.constraint(equalTo: card.leadingAnchor), srcBox.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             srcBox.topAnchor.constraint(equalTo: card.topAnchor), srcBox.bottomAnchor.constraint(equalTo: card.bottomAnchor),
@@ -313,7 +342,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             card.leadingAnchor.constraint(equalTo: cardHolder.leadingAnchor, constant: 10), card.trailingAnchor.constraint(equalTo: cardHolder.trailingAnchor, constant: -10),
             card.topAnchor.constraint(equalTo: cardHolder.topAnchor, constant: 8), card.bottomAnchor.constraint(equalTo: cardHolder.bottomAnchor, constant: -10),
         ])
-        right.addArrangedSubview(inspScroll); right.addArrangedSubview(cardHolder)
+        inspScroll.translatesAutoresizingMaskIntoConstraints = false
+        inspectorHost.addSubview(inspScroll)
+        NSLayoutConstraint.activate([
+            inspScroll.leadingAnchor.constraint(equalTo: inspectorHost.leadingAnchor), inspScroll.trailingAnchor.constraint(equalTo: inspectorHost.trailingAnchor),
+            inspScroll.topAnchor.constraint(equalTo: inspectorHost.topAnchor), inspScroll.bottomAnchor.constraint(equalTo: inspectorHost.bottomAnchor),
+        ])
+        inspectorScroll = inspScroll
+        right.addArrangedSubview(inspectorHost); right.addArrangedSubview(cardHolder)
         right.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         right.setHoldingPriority(.defaultLow, forSubviewAt: 0)
 
@@ -382,12 +418,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let pending = pendingDeck {
             pendingDeck = nil
             open(deck: pending)
-        } else if let d = ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"]
-                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] {
+        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE"].lazy
+                    .compactMap({ ProcessInfo.processInfo.environment["MANIMBLE_TEST_" + $0] }).first
+                    ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"].flatMap({ $0.hasPrefix("/") ? $0 : nil }) {
             open(deck: d)
         } else {
             let last = UserDefaults.standard.string(forKey: "lastDeck")
-            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { openDeck() }
+            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { chooseDeck() }
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == 0 { await self?.reloadState() } }
@@ -409,15 +446,26 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let p = NSOpenPanel()
         p.message = "Choose a deck folder, a Manimble project folder, or a .manimble package"
         p.canChooseDirectories = true; p.canChooseFiles = true
+        // Only .manimble packages and plain folders are enabled; other files are grayed out.
+        p.allowedContentTypes = [UTType(filenameExtension: "manimble"), .folder].compactMap { $0 }
         if let last = UserDefaults.standard.string(forKey: "lastDeck") { p.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent() }
         guard p.runModal() == .OK, let u = p.url else { return }
+        openProject(at: u)
+    }
+
+    /// Open what File ▸ Open, a launch argument or the Dock/Finder hands over: a deck folder, a Manimble project
+    /// folder, a .manimble package, or a file inside a deck folder (its deck is opened).
+    func openProject(at u: URL) {
         do {
-            if u.pathExtension.lowercased() == "manimble" {
+            let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if u.pathExtension.lowercased() == "manimble" && !isDir {
                 open(deck: try PortableProject.unpackArchive(u).path)
-            } else if let deck = try PortableProject.deckURL(in: u) {
+            } else if isDir, let deck = try PortableProject.deckURL(in: u) {
                 open(deck: deck.path)
-            } else if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            } else if isDir {
                 open(deck: u.path)
+            } else if FileManager.default.fileExists(atPath: u.deletingLastPathComponent().appendingPathComponent("order.txt").path) {
+                open(deck: u.deletingLastPathComponent().path)
             } else {
                 alert("Could not open project", "Choose a deck folder or a .manimble package.")
             }
@@ -486,13 +534,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    func open(deck: String) {
+    /// `confirmed`: the caller already asked about unsaved edits to the open deck.
+    func open(deck: String, confirmed: Bool = false) {
         guard engine.isRunning else {
             pendingDeck = deck
             busyPill.show("Waiting for Manimble engine…", symbol: nil, tint: nil, spinning: true)
             return
         }
-        guard confirmClose(for: "opening another deck") else { return }
+        guard confirmed || confirmClose(for: "opening another deck") else { return }
+        if !window.isVisible { window.makeKeyAndOrderFront(nil) }
         closeAnimationPreview()
         window.makeFirstResponder(canvas)
         Task { @MainActor in
@@ -664,7 +714,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 let n = ev["slides"] as? Int ?? 0
                 let warn = (ev["warnings"] as? [String]) ?? []
                 toast("Imported \(n) slides" + (warn.isEmpty ? "" : " — " + warn.prefix(2).joined(separator: "; ")), error: !warn.isEmpty)
-                if let d = ev["deck"] as? String { open(deck: d) }
+                if let d = ev["deck"] as? String { open(deck: d, confirmed: true) }
             default:
                 busyPill.hide(); toast(ev["error"] as? String ?? "import failed", error: true)
             }
@@ -702,13 +752,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 if let onlyScene = ev["onlyScene"] as? String {
                     title = "Building \(onlyScene)’s animations \(done)/\(total)"
                 } else {
-                    title = "Building slides for Manim Slides \(done)/\(total)"
+                    title = "Building animations \(done)/\(total): \(ev["scene"] as? String ?? "")"
                 }
                 busyPill.show(title, symbol: nil, tint: nil, spinning: true)
-            case "playing":
-                busyPill.hide(); toast((ev["onlyScene"] as? String) == nil ? "Manim Slides presenter launched" : "Playing this slide’s animations")
+            case "ready":
+                busyPill.hide()
+                guard let data = try? JSONSerialization.data(withJSONObject: ev),
+                      let d = try? JSONDecoder().decode(PresentDeck.self, from: data), !d.slides.isEmpty else {
+                    toast("No built slides to play", error: true); return
+                }
+                startAnimated(d)
             default:
-                busyPill.hide(); toast(ev["error"] as? String ?? "presenter failed", error: true)
+                busyPill.hide(); toast(ev["error"] as? String ?? "presentation failed", error: true)
             }
             return
         }
@@ -726,6 +781,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     // MARK: state / scenes
 
     func reloadState() async {
+        guard workspace != nil else { return }
         guard let st = try? await engine.call("state", ["current": sceneName ?? ""], as: StateInfo.self) else { return }
         let old = state
         state = st
@@ -806,12 +862,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if !keepOverrides { canvas.overrides = [:]; canvas.lineOverrides = [:] }
         if ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] != nil { selfTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLAY"] != nil, !testRan { testRan = true; playTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PRESENT"] != nil, !testRan { testRan = true; presentTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"] != nil, !testRan { testRan = true; termTest() }
         if let tcase = ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMULA"], !testRan { testRan = true; formulaTest(tcase) }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] != nil, !testRan { testRan = true; backgroundTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] != nil, !testRan { testRan = true; darkModeTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMAT"] != nil, !testRan { testRan = true; formatTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TOOLS"] != nil, !testRan { testRan = true; toolsTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_EXTRACT"] != nil, !testRan { testRan = true; extractTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TABLE"] != nil, !testRan { testRan = true; tableTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BIOCARTOON"] != nil, !testRan { testRan = true; biocartoonTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OFFSLIDE"] != nil, !testRan { testRan = true; offSlideTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -824,6 +886,83 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.sceneObjects = sc.objects ?? [:]
         canvas.stop = stops[stopIndex]
         canvas.selection = selection
+    }
+
+    /// Headless check of objects past the slide's edges showing on the pasteboard: MANIMBLE_TEST_OFFSLIDE=deck
+    /// (scene in MANIMBLE_TEST_SCENE, default the first), shots in MANIMBLE_TEST_OUT.
+    func offSlideTest() {
+        let env = ProcessInfo.processInfo.environment
+        let dir = (env["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "offslide.log") }
+        func shot(_ name: String) {
+            guard let img = canvas.snapshotView(), let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return }
+            try? png.write(to: URL(fileURLWithPath: dir + name + ".png"))
+        }
+        Task { @MainActor in
+            if let name = env["MANIMBLE_TEST_SCENE"] { await selectScene(name) }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let stop = canvas.stop else { log("no stop"); return }
+            for sp in stop.sprites { log("sprite \(sp.oid) at \(Int(sp.x)),\(Int(sp.y)) \(Int(sp.w))x\(Int(sp.h))") }
+            canvas.zoom = canvas.fitScale * 0.6
+            shot("offslide-idle")
+            if let v = stop.visible.first {
+                let oid = Int(v[0])
+                selection = oid
+                canvas.overrides[oid] = Override(dx: -Double(canvas.frameSize.width) * 0.3, dy: 0)
+                shot("offslide-dragged")
+                canvas.overrides = [:]
+            }
+            log("done")
+        }
+    }
+
+    /// Headless check of typing on the slide: MANIMBLE_TEST_INLINE=deck, output in MANIMBLE_TEST_OUT.
+    func inlineTextTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "inline.log") }
+        func shot(_ name: String) {
+            guard let img = canvas.snapshotView() else { return }
+            let out = NSImage(size: canvas.bounds.size)
+            out.lockFocus()
+            NSImage(cgImage: img, size: canvas.bounds.size).draw(in: canvas.bounds)
+            for v in canvas.subviews where v is NSTextView {
+                if let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                    v.cacheDisplay(in: v.bounds, to: rep)
+                    NSImage(cgImage: rep.cgImage!, size: v.bounds.size).draw(in: v.frame)
+                }
+            }
+            out.unlockFocus()
+            if let t = out.tiffRepresentation, let png = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: dir + name + ".png"))
+            }
+        }
+        Task { @MainActor in
+            await selectScene("Welcome")
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let stop = canvas.stop, let (oid, b) = stop.visible.compactMap({ v -> (Int, Box)? in
+                let id = Int(v[0]); guard scene?.objects?[String(id)]?.kind == "text", let b = stop.box(of: id) else { return nil }
+                return (id, b) }).max(by: { $0.1.area < $1.1.area }), let o = scene?.objects?[String(oid)] else { log("no text"); return }
+            log("object \(oid) '\(o.value)' font=\(o.font ?? "-") size=\(o.fontSize ?? 0) box=\(Int(b.x0)),\(Int(b.y0)) \(Int(b.w))x\(Int(b.h))")
+            selection = oid
+            shot("inline-before")
+            let r = canvas.slideRect, s = canvas.effectiveScale
+            let clickX = b.x0 + b.w * 0.5
+            let wp = canvas.convert(CGPoint(x: r.minX + clickX * s, y: r.maxY - b.cy * s), to: nil)
+            beginEdit(oid, at: wp)
+            guard let tv = window.firstResponder as? NSTextView, canvas.editingText == oid else { log("editor not focused"); return }
+            log("editor font=\(tv.font?.fontName ?? "-") \(tv.font?.pointSize ?? 0)pt caret=\(tv.selectedRange().location) of \((tv.string as NSString).length)")
+            log("editor box=\(canvas.selectedBox.map { "\(Int($0.x0)),\(Int($0.y0)) \(Int($0.w))x\(Int($0.h))" } ?? "-")")
+            shot("inline-editing")
+            tv.insertText(" XYZ", replacementRange: tv.selectedRange())
+            log("after typing: editor='\(tv.string)' inspector='\(textField?.stringValue ?? "-")' box=\(canvas.selectedBox.map { "\(Int($0.w))x\(Int($0.h))" } ?? "-")")
+            shot("inline-typed")
+            window.makeFirstResponder(canvas)
+            await queueTail?.value
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            log("after commit: editing=\(canvas.editingText.map(String.init) ?? "nil") value='\(scene?.objects?[String(oid)]?.value ?? "-")'")
+            shot("inline-after")
+            log("done")
+        }
     }
 
     /// Headless reproduction of "edit formula -> Apply": MANIMBLE_TEST_FORMULA=scene:stop:newtex
@@ -852,7 +991,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func termTest() {
-        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] ?? "/tmp") + "/"
+        let env = ProcessInfo.processInfo.environment
+        let dir = (env["MANIMBLE_TEST_OUT"] ?? env["MANIMBLE_SELFTEST"] ?? "/tmp") + "/"
+        func shot(_ name: String) {
+            guard let v = window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
+        }
         Task { @MainActor in
             toggleTerminal()
             try? await Task.sleep(nanoseconds: 2_500_000_000)
@@ -869,14 +1014,64 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             terminal.type("echo TERM3_OK\r")
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             try? terminal.contents().write(toFile: dir + "term3.txt", atomically: true, encoding: .utf8)
-            if let v = window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
-                v.cacheDisplay(in: v.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + "term.png"))
-            }
-            try? "hidden=\(terminal.isHidden) terminals=\(terminal.count) tabs=\(terminal.tabCount)".write(toFile: dir + "term.log", atomically: true, encoding: .utf8)
+            shot("term.png")
+            try? "hidden=\(!drawerShowsTerminal) terminals=\(terminal.count) tabs=\(terminal.tabCount) drawer=\(Int(drawer.frame.height))\n".write(toFile: dir + "term.log", atomically: true, encoding: .utf8)
+            toggleNotesPane()     // the same drawer, on its Notes tab
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            shot("notes.png")
+            try? "notes=\(drawerShowsNotes) terminal=\(drawerShowsTerminal) drawer=\(Int(drawer.frame.height))".appendLine(to: dir + "term.log")
+            toggleTerminal()      // back to the terminals, then hidden
             toggleTerminal()
-            try? "hidden-after=\(terminal.isHidden)".appendLine(to: dir + "term.log")
+            try? "hidden-after=\(!drawerShowsTerminal) drawer-hidden=\(drawer.isHidden)".appendLine(to: dir + "term.log")
+            NSApp.terminate(nil)
         }
+    }
+
+    /// Headless check of the animated player: builds, plays, steps, and logs what it is showing over time.
+    func presentTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] ?? "/tmp") + "/"
+        let log = dir + "present.log"
+        try? "".write(toFile: log, atomically: true, encoding: .utf8)
+        Task { @MainActor in
+            if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PRESENT"] == "presenter" {
+                await presenterAnimatedTest(dir: dir, log: log); return
+            }
+            presentFromBeginning()
+            for _ in 0..<600 { try? await Task.sleep(nanoseconds: 500_000_000); if animatedPlayer != nil { break } }
+            guard let p = animatedPlayer else { try? "no player\n".appendLine(to: log); return }
+            func note(_ what: String) { try? "\(what): \(p.debugState)\n".appendLine(to: log) }
+            for k in 0..<6 { try? await Task.sleep(nanoseconds: 300_000_000); note("t\(k)") }
+            p.next(); note("after next")
+            for k in 0..<6 { try? await Task.sleep(nanoseconds: 300_000_000); note("t\(k)") }
+            p.previous(); try? await Task.sleep(nanoseconds: 600_000_000); note("after previous")
+            p.jump(section: 1); try? await Task.sleep(nanoseconds: 600_000_000); note("after section 2")
+            for _ in 0..<12 { p.next(); try? await Task.sleep(nanoseconds: 120_000_000) }
+            try? await Task.sleep(nanoseconds: 1_000_000_000); note("after 12 rapid nexts")
+            p.exit()
+            try? "exited player=\(animatedPlayer == nil)\n".appendLine(to: log)
+        }
+    }
+
+    /// MANIMBLE_TEST_PRESENT=presenter: Presenter View over the animated show (a rehearsal on one display).
+    private func presenterAnimatedTest(dir: String, log: String) async {
+        presenterViewAnimated()
+        for _ in 0..<600 { try? await Task.sleep(nanoseconds: 500_000_000); if presenter != nil { break } }
+        guard let pc = presenter, let p = pc.source as? AnimatedPlayer else { try? "no presenter\n".appendLine(to: log); return }
+        func note(_ what: String) {
+            try? "\(what): \(p.debugState) live=\(p.livePlayer != nil) state=\(p.playbackState ?? "-") audience=\(p.window.isVisible) panel=\(pc.liveFrameReady)\n".appendLine(to: log)
+        }
+        func shot(_ name: String) {
+            guard let v = pc.window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
+        }
+        try? await Task.sleep(nanoseconds: 400_000_000); note("start"); shot("presenter1.png")
+        try? await Task.sleep(nanoseconds: 1_500_000_000); note("settled")
+        p.next(); try? await Task.sleep(nanoseconds: 300_000_000); note("after next"); shot("presenter2.png")
+        try? await Task.sleep(nanoseconds: 1_500_000_000); note("settled"); shot("presenter3.png")
+        pc.window.close()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? "closed presenter=\(presenter == nil)\n".appendLine(to: log)
     }
 
     func playTest() {
@@ -967,7 +1162,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func fitSidebarColumn() {
         guard let side = sideScroll, let col = table.tableColumns.first else { return }
         let w = max(120, side.contentSize.width)
-        if abs(col.width - w) > 0.5 { col.width = w; noteBuildsRowHeight() }
+        if abs(col.width - w) > 0.5 { col.width = w; noteSlideRowHeights() }
     }
 
     // MARK: builds nested under the selected slide
@@ -996,8 +1191,27 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         refreshBuildRows()
     }
 
+    /// ↑/↓ in the navigator: walk the builds of the current slide, then cross into the neighbouring slide with its
+    /// builds unfolded, entering at its first build going down and at its last build going up.
+    func stepNavigator(_ d: Int) {
+        guard let n = sceneName, let row = navigatorScenes.firstIndex(where: { $0.name == n }) else { return }
+        let count = scene?.name == n ? (scene?.stops?.count ?? 0) : 0
+        if count > 1, (0..<count).contains(stopIndex + d) {
+            collapsedBuilds.remove(n)
+            goToStop(stopIndex + d)
+            return
+        }
+        guard navigatorScenes.indices.contains(row + d) else { return }
+        let next = navigatorScenes[row + d].name
+        collapsedBuilds.remove(next)
+        Task { @MainActor in
+            await selectScene(next)
+            if d < 0, sceneName == next, scene?.name == next, let last = scene?.stops?.indices.last, last > 0 { goToStop(last) }
+        }
+    }
+
     func tableView(_ tv: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard row == buildsRow, let n = scene?.stops?.count else { return SlideCell.baseHeight }
+        let n = row == buildsRow ? (scene?.stops?.count ?? 0) : 0
         return SlideCell.rowHeight(columnWidth: tv.tableColumns.first?.width ?? 220, builds: n)
     }
 
@@ -1028,12 +1242,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let n = buildsRow { table.scrollRowToVisible(n) }
     }
 
-    /// The sidebar changed width: the nested panels scale with it, so re-measure the expanded row.
-    func noteBuildsRowHeight() {
-        guard let r = buildsRow, navigatorScenes.indices.contains(r) else { return }
+    /// The sidebar changed width: thumbnails (and the nested panels) scale with it, so re-measure every row.
+    func noteSlideRowHeights() {
+        guard table.numberOfRows > 0 else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0
-            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: r))
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<table.numberOfRows))
         }
     }
 
@@ -1323,6 +1537,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         await loadScene(name, keepStop: true, keepOverrides: true)
         if let oid = oid, sceneName == name { settlePreview(name, oid, ok: ok, before: before) }
         await reloadState()
+        // a restyled or moved slide number: offer it to the other slides once the series of edits is done
+        if ok, result?.pageNumber == true, let oid = oid, pendingMoves["\(name):\(oid)"] == nil, canvas.dragging != oid {
+            offerPageNumberSpread(name)
+        }
     }
 
     /// Moves committed while an earlier render was still running, by "scene:oid": one edit sends their total.
@@ -1359,6 +1577,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         submit { [weak self] in await self?.runEdit(["op": "resize", "oid": oid, "ratio": ratio]) }
     }
 
+    func commitWrap(_ oid: Int, _ width: Double, _ side: String) {
+        submit { [weak self] in await self?.runEdit(["op": "wrap", "oid": oid, "width": width, "side": side]) }
+    }
+
     func nudgeObject(_ oid: Int, _ dx: Double, _ dy: Double) {
         nudge.dx += dx; nudge.dy += dy
         var o = canvas.overrides[oid] ?? Override()
@@ -1389,11 +1611,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.overrides[oid] = o
     }
 
-    func commitText(_ oid: Int, _ value: String, shared: Bool) {
-        guard let o = scene?.objects?[String(oid)], value != o.value else { return }
+    /// `previewed` runs once the new text shows on the canvas (or at once when there is nothing to apply).
+    func commitText(_ oid: Int, _ value: String, shared: Bool, previewed: (() -> Void)? = nil) {
+        guard let o = scene?.objects?[String(oid)], value != o.value else { previewed?(); return }
         submit { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else { previewed?(); return }
             await self.previewSprite(oid, kind: o.kind, value: value, size: o.fontSize ?? 30, color: o.color, font: o.font, weight: o.weight, slant: o.slant)
+            previewed?()
             await self.runEdit(["op": "text", "oid": oid, "value": value, "shared": shared])
         }
     }
@@ -1442,16 +1666,55 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    func beginEdit(_ oid: Int) {
+    /// `at`: where a double-click landed (window coordinates), for the text caret.
+    func beginEdit(_ oid: Int, at: CGPoint? = nil) {
         guard let o = scene?.objects?[String(oid)] else { return }
         if o.kind == "tex" { openLatex(oid) }
-        else if o.kind == "text", o.textOk == true, let f = textField { f.beginEditing() }
+        else if o.kind == "text", o.textOk == true {
+            if !beginInlineText(oid, o, at: at) { textField?.beginEditing() }
+        }
+        else if o.kind == "table", !beginCellEdit(oid, o, at: at), let f = tableCells.first?.first { window.makeFirstResponder(f); f.selectText(nil) }
+    }
+    /// Type into the table cell under `at` (the first cell without one) right on the slide; its inspector cell follows along.
+    func beginCellEdit(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
+        guard let stop = canvas.stop, canvas.overrides[oid] == nil,
+              let c = at.map({ stop.tableCell(oid, at: canvas.framePoint(window: $0)) }) ?? stop.tableCells(oid).first else { return false }
+        let rows = tableCells.isEmpty ? tableRows(o.value) : tableDraft()
+        guard c.row < rows.count, c.col < rows[c.row].count else { return false }
+        let current = rows[c.row][c.col]
+        func mirror(_ v: String) {
+            if c.row < tableCells.count, c.col < tableCells[c.row].count { tableCells[c.row][c.col].stringValue = v }
+        }
+        return canvas.beginTextEdit(oid, text: current, family: o.font, bold: false, italic: false, color: o.color, at: at,
+                                    cell: c, sizing: current.isEmpty ? "Cell" : nil,      // a blank cell's ink is a hidden "Cell"
+                                    changed: { mirror($0) },
+                                    done: { [weak self] v, release in
+                                        guard let self = self, let v = v else { mirror(current); release(); return }
+                                        var rows = rows
+                                        rows[c.row][c.col] = v
+                                        self.submit { [weak self] in
+                                            await self?.runEdit(["op": "table", "oid": oid, "rows": rows])
+                                            release()
+                                        }
+                                    })
+    }
+    /// Type into a Text object right on the slide; the inspector's box follows along.
+    func beginInlineText(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
+        let current = textField?.stringValue ?? o.value          // includes an applied edit still rendering
+        return canvas.beginTextEdit(oid, text: current, family: o.font, bold: o.weight == "BOLD", italic: o.slant == "ITALIC",
+                                    color: o.color, at: at,
+                                    changed: { [weak self] v in self?.textField?.setText(v) },
+                                    done: { [weak self] v, release in
+                                        guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
+                                        self.commitText(oid, v, shared: self.sharedChoice, previewed: release)
+                                    })
     }
     @objc func editLatexPressed() { if let s = selection { openLatex(s) } }
 
     // MARK: LaTeX sheet
 
     var latexSheet: LatexSheet?
+    var biocartoonPane: BioCartoonPane?
     var backgroundSheet: BackgroundSheet?
     func openLatex(_ oid: Int) {
         guard let o = scene?.objects?[String(oid)], o.kind == "tex" else { return }
@@ -1661,12 +1924,63 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             } else { self.toast(r?.error ?? "nothing to undo", error: true) }
         }
     }
-    @objc func present() {
+    // MARK: Play with animations (native Manim Slides player)
+
+    /// Frame height the animations are built at (Play ▸ Animation Resolution); 720p unless chosen otherwise.
+    var animationHeight: Int {
+        let h = UserDefaults.standard.integer(forKey: "animationHeight")
+        return [720, 1080, 1440, 2160].contains(h) ? h : 720
+    }
+
+    @objc func animationResolutionChosen(_ m: NSMenuItem) {
+        guard let h = m.representedObject as? Int else { return }
+        UserDefaults.standard.set(h, forKey: "animationHeight")
+        toast(h == 720 ? "Animations build at 720p" : "Animations build at \(h == 2160 ? "4K" : "\(h)p") from the next show (slides rebuild once)")
+    }
+
+    /// Play menu: whether Play and Presenter View run the animated show (manim clips) or the stills slideshow.
+    var showAnimations: Bool { UserDefaults.standard.bool(forKey: "playShowAnimations") }
+    @objc func toggleShowAnimations() {
+        UserDefaults.standard.set(!showAnimations, forKey: "playShowAnimations")
+        toast(showAnimations ? "Play shows animations" : "Play shows still slides")
+    }
+    @objc func playMenuFromBeginning() { showAnimations ? presentFromBeginning() : playFromBeginning() }
+    @objc func playMenuFromCurrent() { showAnimations ? presentFromCurrent() : playFromCurrent() }
+    @objc func playMenuPresenter() { showAnimations ? presenterViewAnimated() : presenterView() }
+
+    @objc func presentFromCurrent() { present(fromCurrent: true) }
+    @objc func presentFromBeginning() { present(fromCurrent: false) }
+    /// Presenter View (notes, next build, timer) over the animated show, from the current slide.
+    @objc func presenterViewAnimated() { present(fromCurrent: true, withPresenter: true) }
+
+    /// Builds any out-of-date slides with manim, then plays their clips in AnimatedPlayer (see the "ready" event).
+    func present(fromCurrent: Bool, withPresenter: Bool = false) {
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
+        closeAnimationPreview()
+        presentWithPresenter = withPresenter
+        presentFrom = fromCurrent ? (state?.scenes.firstIndex { $0.name == sceneName } ?? 0) : 0
         Task { @MainActor in
             busyPill.show("Preparing presentation…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("present", as: UndoResult.self)
-            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not start the presenter", error: true) }
+            let r = try? await engine.call("present", ["height": animationHeight], as: UndoResult.self)
+            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "Could not start the presentation", error: true) }
         }
+    }
+
+    private func startAnimated(_ d: PresentDeck) {
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
+        if presentWithPresenter {
+            let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
+            let other = NSScreen.screens.first { $0 != here }
+            let p = PresenterController(deck: d, startScene: presentFrom, presenterScreen: here, audienceScreen: other)
+            p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            presenter = p
+            if other == nil { toast("One display: this is a rehearsal view. With a second display the audience sees the slides there.") }
+            return
+        }
+        let p = AnimatedPlayer(screen: window.screen ?? NSScreen.main ?? NSScreen.screens[0])
+        p.onExit = { [weak self] in self?.animatedPlayer = nil; self?.window.makeKeyAndOrderFront(nil) }
+        animatedPlayer = p
+        p.play(d, startScene: presentFrom)
     }
 
     @objc func playCurrentSlideAnimations() {
@@ -1675,7 +1989,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         previewScene = name
         Task { @MainActor in
             busyPill.show("Preparing \(name)’s animations…", symbol: nil, tint: nil, spinning: true)
-            let r = try? await engine.call("animation_preview", ["scene": name], as: UndoResult.self)
+            let r = try? await engine.call("animation_preview", ["scene": name, "height": animationHeight], as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); previewScene = nil; toast(r?.error ?? "Could not play this slide", error: true) }
         }
     }
@@ -1686,7 +2000,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func playFromCurrent() { play(fromCurrent: true) }
 
     func play(fromCurrent: Bool) {
-        guard player == nil, presenter == nil else { return }
+        guard player == nil, presenter == nil, animatedPlayer == nil else { return }
         closeAnimationPreview()
         Task { @MainActor in
             busyText = "Preparing slideshow…"
@@ -1712,7 +2026,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func newSlide() { slideOp("new", layout: "title_content") }
     @objc func duplicateSlide() { slideOp("duplicate") }
     @objc func deleteSlide() { slideOp("delete") }
-    @objc func toggleSkipSlide() { slideOp(selectedSlideIsUnused ? "unskip" : "skip") }
+    @objc func restoreSlide() { slideOp("restore") }
     var selectedSlideIsHidden: Bool { state?.scenes.first(where: { $0.name == sceneName })?.hidden == true }
     @objc func toggleHideSlide() { slideOp(selectedSlideIsHidden ? "unhide" : "hide") }
     @objc func toggleUnusedSlides() {
@@ -1772,27 +2086,60 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    // MARK: terminal
+    // MARK: the drawer below the slide (notes and terminals)
+
+    func installDrawer() {
+        drawer.willChangePage = { [weak self] _ in
+            guard let self = self else { return }
+            if self.notesBox.isEditing { self.window.makeFirstResponder(self.canvas) }     // commits the notes first
+        }
+        drawer.onNewTerminal = { [weak self] in self?.newTerminal() }
+        drawer.onHide = { [weak self] in self?.setDrawerOpen(false) }
+        terminal.onHide = { [weak self] in self?.drawer.show(.notes) }    // the last shell was killed
+        let open = UserDefaults.standard.object(forKey: "showNotes") as? Bool ?? true
+        drawer.isHidden = !open
+        if open, UserDefaults.standard.object(forKey: "NSSplitView Subview Frames manimble.drawer") == nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, let cs = self.centerSplit else { return }
+                cs.setPosition(max(160, cs.bounds.height - 140), ofDividerAt: 0)
+            }
+        }
+    }
+
+    var drawerShowsNotes: Bool { !drawer.isHidden && drawer.page == .notes }
+    var drawerShowsTerminal: Bool { !drawer.isHidden && drawer.page == .terminal }
+
+    /// Open or close the drawer, keeping the slide at least 160pt tall.
+    func setDrawerOpen(_ on: Bool, minHeight: CGFloat = 110) {
+        guard let cs = centerSplit else { return }
+        if !on, notesBox.isEditing { window.makeFirstResponder(canvas) }
+        let wasHidden = drawer.isHidden
+        drawer.isHidden = !on
+        cs.adjustSubviews()
+        if on, wasHidden || drawer.frame.height < minHeight {
+            cs.setPosition(max(160, cs.bounds.height - minHeight), ofDividerAt: 0)
+        }
+        if !on, window.firstResponder.map({ ($0 as? NSView)?.isDescendant(of: drawer) == true }) ?? false { window.makeFirstResponder(canvas) }
+        UserDefaults.standard.set(on, forKey: "showNotes")
+    }
+
+    /// The drawer on the terminal page, starting the first shell; a little taller than notes need.
+    private func showTerminalPage() {
+        if !terminal.hasStarted, let ws = workspace { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
+        drawer.show(.terminal)
+        setDrawerOpen(true, minHeight: max(110, (centerSplit?.bounds.height ?? 0) * 0.42))
+        DispatchQueue.main.async { [self] in terminal.focus() }
+    }
 
     @objc func toggleTerminal() {
-        guard let cs = centerSplit else { return }
-        let show = terminal.isHidden
-        terminal.isHidden = !show
-        cs.adjustSubviews()
-        if show {
-            if !terminal.hasStarted, let ws = workspace { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
-            DispatchQueue.main.async { [self] in
-                if cs.bounds.height > 300 { cs.setPosition(cs.bounds.height * 0.58, ofDividerAt: 0) }
-                terminal.focus()
-            }
-        } else { window.makeFirstResponder(canvas) }
+        if drawerShowsTerminal { setDrawerOpen(false) } else { showTerminalPage() }
     }
 
     /// Open a new terminal tab (showing the terminal first if it is hidden).
     @objc func newTerminal() {
         guard workspace != nil else { return }
         let wasStarted = terminal.hasStarted
-        if terminal.isHidden { toggleTerminal() }
+        showTerminalPage()
         if wasStarted { terminal.addTab() }
     }
 
@@ -1800,7 +2147,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func splitTerminal() {
         guard workspace != nil else { return }
         let wasStarted = terminal.hasStarted
-        if terminal.isHidden { toggleTerminal() }
+        showTerminalPage()
         if wasStarted { terminal.splitActive() }
     }
 
@@ -1830,6 +2177,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             if item.action == #selector(columnsMenuChosen(_:)) { item.state = (objInfo?.format?.columns ?? 1) == (item.representedObject as? Int) ? .on : .off }
             return objInfo?.kind == "text"
         case #selector(toggleGrid): item.state = canvas.showGrid ? .on : .off; return true
+        case #selector(toggleRuler): item.state = showRuler ? .on : .off; return true
         case #selector(toggleSnap): item.state = canvas.snapEnabled ? .on : .off; return true
         case #selector(addVerticalGuide), #selector(addHorizontalGuide): return sceneName != nil
         case #selector(clearGuides): return !canvas.userGuides.isEmpty
@@ -1846,13 +2194,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(slideNumbersPressed):
             return state?.scenes.isEmpty == false && player == nil
         case #selector(toggleNotesPane):
-            item.state = notesPane.isHidden ? .off : .on
+            item.state = drawerShowsNotes ? .on : .off
             return workspace != nil
         case #selector(presenterView):
             return state?.scenes.isEmpty == false && player == nil && presenter == nil
-        case #selector(toggleSkipSlide):
-            item.title = selectedSlideIsUnused ? "Restore Slide to Show" : "Skip Slide"
-            return sceneName != nil && player == nil
+        case #selector(restoreSlide):
+            return selectedSlideIsUnused && player == nil
         case #selector(toggleHideSlide):
             item.title = selectedSlideIsHidden ? "Unhide Slide" : "Hide Slide"
             return sceneName != nil && !selectedSlideIsUnused && player == nil
@@ -1865,17 +2212,32 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             item.state = showUnusedSlides ? .on : .off
             return workspace != nil
         case #selector(playFromCurrent), #selector(insertTextPressed), #selector(insertFormulaPressed), #selector(insertTablePressed),
-             #selector(insertImagePressed), #selector(insertShapePressed(_:)), #selector(formatBackground):
+             #selector(insertImagePressed), #selector(insertShapePressed(_:)), #selector(formatBackground), #selector(showBioCartoon):
             return sceneName != nil && player == nil
         case #selector(playCurrentSlideAnimations): return sceneName != nil && sourceDraft == nil && player == nil && previewScene == nil
         case #selector(toggleTerminal):
-            item.title = terminal.isHidden ? "Show Terminal" : "Hide Terminal"; return workspace != nil
+            item.title = drawerShowsTerminal ? "Hide Terminal" : "Show Terminal"; return workspace != nil
         case #selector(newTerminal), #selector(splitTerminal): return workspace != nil
         case #selector(toggleDarkMode): item.state = DarkMode.mode == .dark ? .on : .off; return true
         case #selector(toggleInvertColors): item.state = DarkMode.mode == .invert ? .on : .off; return true
         case #selector(toggleDarkImages): item.state = DarkMode.images ? .on : .off; return DarkMode.isOn
         case #selector(applyDarkMode), #selector(applyInvertColors): return state?.scenes.isEmpty == false && player == nil
         case #selector(playFromBeginning): return state?.scenes.isEmpty == false && player == nil && presenter == nil
+        case #selector(toggleShowAnimations):
+            item.title = showAnimations ? "Hide Animations" : "Show Animations"; return true
+        case #selector(playMenuFromBeginning):
+            return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presentFromBeginning) : #selector(playFromBeginning), keyEquivalent: ""))
+        case #selector(playMenuFromCurrent):
+            return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presentFromCurrent) : #selector(playFromCurrent), keyEquivalent: ""))
+        case #selector(playMenuPresenter):
+            return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presenterViewAnimated) : #selector(presenterView), keyEquivalent: ""))
+        case #selector(animationResolutionChosen(_:)):
+            item.state = (item.representedObject as? Int) == animationHeight ? .on : .off
+            return previewScene == nil && player == nil && presenter == nil && animatedPlayer == nil
+        case #selector(presentFromCurrent), #selector(presenterViewAnimated):
+            return sceneName != nil && player == nil && presenter == nil && animatedPlayer == nil
+        case #selector(presentFromBeginning):
+            return state?.scenes.isEmpty == false && player == nil && presenter == nil && animatedPlayer == nil
         case #selector(deleteSlide): return sceneName != nil && ((state?.scenes.count ?? 0) > 1 || selectedSlideIsUnused) && player == nil
         case #selector(undo): return state?.canUndo ?? true
         case #selector(redo): return state?.canRedo ?? true
@@ -1908,5 +2270,5 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { confirmClose(for: "closing") }
-    func windowWillClose(_ n: Notification) { finish() }
+    func windowWillClose(_ n: Notification) { closeDeck() }
 }

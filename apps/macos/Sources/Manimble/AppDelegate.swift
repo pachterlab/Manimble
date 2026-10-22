@@ -2,6 +2,7 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: MainController!
+    private var launchURLs: [URL] = []     // decks handed over before the window exists
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
@@ -15,10 +16,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wire(NSApp.mainMenu)
         controller.showWindow()
         NSApp.activate(ignoringOtherApps: true)
+        // a deck given at launch wins over the last one; the engine opens it once it is running
+        if let u = (launchURLs + commandLineDecks()).first { controller.openProject(at: u) }
         controller.start()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    /// `open -a Manimble <deck>`, a drop on the Dock icon, Finder's Open With.
+    func application(_ app: NSApplication, open urls: [URL]) {
+        guard let c = controller else { launchURLs += urls; return }
+        if let u = urls.first { c.openProject(at: u) }
+    }
+
+    /// Paths on the command line (`Manimble.app/Contents/MacOS/Manimble <deck>`), skipping `-Key value` defaults.
+    private func commandLineDecks() -> [URL] {
+        var urls: [URL] = [], args = CommandLine.arguments.dropFirst()[...]
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        while let a = args.popFirst() {
+            if a.hasPrefix("-") {
+                if let v = args.first, !v.hasPrefix("-") { args.removeFirst() }
+                continue
+            }
+            let u = URL(fileURLWithPath: (a as NSString).expandingTildeInPath, relativeTo: cwd).standardizedFileURL
+            if FileManager.default.fileExists(atPath: u.path) { urls.append(u) }
+        }
+        return urls
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { controller.reopenWindow() }
+        return true
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         controller.confirmClose(for: "quitting") ? .terminateNow : .terminateCancel
     }
@@ -58,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exportMenu.addItem(item("Python (whole deck in one file)…", #selector(MainController.exportPythonPressed), "", []))
         let exportItem = NSMenuItem(title: "Export To", action: nil, keyEquivalent: ""); exportItem.submenu = exportMenu
         add("File", [
+            item("New Deck…", #selector(MainController.newDeck), "n"),
             item("Open Deck or Project…", #selector(MainController.openDeck), "o"),
             importItem,
             .separator(),
@@ -113,7 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Formula…", #selector(MainController.insertFormulaPressed), "e", [.command, .shift]),
             shapeItem,
             drawItem,
-            item("Table…", #selector(MainController.insertTablePressed), "", []),
+            item("BioCartoon Icons…", #selector(MainController.showBioCartoon), "", []),
+            { let i = item("Word Table…", #selector(MainController.insertTablePressed), "", []); i.representedObject = "word"; return i }(),
+            { let i = item("Math Table…", #selector(MainController.insertTablePressed), "", []); i.representedObject = "math"; return i }(),
             item("Image…", #selector(MainController.insertImagePressed), "i", [.command, .shift]),
             item("Extract Elements from Image…", #selector(MainController.extractElementsPressed), "", []),
             .separator(),
@@ -132,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Duplicate Slide", #selector(MainController.duplicateSlide), "d"),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
             item("Hide Slide", #selector(MainController.toggleHideSlide), "h", [.command, .shift]),
-            item("Skip Slide", #selector(MainController.toggleSkipSlide), "", []),
+            item("Restore Slide to Show", #selector(MainController.restoreSlide), "", []),
             .separator(),
             item("Move Slide Up", #selector(MainController.moveSlideUp), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.command, .option]),
             item("Move Slide Down", #selector(MainController.moveSlideDown), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.command, .option]),
@@ -196,6 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j", [.command, .option]),
             item("Grid Lines", #selector(MainController.toggleGrid), "g", [.command, .option]),
+            item("Ruler", #selector(MainController.toggleRuler), "u", [.command, .option]),
             item("Snap to Objects", #selector(MainController.toggleSnap), "s", [.command, .option]),
             item("Add Vertical Guide", #selector(MainController.addVerticalGuide), "", []),
             item("Add Horizontal Guide", #selector(MainController.addHorizontalGuide), "", []),
@@ -219,13 +251,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Hide/Show Slide Navigator", #selector(MainController.toggleNavigator), "n", [.command, .option]),
             item("Hide/Show Inspector and Source", #selector(MainController.toggleInspector), "i", [.command, .option]),
         ])
+        let animations = NSMenu(title: "Animation Resolution")
+        for (title, h) in [("720p (fastest builds)", 720), ("1080p", 1080), ("1440p", 1440), ("4K (slowest builds)", 2160)] {
+            let mi = NSMenuItem(title: title, action: #selector(MainController.animationResolutionChosen(_:)), keyEquivalent: "")
+            mi.representedObject = h
+            animations.addItem(mi)
+        }
+        let animationsItem = NSMenuItem(title: "Animation Resolution", action: nil, keyEquivalent: ""); animationsItem.submenu = animations
+        // Show/Hide Animations switches the three items below it between the animated show and the stills slideshow.
         add("Play", [
-            item("Play from Current Slide", #selector(MainController.playFromCurrent), "p", [.command, .option]),
-            item("Play from Beginning", #selector(MainController.playFromBeginning), "p", [.command, .option, .shift]),
-            item("Presenter View (notes, next slide, timer)", #selector(MainController.presenterView), "p", [.command, .control]),
+            item("Show Animations", #selector(MainController.toggleShowAnimations), "a", [.command, .option]),
+            .separator(),
+            item("Play from Beginning", #selector(MainController.playMenuFromBeginning), "p", [.command, .option, .shift]),
+            item("Play from Current Slide", #selector(MainController.playMenuFromCurrent), "p", [.command, .option]),
+            item("Presenter View (notes, next slide, timer)", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
-            item("Play with Manim Slides (full animations)…", #selector(MainController.present), "", []),
+            animationsItem,
         ])
         let win = NSMenu(title: "Window")
         win.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))

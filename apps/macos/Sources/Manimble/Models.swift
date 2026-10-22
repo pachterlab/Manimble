@@ -35,6 +35,7 @@ struct StopInfo: Decodable {
     var visible: [[Double]]          // [oid, x0, y0, x1, y1] in frame pixels
     var sprites: [SpriteInfo]
     var lines: [String: [Double]]?   // oid -> [sx, sy, ex, ey, strokePx]
+    var cells: [String: [[Double]]]? // table oid -> [row, col, cell x0, y0, x1, y1, entry ink x0, y0, x1, y1] per data cell
 }
 
 struct SharedInfo: Decodable {
@@ -105,6 +106,7 @@ struct EditResult: Decodable {
     var error: String?
     var siblings: Int?
     var changed: ChangedLines?
+    var pageNumber: Bool?            // the edit changed a slide-number line
 }
 
 struct SourceEditResult: Decodable {
@@ -145,6 +147,15 @@ extension StopInfo {
     func box(of oid: Int) -> Box? {
         for v in visible where Int(v[0]) == oid { return Box(x0: v[1], y0: v[2], x1: v[3], y1: v[4]) }
         return nil
+    }
+    /// The data cell of a table under a frame-pixel point: (row, col, cell area, entry ink).
+    func tableCell(_ oid: Int, at p: CGPoint) -> (row: Int, col: Int, cell: Box, ink: Box)? {
+        tableCells(oid).first { $0.cell.contains(Double(p.x), Double(p.y)) }
+    }
+    func tableCells(_ oid: Int) -> [(row: Int, col: Int, cell: Box, ink: Box)] {
+        (cells?[String(oid)] ?? []).filter { $0.count >= 10 }.map {
+            (Int($0[0]), Int($0[1]), Box(x0: $0[2], y0: $0[3], x1: $0[4], y1: $0[5]), Box(x0: $0[6], y0: $0[7], x1: $0[8], y1: $0[9]))
+        }
     }
 }
 
@@ -187,6 +198,7 @@ struct PageNumberInfo: Decodable {
     var skip: Bool
     var total: Bool
     var size: Int
+    var sub: Bool?                   // also count a slide's builds: "29 / 47 · 1/3"
 }
 
 struct NotesResult: Decodable {

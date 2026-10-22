@@ -147,6 +147,8 @@ final class SlideTable: NSTableView {
     var onMenu: ((Int) -> NSMenu?)?
     /// Called when the already-selected slide is clicked again (toggles its builds list).
     var onReclick: ((Int) -> Void)?
+    /// ↑/↓ step through every build of every slide (±1) instead of jumping a whole row.
+    var onArrow: ((Int) -> Void)?
     private var clickedSelected = false
     override func mouseDown(with event: NSEvent) {
         let row = self.row(at: convert(event.locationInWindow, from: nil))
@@ -160,6 +162,10 @@ final class SlideTable: NSTableView {
     }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 51 || event.keyCode == 117, selectedRow >= 0 { onDelete?(); return }
+        if event.keyCode == 125 || event.keyCode == 126, let arrow = onArrow,
+           event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
+            arrow(event.keyCode == 125 ? 1 : -1); return
+        }
         super.keyDown(with: event)
     }
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -199,9 +205,11 @@ final class SlideCell: NSTableCellView {
 
     /// Row height for a slide at the given column width, with `builds` nested panels under it (0 = collapsed).
     static func rowHeight(columnWidth: CGFloat, builds n: Int) -> CGFloat {
-        guard n > 0 else { return baseHeight }
         let thumbW = max(40, columnWidth - thumbInset)
-        let top = max(baseHeight, 6 + (thumbW * 9 / 16).rounded() + 4 + 13 + buildSpacing)
+        let thumbH = (thumbW * 9 / 16).rounded()
+        // thumbnail (16:9, scales with the column) + name line; never shorter than the base row
+        guard n > 0 else { return max(baseHeight, 6 + thumbH + 4 + 13 + 2) }
+        let top = max(baseHeight, 6 + thumbH + 4 + 13 + buildSpacing)
         let bw = max(32, thumbW - buildIndent)
         let bh = (bw * 9 / 16).rounded()
         return top + CGFloat(n) * (bh + buildSpacing) + 2

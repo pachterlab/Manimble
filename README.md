@@ -1,10 +1,22 @@
 # Manimble
 
-A native macOS editor for [Manim Slides](https://github.com/jeertmans/manim-slides) decks, in the spirit of Keynote.
-Click a text, formula, image, line or shape on a slide and edit it directly. Every edit is written back to your
-Python source, and you can watch the lines change in the built-in code pane.
+A Slideshow creator that provides a graphical interface for the animations created by [Manim](https://github.com/3b1b/manim).
 
-## Run it
+## Installation
+
+Runs on macOS 13+ on both Apple Silicon and Intel Macs (the app is a universal binary). Support for Windows and Linux in development.
+
+### Precompiled binary
+
+```bash
+curl -L -o /tmp/Manimble-macOS.zip https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip  # Download latest precompiled binary
+ditto -x -k /tmp/Manimble-macOS.zip /Applications/ && rm /tmp/Manimble-macOS.zip  # Unzip and move to Applications
+git clone https://github.com/pachterlab/Manimble.git && cd Manimble && ./setup_python_env.sh  # Install Python/Manim/TeX dependencies
+```
+
+See precompiled binaries in [Releases](https://github.com/pachterlab/Manimble/releases)
+
+### Compile directly
 
 ```bash
 git clone https://github.com/pachterlab/Manimble.git && cd Manimble
@@ -12,18 +24,15 @@ git clone https://github.com/pachterlab/Manimble.git && cd Manimble
 open "$HOME/Applications/Manimble.app"  # File ▸ Open Deck… (try examples/hello/deck)
 ```
 
-Prefer not to build from source? Download `Manimble-macOS.zip` from the
-[latest release](https://github.com/pachterlab/Manimble/releases/latest), unzip it into
-`~/Applications`, then `git clone` the repository above (for the engine and examples) and run
-`./setup_python_env.sh` instead of `install_manimble.sh` to install the Python/Manim/TeX
-dependencies without needing Xcode. The app is ad-hoc signed, so the first launch needs
-right-click ▸ Open (or `xattr -cr ~/Applications/Manimble.app`) to get past Gatekeeper.
-
 Requirements:
 - macOS 13+, Xcode or the command line tools, and Homebrew. The installer downloads
   [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm), creates a Python environment in
-  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides with PySide6, Pillow,
-  python-pptx, FFmpeg, and MacTeX when they are missing.
+  `~/Library/Application Support/Manimble/python`, and installs Manim, Manim Slides (no Qt / PySide6: Manimble plays animations itself), Pillow,
+  python-pptx, the [BioCartoon](https://biocartoon.com) icon search (`biocartoon`) and FFmpeg when they are missing. For formulas it installs
+  [BasicTeX](https://www.tug.org/mactex/morepackages.html) plus the LaTeX packages manim uses (about 400 MB, against
+  several GB for the full MacTeX), and asks for your password once because TeX lives in a system folder. An
+  existing TeX installation such as MacTeX is used as it is. A deck that needs another LaTeX package can add it with
+  `sudo tlmgr install <package>` (manim's Chinese `ctex` template, for instance, needs `ctex`).
 - Keynote is needed only for Keynote import and export.
 
 On launch Manimble checks `$MANIMBLE_PYTHON`, your saved choice, its installed Python environment, a checkout-local
@@ -127,6 +136,9 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   orange lines show the match. Hold ⌥ to drag freely.
 - Guides: Add Vertical / Horizontal Guide (View menu or the Home bar) puts a cyan guide at the centre; drag it into
   place, drag it off the slide to remove it (Clear Guides removes all). Guides are remembered per deck.
+- Rulers (View menu, ⌥⌘U) along the top and left of the slide, graduated in manim units with 0 at the slide's
+  centre (negative left and below), following the zoom. They show the slide's and the selection's extent, the
+  pointer, and each guide's marker; drag from a ruler onto the slide to add a guide, or drag a marker to move one.
 - Drawing (Insert ▸ Draw, or the Shape menu in the toolbar): choose line, arrow, double arrow, rectangle or ellipse,
   then drag on the slide; ⇧ snaps the angle or makes a square/circle. The element is inserted with those endpoints or
   that box.
@@ -153,7 +165,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - **Slide Numbers…** (Insert menu): a number on every slide of the show, bottom right / centre / left, with a start
   number, "don't show on the title slide" and "show the total" (`3 / 10`). Each is a `Text` written at the top of
   `construct()` with a `# manimble page number` marker, so it is an ordinary object (move it, change its size) and
-  the numbers are renumbered in the same undo step whenever slides are added, duplicated, deleted, skipped or
+  the numbers are renumbered in the same undo step whenever slides are added, duplicated, deleted or
   reordered. Open the dialog again to change the options or remove the numbers.
 
 **Slides and decks**
@@ -182,12 +194,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   `self.next_slide(notes="...")  # manimble notes` at the top of `construct()`, which is what manim-slides' own
   presenter shows for the slide; they do not add a build.
 - Delete Slide: Slide menu (⇧⌘⌫), the Delete key in the navigator, or right-click a slide; ⌘Z brings it back.
-  Right-clicking a slide in the navigator also offers New Slide After This (with layouts), Duplicate, Hide and Skip.
+  Right-clicking a slide in the navigator also offers New Slide After This (with layouts), Duplicate and Hide.
 - Hide Slide (Slide menu, ⇧⌘H, or right-click): the slide stays in the deck and the navigator (dimmed, with a
   struck-through number) but is left out of the slideshow, the presenter view and the PDF, PowerPoint and Keynote
   exports, like PowerPoint's hidden slides. It is a `# manimble hidden` comment on the class line; Unhide removes it.
-- Slide menu: Skip Slide removes a scene from the show without deleting its code. View ▸ Show Unused Slides reveals
-  skipped scenes and other scene classes outside `order.txt`; select one and choose Restore Slide to Show to append it.
+- View ▸ Show Unused Slides reveals scene classes outside `order.txt`; select one and choose Restore Slide to Show
+  (Slide menu or right-click) to append it.
 - Drag a slide in the navigator to reorder the show; the change is saved to `order.txt` and can be undone.
 - Python source pane with syntax colours, highlighted changed/selected lines, and always-visible scroll bars. Click the
   code to edit that scene class, then click outside to update the slide. Syntax errors leave the draft in the editor;
@@ -206,9 +218,22 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - **Preview Current Slide’s Animations** (Play menu, ⌥⌘R) builds the selected scene if needed, then plays its
   real animations and builds inside the editor. Each build pauses at its end; click the slide or press → to play the
   next build. Use the player controls to pause or scrub, and ← to go back.
-- **Play with Manim Slides**: builds any slides whose code changed since they were last built (progress in the
-  top-right pill), then launches the deck's `present.py` (or `manim-slides present`) with the real animations. Builds
-  go into the working copy's `slides/` folder, so the original's builds are untouched.
+- **Play with Animations** (Play menu: ⌥⌘A from the current slide, ⌥⌘⇧A from the beginning): builds any slides
+  whose code changed since they were last built (progress in the top-right pill), then plays the real animations
+  full-screen in a native player (AVFoundation), so no Qt presenter is needed. Builds go into the working copy's
+  `slides/` folder, so the original's builds are untouched. Keys: → / ↓ / return / click next, ← / ↑ / right-click
+  previous (shown at its end), space play/pause, R replay, V reverse, N next slide, 1–9 jump to a chapter, B blank,
+  P progress, Home/End, esc / Q end. Loops, auto-next and playback rates from `next_slide(...)` are honoured, and
+  dark mode / inverted colours apply as in the slideshow. **Presenter View with Animations** (Play menu, ⌃⌘A) is
+  the same Presenter View over the animated show: the current slide plays live (mirroring the audience display, with
+  a playing / paused / build-done badge), the next panel shows how the next build ends, and notes, counter, clock and
+  timer work as above; with one display it is a rehearsal view. Chapters and clickable link regions come from the deck's `present.json`
+  (`{"sections": [scene indices], "links": {"<scene index>": [[x0, x1, y0, y1, url], ...]}}`, fractions of the
+  slide, y from the top, scene indices counting `order.txt`) or, without one, the `SECTION_SCENE_INDICES` /
+  `REFERENCE_LINKS` constants of a custom `present.py`; clicking the bottom 6% of the slide jumps to the chapter
+  under the pointer. **Play ▸ Animation Resolution** picks the size the animations are built at: 720p (the default,
+  fastest), 1080p, 1440p or 4K. Higher ones look sharper on big screens and projectors but take longer to build;
+  changing it rebuilds each slide once, the next time it is played.
 - File ▸ Export To ▸ Python (whole deck in one file)… writes the deck as a single `.py`: helper modules inlined, the
   slides in show order, a `SLIDES` list at the end. (The deck's own `.py` files are already the editable source that
   every edit is written to; this is a one-file copy for sharing, best kept in the deck folder so relative paths work.)
@@ -306,9 +331,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 **Presenting and sharing**
 - The full-screen slideshow shows stills of each build scaled up from 1280×720, with no presenter display, notes or
   timer. The selected slide's animations can be previewed inside the editor.
-- Play with Manim Slides builds with `manim-slides render` from the chosen Python's `bin` folder. The first run on a
-  deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
-  them. Manimble's own renders keep manim's Text/TeX cache under `~/Library/Application Support/Manimble/cache`; presenting and exporting run manim-slides, which writes the deck's `../media` folder.
+- Play with Animations and the animation preview build with `python -m manim render` (what `manim-slides render`
+  runs) in the chosen Python. The first run on a deck with no builds renders every slide (minutes). Slides built outside Manimble are trusted unless you edited
+  them. Manimble's own renders keep manim's Text/TeX cache under `~/Library/Application Support/Manimble/cache`; presenting and exporting render through manim-slides' `Slide`, which writes the deck's `../media` folder.
+- The animated player shows no pointer cursor over link regions, and V replays forwards when Manim Slides did not
+  write a separate reversed clip. In Presenter View, R resets the timer, so replaying a build is done with ← then →.
+  Presenter View with Animations is untested on a real second display (checked as a one-display rehearsal).
 - New or duplicated slides are added to `order.txt` only: decks that keep their own hand-written lists (build
   scripts, footer progress tables) must be updated by hand.
 - Dependency discovery is based on files opened while scenes render. Branches not executed during rendering can still
@@ -337,8 +365,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 2. Duplicate / copy / paste elements; Delete for any element; Arrange (bring forward, send back, align, distribute).
 3. Per-word text styling; per-element font; justified and wrapped text (`MarkupText`); rotation by dragging.
 4. Shared-constant safety: re-render the other slides that use a changed constant and warn before it is saved.
-5. Presenter display (current + next slide, notes, timer); animated playback across the full-screen slideshow; PDF/video
-   export at full resolution.
+5. PDF/video export at full resolution.
 6. Go to Slide; multi-slide selection; find / replace.
 7. Persistent undo history; crash recovery of the working copy.
 8. Slide transitions, themes / master slides, and a theme picker for new decks.
@@ -349,7 +376,7 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 ## License
 
 BSD 2-Clause, see [LICENSE](LICENSE). Manimble links against [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
-(MIT) and installs Manim, manim-slides and python-pptx into its app environment, each under its own license.
+(MIT) and installs Manim, manim-slides, python-pptx and biocartoon into its app environment, each under its own license.
 
 ## Layout of this repository
 

@@ -9,6 +9,7 @@ private extension NSToolbarItem.Identifier {
     static let insShape = NSToolbarItem.Identifier("insShape")
     static let insTable = NSToolbarItem.Identifier("insTable")
     static let insImage = NSToolbarItem.Identifier("insImage")
+    static let insBioCartoon = NSToolbarItem.Identifier("insBioCartoon")
     static let zoom = NSToolbarItem.Identifier("zoom")
     static let share = NSToolbarItem.Identifier("share")
     static let terminal = NSToolbarItem.Identifier("terminal")
@@ -29,7 +30,7 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newSlide, .space, .insTable, .insText, .insFormula, .insShape, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
+        [.newSlide, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(t) }
 
@@ -67,10 +68,30 @@ extension MainController: NSToolbarDelegate {
             }
             i.menu = m
             return i
-        case .insTable: return button(id, "Table", "tablecells", #selector(insertTablePressed))
+        case .insTable:
+            let i = NSMenuToolbarItem(itemIdentifier: id)
+            i.label = "Table"; i.paletteLabel = "Table"; i.toolTip = "Insert a word table (click) or choose word / math"
+            i.image = symbol("tablecells", "Table"); i.showsIndicator = true
+            i.target = self; i.action = #selector(insertTablePressed(_:))
+            let m = NSMenu()
+            for (title, style, sym, tip) in [("Word Table", "word", "tablecells", "Plain text cells (Table)"),
+                                             ("Math Table", "math", "function", "LaTeX cells (MathTable)")] {
+                let mi = NSMenuItem(title: title, action: #selector(insertTablePressed(_:)), keyEquivalent: "")
+                mi.representedObject = style; mi.target = self; mi.image = symbol(sym, title); mi.toolTip = tip
+                m.addItem(mi)
+            }
+            i.menu = m
+            return i
         case .insText: return button(id, "Text", "textformat", #selector(insertTextPressed))
         case .insFormula: return button(id, "Formula", "function", #selector(insertFormulaPressed))
         case .insImage: return button(id, "Image", "photo", #selector(insertImagePressed))
+        case .insBioCartoon:
+            let i = button(id, "BioCartoon", "paintpalette", #selector(showBioCartoon))
+            i.toolTip = "Search BioCartoon's science icons and drag them onto the slide"
+            let logo = BioCartoonCLI.logo.copy() as! NSImage
+            logo.size = NSSize(width: 22, height: 22)
+            i.image = logo
+            return i
         case .insShape:
             let i = NSMenuToolbarItem(itemIdentifier: id)
             i.label = "Shape"; i.paletteLabel = "Shape"; i.toolTip = "Insert shape"
@@ -182,8 +203,9 @@ extension MainController: NSToolbarDelegate {
     }
     @objc func insertShapePressed(_ m: NSMenuItem) { if let k = m.representedObject as? String { insert(kind: k) } }
 
-    @objc func insertTablePressed() {
-        let a = NSAlert(); a.messageText = "Insert table"; a.informativeText = "Rows and columns:"
+    @objc func insertTablePressed(_ sender: Any?) {
+        let style = ((sender as? NSMenuItem)?.representedObject as? String) ?? "word"
+        let a = NSAlert(); a.messageText = style == "math" ? "Insert math table" : "Insert word table"; a.informativeText = "Rows and columns:"
         let rows = NSTextField(string: "3"), cols = NSTextField(string: "3")
         for f in [rows, cols] { f.widthAnchor.constraint(equalToConstant: 60).isActive = true }
         let stack = NSStackView(views: [NSTextField(labelWithString: "Rows"), rows, NSTextField(labelWithString: "Columns"), cols])
@@ -192,7 +214,7 @@ extension MainController: NSToolbarDelegate {
         a.accessoryView = stack
         a.addButton(withTitle: "Insert"); a.addButton(withTitle: "Cancel")
         guard a.runModal() == .alertFirstButtonReturn else { return }
-        insert(kind: "table", extra: ["rows": max(1, rows.integerValue), "cols": max(1, cols.integerValue)])
+        insert(kind: "table", extra: ["rows": max(1, rows.integerValue), "cols": max(1, cols.integerValue), "style": style])
     }
 
     @objc func insertImagePressed() {
@@ -267,38 +289,141 @@ extension MainController: NSToolbarDelegate {
     }
 
     func tableEditor(_ o: ObjInfo, width: (NSView) -> Void) -> [NSView] {
-        let tv = NSTextView()
-        tv.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        tv.string = tableRows(o.value).map { $0.joined(separator: ", ") }.joined(separator: "\n")
-        tv.isRichText = false
-        tv.isAutomaticQuoteSubstitutionEnabled = false; tv.isAutomaticDashSubstitutionEnabled = false
-        let sv = NSScrollView(); sv.documentView = tv; sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
-        width(sv); sv.heightAnchor.constraint(equalToConstant: 110).isActive = true
-        tableText = tv
+        let sv = NSScrollView(); sv.hasHorizontalScroller = true; sv.hasVerticalScroller = true
+        sv.autohidesScrollers = true; sv.borderType = .noBorder; sv.drawsBackground = false
+        width(sv)
+        tableGrid = sv
+        layoutTableGrid(tableRows(o.value))
+        func small(_ title: String, _ sel: Selector, _ tip: String) -> NSButton {
+            let b = NSButton(title: title, target: self, action: sel); b.controlSize = .small; b.font = .systemFont(ofSize: 11); b.toolTip = tip
+            return b
+        }
+        let edit = NSStackView(views: [small("+ Row", #selector(tableAddRow), "Add a row at the bottom"),
+                                       small("− Row", #selector(tableRemoveRow), "Remove the bottom row"),
+                                       small("+ Col", #selector(tableAddCol), "Add a column on the right"),
+                                       small("− Col", #selector(tableRemoveCol), "Remove the right column")])
+        edit.spacing = 4
         let apply = NSButton(title: "Apply Table", target: self, action: #selector(applyTable))
-        return [label("Cells (one row per line, comma-separated)"), sv, apply]
+        let hint = NSTextField(labelWithString: "⇥ next cell  ·  ↵ apply")
+        hint.font = Theme.font(10); hint.textColor = .tertiaryLabelColor
+        return [label("Cells"), sv, edit, apply, hint]
     }
 
+    /// The cells as currently typed (not yet applied).
+    func tableDraft() -> [[String]] { tableCells.map { $0.map(\.stringValue) } }
+
+    func layoutTableGrid(_ rows: [[String]]) {
+        guard let sv = tableGrid else { return }
+        let rows = rows.isEmpty ? [[""]] : rows
+        let nc = max(1, rows.map(\.count).max() ?? 1)
+        let gap: CGFloat = 4, h: CGFloat = 24, avail: CGFloat = 292
+        let w = max(56, ((avail - gap * CGFloat(nc - 1)) / CGFloat(nc)).rounded(.down))
+        let doc = FlippedView(frame: NSRect(x: 0, y: 0, width: CGFloat(nc) * w + CGFloat(nc - 1) * gap,
+                                            height: CGFloat(rows.count) * h + CGFloat(rows.count - 1) * gap))
+        tableCells = rows.enumerated().map { i, row in
+            (0..<nc).map { j in
+                let f = NSTextField(string: j < row.count ? row[j] : "")
+                f.frame = NSRect(x: CGFloat(j) * (w + gap), y: CGFloat(i) * (h + gap), width: w, height: h - 2)
+                f.font = .systemFont(ofSize: 12); f.cell?.isScrollable = true; f.cell?.wraps = false
+                f.target = self; f.action = #selector(applyTable); f.cell?.sendsActionOnEndEditing = false
+                doc.addSubview(f)
+                return f
+            }
+        }
+        let flat = tableCells.flatMap { $0 }
+        for (k, f) in flat.enumerated() { f.nextKeyView = flat[(k + 1) % flat.count] }
+        sv.documentView = doc
+        sv.constraints.filter { $0.firstAttribute == .height }.forEach { sv.removeConstraint($0) }
+        let scrollbar: CGFloat = doc.frame.width > avail ? 14 : 0
+        sv.heightAnchor.constraint(equalToConstant: min(doc.frame.height, 220) + scrollbar).isActive = true
+    }
+
+    func reshapeTable(_ change: (inout [[String]]) -> Void) {
+        var rows = tableDraft()
+        change(&rows)
+        guard !rows.isEmpty, !(rows.first?.isEmpty ?? true) else { NSSound.beep(); return }
+        layoutTableGrid(rows)
+    }
+    @objc func tableAddRow() { reshapeTable { $0.append(Array(repeating: "", count: $0.first?.count ?? 1)) } }
+    @objc func tableRemoveRow() { reshapeTable { if $0.count > 1 { $0.removeLast() } } }
+    @objc func tableAddCol() { reshapeTable { for i in $0.indices { $0[i].append("") } } }
+    @objc func tableRemoveCol() { reshapeTable { for i in $0.indices where $0[i].count > 1 { $0[i].removeLast() } } }
+
     @objc func applyTable() {
-        guard let s = selection, let tv = tableText else { return }
-        let rows = tv.string.split(separator: "\n", omittingEmptySubsequences: true)
-            .map { $0.split(separator: ",", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespaces) } }
-        guard !rows.isEmpty else { return }
+        guard let s = selection, !tableCells.isEmpty else { return }
+        let rows = tableDraft()
         submit { [weak self] in await self?.runEdit(["op": "table", "oid": s, "rows": rows]) }
+    }
+
+    /// Headless check of insert table -> type in cells -> add a row -> apply: MANIMBLE_TEST_TABLE=<deck>, MANIMBLE_TEST_OUT=<dir>
+    func tableTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "table.log") }
+        func shot(_ name: String) {
+            guard let v = window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
+        }
+        Task { @MainActor in
+            insert(kind: "table", extra: ["rows": 2, "cols": 3, "style": ProcessInfo.processInfo.environment["MANIMBLE_TEST_TABLE_STYLE"] ?? "word"])
+            await queueTail?.value
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            log("selected: \(selection.map { scene?.objects?[String($0)]?.kind ?? "-" } ?? "none") cells=\(tableDraft())")
+            // double-click the middle cell of the bottom row and type into it on the slide
+            if let s = selection, let c = canvas.stop?.tableCells(s).first(where: { $0.row == 1 && $0.col == 1 }) {
+                let r = canvas.slideRect, k = canvas.effectiveScale
+                beginEdit(s, at: canvas.convert(CGPoint(x: r.minX + c.cell.cx * k, y: r.maxY - c.cell.cy * k), to: nil))
+                log("editing cell: \(canvas.editingCell.map { "\($0.row),\($0.col)" } ?? "none")")
+                if let tv = window.firstResponder as? NSTextView {
+                    tv.insertText("Hello", replacementRange: tv.selectedRange())
+                    log("inspector cell mirrors: \(tableDraft())")
+                    if let img = canvas.snapshotView() { try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + "table-cell-typing.png")) }
+                    shot("table-cell-typing-window.png")
+                    tv.insertTab(nil)
+                }
+                await queueTail?.value
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                log("after cell edit: \(scene?.objects?.values.filter { $0.kind == "table" }.map(\.value) ?? []) editing=\(canvas.editingText.map(String.init) ?? "none")")
+                if let img = canvas.snapshotView() { try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + "table-cell-done.png")) }
+            } else { log("no cell geometry") }
+            if let s = selection { beginEdit(s, at: nil) }
+            log("Return edits first cell: \(canvas.editingCell.map { "\($0.row),\($0.col)" } ?? "none")")
+            canvas.finishTextEdit(commit: false)
+            shot("table-1.png")
+            tableAddRow()
+            for (i, row) in tableCells.enumerated() { for (j, f) in row.enumerated() { f.stringValue = "r\(i)c\(j)" } }
+            applyTable()
+            await queueTail?.value
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            log("after apply: \(scene?.objects?.values.filter { $0.kind == "table" }.map(\.value) ?? []) cells=\(tableDraft())")
+            shot("table-2.png")
+            NSApp.terminate(nil)
+        }
     }
 
     // MARK: PowerPoint / Keynote import
 
-    @objc func importPowerPoint() { runImport(exts: ["pptx"], label: "PowerPoint") }
-    @objc func importKeynote() { runImport(exts: ["key"], label: "Keynote") }
+    @objc func importPowerPoint() { runImport(label: "PowerPoint") }
+    @objc func importKeynote() { runImport(label: "Keynote") }
 
-    func runImport(exts: [String], label: String) {
+    func runImport(label: String) {
+        let exts = ["ppt", "pptx", "key"]
         guard confirmClose(for: "importing a presentation") else { return }
-        let open = NSOpenPanel()
-        open.message = "Choose a \(label) presentation to import"
-        open.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
-        open.canChooseFiles = true; open.canChooseDirectories = false
-        guard open.runModal() == .OK, let src = open.url else { return }
+        // Folders stay choosable so tagged folders show up under the sidebar's Tags; picking one
+        // reopens the panel inside it instead of importing it.
+        var src: URL?
+        var start: URL?
+        while src == nil {
+            let open = NSOpenPanel()
+            open.message = "Choose a \(label) presentation to import"
+            open.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) } + [.folder]
+            open.canChooseFiles = true; open.canChooseDirectories = true
+            if let start { open.directoryURL = start }
+            guard open.runModal() == .OK, let u = open.url else { return }
+            let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if isDir && !exts.contains(u.pathExtension.lowercased()) { start = u } else { src = u }
+        }
+        guard let src else { return }
         let save = NSSavePanel()
         save.message = "Where should the new Manim Slides deck be created? A folder with this name is made."
         save.nameFieldStringValue = src.deletingPathExtension().lastPathComponent

@@ -12,6 +12,7 @@ struct U {
     float4 color;    // rgba (solid) / opacity in .a (textured)
     float2 frame;    // frame size in pixels
     float2 pad;
+    float4 hole;     // x0, y0, x1, y1 in frame pixels left out of a textured draw (none when empty)
 };
 struct VOut { float4 pos [[position]]; float2 uv; };
 
@@ -80,9 +81,15 @@ vertex VOut vs_line(uint vid [[vertex_id]], constant U &u [[buffer(0)]]) {
     return o;
 }
 
+bool in_hole(VOut in, constant U &u) {
+    float2 px = u.rect.xy + in.uv * u.rect.zw;
+    return u.hole.z > u.hole.x && all(px >= u.hole.xy) && all(px <= u.hole.zw);
+}
+
 // Textures hold premultiplied RGBA.
 fragment float4 fs_tex(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U &u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
+    if (in_hole(in, u)) return float4(0.0);
     return t.sample(s, in.uv) * u.color.a;
 }
 
@@ -95,13 +102,14 @@ float3 darkmap(float3 c, float2 th) {
 fragment float4 fs_tex_dark(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U &u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float4 p = t.sample(s, in.uv);
-    if (p.a <= 0.0) return float4(0.0);
+    if (p.a <= 0.0 || in_hole(in, u)) return float4(0.0);
     return float4(darkmap(p.rgb / p.a, u.pad) * p.a, p.a) * u.color.a;
 }
 
 fragment float4 fs_tex_invert(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U &u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float4 p = t.sample(s, in.uv);
+    if (in_hole(in, u)) return float4(0.0);
     return float4(p.a - p.rgb, p.a) * u.color.a;          // premultiplied 1 - c
 }
 
@@ -116,6 +124,7 @@ private struct Uniforms {
     var color: SIMD4<Float>
     var frame: SIMD2<Float>
     var pad: SIMD2<Float> = .zero
+    var hole: SIMD4<Float> = .zero
 }
 
 private struct Uniforms2 {
@@ -135,7 +144,11 @@ struct Override {
     var replacement: (tex: MTLTexture, w: Double, h: Double)?   // new text/formula raster
 }
 
-enum Handle: Int { case nw, ne, sw, se }
+enum Handle: Int {
+    case nw, ne, sw, se
+    case w, e                 // text box sides: set the wrap width, the font size stays
+    var isSide: Bool { self == .w || self == .e }
+}
 
 /// Metal-drawn slide canvas: exact frame when idle; backdrop + object sprites while editing.
 final class CanvasView: MTKView {
@@ -153,12 +166,12 @@ final class CanvasView: MTKView {
     private let loader: MTKTextureLoader
 
     // content
-    var frameSize = CGSize(width: 1280, height: 720)
-    var stop: StopInfo? { didSet { needsDisplay2() } }
+    var frameSize = CGSize(width: 1280, height: 720) { didSet { onGeometryChange?() } }
+    var stop: StopInfo? { didSet { if let e = inline, stop?.box(of: e.oid) == nil { finishTextEdit(commit: true) }; needsDisplay2(); onGeometryChange?() } }
     var sceneObjects: [String: ObjInfo] = [:]
-    var selection: Int? { didSet { needsDisplay2() } }
+    var selection: Int? { didSet { if let e = inline, selection != e.oid { finishTextEdit(commit: true) }; needsDisplay2(); onGeometryChange?() } }
     var hover: Int?
-    var overrides: [Int: Override] = [:] { didSet { needsDisplay2() } }
+    var overrides: [Int: Override] = [:] { didSet { needsDisplay2(); onGeometryChange?() } }
     var showObjects = false { didSet { needsDisplay2() } }
     /// Dark mode / inverted colours (nothing is written): the slide is composited from backdrop + sprites, each colour-mapped.
     var colorView = ColorView.normal { didSet { needsDisplay2() } }
@@ -170,13 +183,13 @@ final class CanvasView: MTKView {
     var onEndpoints: ((Int, [Double]) -> Void)?
     private var dragEnd: Int?           // 0 = start, 1 = end
     /// Frame pixels per manim unit (grid spacing); set from the scene.
-    var unitPx: Double = 90 { didSet { needsDisplay2() } }
+    var unitPx: Double = 90 { didSet { needsDisplay2(); onGeometryChange?() } }
     var showGrid = false { didSet { needsDisplay2() } }
     /// Snap a dragged object's edges and centre to other objects, the slide and the grid.
     var snapEnabled = true
     private var guides: [(vertical: Bool, pos: Double)] = [] { didSet { needsDisplay2() } }
     /// Guides the user added (frame px); draggable, removed by dragging off the slide, and snap targets.
-    var userGuides: [(vertical: Bool, pos: Double)] = [] { didSet { needsDisplay2() } }
+    var userGuides: [(vertical: Bool, pos: Double)] = [] { didSet { needsDisplay2(); onGeometryChange?() } }
     var onGuidesChange: (() -> Void)?
     private var dragGuide: Int?
     /// Drawing mode: "line", "arrow", "darrow", "rectangle" or "ellipse"; drag on the slide to create one.
@@ -189,6 +202,8 @@ final class CanvasView: MTKView {
     var penColor = NSColor(hex: "#FF3B30") { didSet { needsDisplay2() } }
     var penWidth: Double = 6                        // manim stroke_width
     var onPen: (([CGPoint]) -> Void)?
+    /// A BioCartoon icon dropped on the slide (pasteboard data, frame px); returns whether it was taken.
+    var onIconDrop: ((Data, CGPoint) -> Bool)?
     private var penPoints: [CGPoint] = [] { didSet { needsDisplay2() } }
     /// Strokes handed to the engine whose render has not arrived yet (drawn so they never flicker away).
     var pendingStrokes: [[CGPoint]] = [] { didSet { needsDisplay2() } }
@@ -197,21 +212,36 @@ final class CanvasView: MTKView {
     var onSelect: ((Int?) -> Void)?
     var onMove: ((Int, Double, Double) -> Void)?
     var onResize: ((Int, Double) -> Void)?
-    var onEdit: ((Int) -> Void)?
+    /// A text box's side was dragged: its new width (frame px) and the side ("left" / "right") that moved.
+    var onWrap: ((Int, Double, String) -> Void)?
+    /// Edit an object; for a double-click, the click's window location (where text editing puts the caret).
+    var onEdit: ((Int, CGPoint?) -> Void)?
     var onNudge: ((Int, Double, Double) -> Void)?
     var onDelete: ((Int) -> Void)?
     var onZoomChange: (() -> Void)?
     var onContextMenu: (() -> NSMenu?)?
+    /// Anything the rulers show changed: slide placement, zoom, pan, selection or guides.
+    var onGeometryChange: (() -> Void)?
+    /// Pointer position over the canvas in frame px (nil when it leaves), for the rulers' cursor marks.
+    var onCursorMove: ((CGPoint?) -> Void)?
 
     /// Points per frame pixel; nil = fit the slide to the window.
-    var zoom: CGFloat? { didSet { if zoom == nil { pan = .zero }; needsDisplay2(); onZoomChange?() } }
-    var pan = CGPoint.zero { didSet { needsDisplay2() } }
+    var zoom: CGFloat? { didSet { if zoom == nil { pan = .zero }; needsDisplay2(); onZoomChange?(); onGeometryChange?() } }
+    var pan = CGPoint.zero { didSet { needsDisplay2(); onGeometryChange?() } }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layoutTextEditor()
+        onGeometryChange?()
+    }
 
     // drag state
     private var dragStart: CGPoint?
     private var dragOID: Int?
     private var dragHandle: Handle?
     private var dragBox: Box?
+    /// The text box's outline while a side handle is dragged.
+    private var wrapBand: Box? { didSet { needsDisplay2() } }
     private var dragBase = (dx: 0.0, dy: 0.0)   // the object's previewed offset when this drag began (moves still rendering)
     /// The object being dragged right now, if any.
     var dragging: Int? { dragOID }
@@ -224,6 +254,24 @@ final class CanvasView: MTKView {
         if dragOID == oid { dragBase = (dragBase.dx - shownDx, dragBase.dy - shownDy) }
     }
     private var tracking: NSTrackingArea?
+
+    /// Text being typed straight onto the slide (its sprite is hidden meanwhile).
+    fileprivate struct InlineEdit {
+        var oid: Int
+        var view: InlineTextView
+        var center: CGPoint                  // frame px; the re-render stays centred here
+        var fontPx: CGFloat                  // font size in frame px
+        var family: String?, bold: Bool, italic: Bool
+        var original: String
+        var done: ((String?, @escaping () -> Void) -> Void)?
+        var cell: (row: Int, col: Int, area: Box)?   // typing into one cell of a table; the rest of it stays drawn
+    }
+    fileprivate var inline: InlineEdit?
+    /// The object whose text is being edited on the slide, if any.
+    var editingText: Int? { inline?.oid }
+    /// The table cell being typed into, if any.
+    var editingCell: (oid: Int, row: Int, col: Int)? { inline.flatMap { e in e.cell.map { (e.oid, $0.row, $0.col) } } }
+    fileprivate var textEditorChanged: ((String) -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -242,7 +290,7 @@ final class CanvasView: MTKView {
     }
     required init(coder: NSCoder) { fatalError() }
 
-    private func needsDisplay2() { setNeedsDisplay(bounds) }
+    private func needsDisplay2() { layoutTextEditor(); setNeedsDisplay(bounds) }
 
     private func buildPipelines(_ dev: MTLDevice) {
         let lib = try! dev.makeLibrary(source: shaderSource, options: nil)
@@ -330,11 +378,49 @@ final class CanvasView: MTKView {
     override func magnify(with event: NSEvent) { zoomBy(1 + event.magnification) }
     private var pxPerPoint: Double { Double(frameSize.width / slideRect.width) }
 
-    private func framePoint(_ ev: NSEvent) -> CGPoint {
-        let p = convert(ev.locationInWindow, from: nil)
+    private func framePoint(_ ev: NSEvent) -> CGPoint { framePoint(window: ev.locationInWindow) }
+
+    /// Frame-pixel coordinates (y down) of a point given in window coordinates.
+    func framePoint(window wp: CGPoint) -> CGPoint {
+        let p = convert(wp, from: nil)
         let r = slideRect
         return CGPoint(x: (p.x - r.minX) * frameSize.width / r.width,
                        y: (r.maxY - p.y) * frameSize.height / r.height)     // flipped: y down
+    }
+
+    /// The selected object's box as shown right now (live drag included), in frame px.
+    var selectedBox: Box? {
+        guard let s = selection else { return nil }
+        if let e = lineEnds(s) { return Box(x0: min(e[0], e[2]), y0: min(e[1], e[3]), x1: max(e[0], e[2]), y1: max(e[1], e[3])) }
+        return currentBox(s)
+    }
+
+    // MARK: guides dragged in from the rulers
+
+    /// Start dragging a brand-new guide (it begins off the slide, under the pointer on the ruler).
+    func beginGuideDrag(vertical: Bool, pos: Double) {
+        userGuides.append((vertical: vertical, pos: pos))
+        dragGuide = userGuides.count - 1
+    }
+    /// Start dragging an existing guide by its ruler marker.
+    func continueGuideDrag(index: Int) {
+        guard userGuides.indices.contains(index) else { return }
+        dragGuide = index; needsDisplay2()
+    }
+    func updateGuideDrag(pos: Double) {
+        guard let i = dragGuide, userGuides.indices.contains(i) else { return }
+        userGuides[i].pos = pos
+    }
+    /// Drop the dragged guide: gone if it ended off the slide, otherwise kept and saved.
+    func endGuideDrag() {
+        guard let i = dragGuide else { return }
+        dragGuide = nil
+        if userGuides.indices.contains(i) {
+            let g = userGuides[i], limit = g.vertical ? Double(frameSize.width) : Double(frameSize.height)
+            if g.pos < 0 || g.pos > limit { userGuides.remove(at: i) }          // dragged off the slide: gone
+        }
+        needsDisplay2()
+        onGuidesChange?()
     }
 
     /// Current endpoints of a line object (live edit if any).
@@ -354,6 +440,7 @@ final class CanvasView: MTKView {
     }
 
     private func rawBox(_ oid: Int) -> Box? {
+        if let e = inline, e.oid == oid, e.cell == nil { return textEditorBox }
         guard var b = stop?.box(of: oid) else { return nil }
         if let o = overrides[oid] {
             if let rep = o.replacement {
@@ -436,10 +523,41 @@ final class CanvasView: MTKView {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
-        // 2. the slide itself
+        // 2. the slide itself, clipped to its edges
         enc.setViewport(MTLViewport(originX: Double(r.minX * scale), originY: Double((bounds.height - r.maxY) * scale),
                                     width: Double(r.width * scale), height: Double(r.height * scale), znear: 0, zfar: 1))
-        encodeContent(enc)
+        encodeContent(enc, layers: .slide)
+        // 3. objects reaching past the slide show on the pasteboard around it (as in PowerPoint; never presented),
+        // then the editing overlays, unclipped, over the whole view
+        enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(bounds.width * scale), height: Double(bounds.height * scale), znear: 0, zfar: 1))
+        let k = Double(frameSize.width / r.width)                 // frame px per point
+        let whole = SIMD2<Float>(Float(Double(bounds.width) * k), Float(Double(bounds.height) * k))
+        let origin = (Double(r.minX) * k, Double(bounds.height - r.maxY) * k)
+        if reachesOffSlide {
+            let W = Int(bounds.width * scale), H = Int(bounds.height * scale)
+            let x0 = max(0, min(W, Int((r.minX * scale).rounded()))), x1 = max(0, min(W, Int((r.maxX * scale).rounded())))
+            let y0 = max(0, min(H, Int(((bounds.height - r.maxY) * scale).rounded()))), y1 = max(0, min(H, Int(((bounds.height - r.minY) * scale).rounded())))
+            for (x, y, w, h) in [(0, 0, W, y0), (0, y1, W, H - y1), (0, y0, x0, y1 - y0), (x1, y0, W - x1, y1 - y0)] where w > 0 && h > 0 {
+                enc.setScissorRect(MTLScissorRect(x: x, y: y, width: w, height: h))
+                encodeContent(enc, frame: whole, origin: origin, layers: .objects)
+            }
+            enc.setScissorRect(MTLScissorRect(x: 0, y: 0, width: W, height: H))
+        }
+        encodeContent(enc, frame: whole, origin: origin, layers: .overlays)
+    }
+
+    /// Whether anything on this stop (as currently dragged) extends past the slide's edges.
+    private var reachesOffSlide: Bool {
+        guard let stop = stop else { return false }
+        let fw = Double(frameSize.width), fh = Double(frameSize.height)
+        if let g = ghost, g.cx - g.w / 2 < 0 || g.cy - g.h / 2 < 0 || g.cx + g.w / 2 > fw || g.cy + g.h / 2 > fh { return true }
+        for v in stop.visible {
+            guard let b = rawBox(Int(v[0])) else { continue }
+            if b.x0 < 0 || b.y0 < 0 || b.x1 > fw || b.y1 > fh { return true }
+        }
+        for p in lineOverrides.values where min(p[0], p[2]) < 0 || min(p[1], p[3]) < 0 || max(p[0], p[2]) > fw || max(p[1], p[3]) > fh { return true }
+        for sp in stop.sprites where sp.x < 0 || sp.y < 0 || sp.x + sp.w > fw || sp.y + sp.h > fh { return true }
+        return false
     }
 
     /// Render the current content offscreen at the frame's native size (used by --selftest).
@@ -466,13 +584,27 @@ final class CanvasView: MTKView {
         return ctx.makeImage()
     }
 
-    private func encodeContent(_ enc: MTLRenderCommandEncoder) {
-        let frame = SIMD2<Float>(Float(frameSize.width), Float(frameSize.height))
+    /// What one encodeContent call draws: the slide itself (backdrop + objects), only the objects (for the
+    /// pasteboard around the slide, where off-slide parts show), and/or the editing overlays.
+    struct ContentLayers: OptionSet {
+        let rawValue: Int
+        static let slide = ContentLayers(rawValue: 1), objects = ContentLayers(rawValue: 2), overlays = ContentLayers(rawValue: 4)
+    }
+
+    /// Draws the slide's content in frame px. `frame` is the viewport's size and `origin` the slide's top-left
+    /// within it (both frame px); the defaults make the viewport exactly the slide.
+    private func encodeContent(_ enc: MTLRenderCommandEncoder, frame vf: SIMD2<Float>? = nil, origin: (Double, Double) = (0, 0),
+                               layers: ContentLayers = [.slide, .overlays]) {
+        let frame = vf ?? SIMD2<Float>(Float(frameSize.width), Float(frameSize.height))
+        let ox = origin.0, oy = origin.1
+        func shifted(_ p: [Double]) -> SIMD4<Float> { SIMD4(Float(p[0] + ox), Float(p[1] + oy), Float(p[2] + ox), Float(p[3] + oy)) }
 
         let view = colorView, dark = view != .normal
-        func drawTex(_ t: MTLTexture, _ x: Double, _ y: Double, _ w: Double, _ h: Double, alpha: Float = 1, map: Bool = true) {
-            var u = Uniforms(rect: SIMD4(Float(x), Float(y), Float(w), Float(h)), color: SIMD4(1, 1, 1, alpha), frame: frame,
-                             pad: SIMD2(DarkMode.lo, DarkMode.hi))
+        func drawTex(_ t: MTLTexture, _ x: Double, _ y: Double, _ w: Double, _ h: Double, alpha: Float = 1, map: Bool = true,
+                     hole: Box? = nil) {
+            var u = Uniforms(rect: SIMD4(Float(x + ox), Float(y + oy), Float(w), Float(h)), color: SIMD4(1, 1, 1, alpha), frame: frame,
+                             pad: SIMD2(DarkMode.lo, DarkMode.hi),
+                             hole: hole.map { SIMD4(Float($0.x0 + ox), Float($0.y0 + oy), Float($0.x1 + ox), Float($0.y1 + oy)) } ?? .zero)
             enc.setRenderPipelineState(!dark || !map ? texPipe : view == .invert ? invertPipe : darkPipe)
             enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
@@ -480,22 +612,24 @@ final class CanvasView: MTKView {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
         func drawSolid(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ c: SIMD4<Float>) {
-            var u = Uniforms(rect: SIMD4(Float(x), Float(y), Float(w), Float(h)), color: c, frame: frame)
+            var u = Uniforms(rect: SIMD4(Float(x + ox), Float(y + oy), Float(w), Float(h)), color: c, frame: frame)
             enc.setRenderPipelineState(solidPipe)
             enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
             enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
 
-        if let stop = stop {
+        if let stop = stop, !layers.isDisjoint(with: [.slide, .objects]) {
             // the exact frame has object edges blended into the background, so dark mode maps each layer on its own
             // (inverting is linear, but the same path keeps "leave images alone" working)
-            if overrides.isEmpty && lineOverrides.isEmpty && !dark {
+            let slide = layers.contains(.slide)
+            if slide && overrides.isEmpty && lineOverrides.isEmpty && !dark && inline == nil {
                 if let t = texture(path: stop.png) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
             } else {
-                if let t = texture(path: stop.bg) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
+                if slide, let t = texture(path: stop.bg) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
                 for sp in stop.sprites {
-                    if lineOverrides[sp.oid] != nil { continue }
+                    if lineOverrides[sp.oid] != nil || sp.oid == inline?.oid && inline?.cell == nil { continue }
+                    let hole = sp.oid == inline?.oid ? inline?.cell?.area : nil
                     let o = overrides[sp.oid]
                     let map = darkImages || sceneObjects[String(sp.oid)]?.kind != "image"
                     if let o = o, let rep = o.replacement, let b = stop.box(of: sp.oid) {
@@ -510,7 +644,7 @@ final class CanvasView: MTKView {
                         let nx = cx + o.dx + (sp.x - cx) * o.scale, ny = cy + o.dy + (sp.y - cy) * o.scale
                         drawTex(t, nx, ny, sp.w * o.scale, sp.h * o.scale, map: map)
                     } else {
-                        drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map)
+                        drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map, hole: hole)
                     }
                 }
             }
@@ -519,7 +653,7 @@ final class CanvasView: MTKView {
                 let stroke = max(2.0, stop.lines?[String(oid)]?[4] ?? 3)
                 var c = NSColor(hex: sceneObjects[String(oid)]?.color ?? "#FFFFFF")
                 if dark { c = DarkMode.map(c) }
-                var u = Uniforms(rect: SIMD4(Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3])),
+                var u = Uniforms(rect: shifted(p),
                                  color: SIMD4(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), 1),
                                  frame: frame, pad: SIMD2(Float(stroke), 0))
                 enc.setRenderPipelineState(linePipe)
@@ -527,14 +661,15 @@ final class CanvasView: MTKView {
                 enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
-            // overlays
+        }
+        if let stop = stop, layers.contains(.overlays) {
             let th = max(1.0, 1.4 * pxPerPoint)
             func outline(_ b: Box, _ c: SIMD4<Float>, _ t: Double) {
                 drawSolid(b.x0, b.y0, b.w, t, c); drawSolid(b.x0, b.y1 - t, b.w, t, c)
                 drawSolid(b.x0, b.y0, t, b.h, c); drawSolid(b.x1 - t, b.y0, t, b.h, c)
             }
             func segment(_ p: [Double], _ c: SIMD4<Float>, _ stroke: Double) {
-                var u = Uniforms(rect: SIMD4(Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3])), color: c, frame: frame, pad: SIMD2(Float(stroke), 0))
+                var u = Uniforms(rect: shifted(p), color: c, frame: frame, pad: SIMD2(Float(stroke), 0))
                 enc.setRenderPipelineState(linePipe)
                 enc.setVertexBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
                 enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.size, index: 0)
@@ -577,7 +712,7 @@ final class CanvasView: MTKView {
                     }
                     for p in pts {           // round the joints
                         var u = Uniforms2(rect: c, color: c, frame: frame, pad: SIMD2(0, 0),
-                                          geo: SIMD4(Float(Double(p.x) - stroke / 2), Float(Double(p.y) - stroke / 2), Float(stroke), Float(stroke)))
+                                          geo: SIMD4(Float(Double(p.x) - stroke / 2 + ox), Float(Double(p.y) - stroke / 2 + oy), Float(stroke), Float(stroke)))
                         enc.setRenderPipelineState(discPipe)
                         enc.setVertexBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
                         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
@@ -593,6 +728,7 @@ final class CanvasView: MTKView {
                     outline(Box(x0: min(d.0, d.2), y0: min(d.1, d.3), x1: max(d.0, d.2), y1: max(d.1, d.3)), c, th * 1.4)
                 }
             }
+            if let w = wrapBand { outline(w, SIMD4(0.486, 0.361, 1, 1), th * 1.4) }
             if let g = ghost {
                 outline(Box(x0: g.cx - g.w / 2, y0: g.cy - g.h / 2, x1: g.cx + g.w / 2, y1: g.cy + g.h / 2), SIMD4(0.486, 0.361, 1, 1), th * 1.6)
             }
@@ -608,12 +744,16 @@ final class CanvasView: MTKView {
             if let s = selection, let b = currentBox(s) {
                 outline(b, SIMD4(0.486, 0.361, 1, 1), th * 1.6)
                 let hs = 6.5 * pxPerPoint
-                let corners: [(Double, Double)]
+                var corners: [(Double, Double)]
                 if let p = lineEnds(s) { corners = [(p[0], p[1]), (p[2], p[3])] }
                 else { corners = [(b.x0, b.y0), (b.x1, b.y0), (b.x0, b.y1), (b.x1, b.y1)] }
+                if wrappable(s) {
+                    let sb = wrapBand ?? b
+                    corners += [(sb.x0, b.cy), (sb.x1, b.cy)]
+                }
                 for (x, y) in corners {
                     var u = Uniforms2(rect: accentRGB, color: SIMD4(1, 1, 1, 1), frame: frame, pad: SIMD2(0.28, 0),
-                                      geo: SIMD4(Float(x - hs), Float(y - hs), Float(2 * hs), Float(2 * hs)))
+                                      geo: SIMD4(Float(x - hs + ox), Float(y - hs + oy), Float(2 * hs), Float(2 * hs)))
                     enc.setRenderPipelineState(discPipe)
                     enc.setVertexBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
                     enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
@@ -628,8 +768,23 @@ final class CanvasView: MTKView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let t = tracking { removeTrackingArea(t) }
-        tracking = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        tracking = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
         addTrackingArea(tracking!)
+    }
+
+    override func mouseExited(with event: NSEvent) { onCursorMove?(nil) }
+
+    override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
+        s.draggingPasteboard.data(forType: BioCartoonPane.dragType) != nil ? .copy : []
+    }
+    override func draggingUpdated(_ s: NSDraggingInfo) -> NSDragOperation {
+        onCursorMove?(framePoint(window: s.draggingLocation))
+        return s.draggingPasteboard.data(forType: BioCartoonPane.dragType) != nil ? .copy : []
+    }
+    override func draggingExited(_ s: NSDraggingInfo?) { onCursorMove?(nil) }
+    override func performDragOperation(_ s: NSDraggingInfo) -> Bool {
+        guard let d = s.draggingPasteboard.data(forType: BioCartoonPane.dragType) else { return false }
+        return onIconDrop?(d, framePoint(window: s.draggingLocation)) ?? false
     }
 
     private func hit(_ p: CGPoint) -> Int? {
@@ -643,9 +798,16 @@ final class CanvasView: MTKView {
         return best?.0
     }
 
-    private func handleAt(_ p: CGPoint, _ b: Box) -> Handle? {
+    /// Plain text whose string is in the source: its box can be made wider or narrower (re-wrapping it).
+    private func wrappable(_ oid: Int) -> Bool {
+        guard let o = sceneObjects[String(oid)] else { return false }
+        return o.kind == "text" && o.textOk != false && inline?.oid != oid
+    }
+
+    private func handleAt(_ p: CGPoint, _ b: Box, sides: Bool = false) -> Handle? {
         let tol = 9 * pxPerPoint
-        let corners: [(Handle, Double, Double)] = [(.nw, b.x0, b.y0), (.ne, b.x1, b.y0), (.sw, b.x0, b.y1), (.se, b.x1, b.y1)]
+        var corners: [(Handle, Double, Double)] = [(.nw, b.x0, b.y0), (.ne, b.x1, b.y0), (.sw, b.x0, b.y1), (.se, b.x1, b.y1)]
+        if sides { corners += [(.w, b.x0, b.cy), (.e, b.x1, b.cy)] }
         for (h, x, y) in corners where abs(Double(p.x) - x) <= tol && abs(Double(p.y) - y) <= tol { return h }
         return nil
     }
@@ -658,12 +820,16 @@ final class CanvasView: MTKView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        onCursorMove?(framePoint(event))
         if drawTool != nil { NSCursor.crosshair.set(); return }
         if let i = guideAt(framePoint(event)) { (userGuides[i].vertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set(); return }
         let h = hit(framePoint(event))
         if h != hover { hover = h; needsDisplay2() }
-        if let s = selection, let e = lineEnds(s), (0..<2).contains(where: { hypot(Double(framePoint(event).x) - e[$0 * 2], Double(framePoint(event).y) - e[$0 * 2 + 1]) <= 10 * pxPerPoint }) { NSCursor.crosshair.set() }
-        else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), handleAt(framePoint(event), b) != nil { NSCursor.crosshair.set() }
+        let p = framePoint(event), px = Double(p.x), py = Double(p.y), reach: Double = 10 * pxPerPoint
+        if let s = selection, let e = lineEnds(s), (0..<2).contains(where: { i -> Bool in hypot(px - e[i * 2], py - e[i * 2 + 1]) <= reach }) { NSCursor.crosshair.set() }
+        else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let hd = handleAt(framePoint(event), b, sides: wrappable(s)) {
+            (hd.isSide ? NSCursor.resizeLeftRight : NSCursor.crosshair).set()
+        }
         else if h != nil { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
     }
 
@@ -681,7 +847,7 @@ final class CanvasView: MTKView {
             drawBand = (Double(p.x), Double(p.y), Double(p.x), Double(p.y))
             return
         }
-        if event.clickCount == 2, let oid = hit(p) { onSelect?(oid); onEdit?(oid); return }
+        if event.clickCount == 2, let oid = hit(p) { onSelect?(oid); onEdit?(oid, event.locationInWindow); return }
         if let i = guideAt(p) { dragGuide = i; needsDisplay2(); return }
         if let s = selection, let e = lineEnds(s) {
             let tol = 10 * pxPerPoint
@@ -690,8 +856,9 @@ final class CanvasView: MTKView {
                 return
             }
         }
-        if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let h = handleAt(p, b) {
+        if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let h = handleAt(p, b, sides: wrappable(s)) {
             dragStart = p; dragOID = s; dragHandle = h; dragBox = b
+            if h.isSide { wrapBand = b }
             return
         }
         let oid = hit(p)
@@ -703,6 +870,7 @@ final class CanvasView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        onCursorMove?(framePoint(event))
         if drawTool == "pen", let last = penPoints.last {
             let p = framePoint(event)
             if hypot(Double(p.x - last.x), Double(p.y - last.y)) >= 1.5 { penPoints.append(p) }
@@ -744,6 +912,13 @@ final class CanvasView: MTKView {
         }
         guard let s = dragStart, let oid = dragOID, let b = dragBox else { return }
         let p = framePoint(event)
+        if let h = dragHandle, h.isSide {           // the far side stays put; at least a few characters wide
+            var w = b
+            let minW = 24 * pxPerPoint
+            if h == .e { w.x1 = max(b.x0 + minW, Double(p.x)) } else { w.x0 = min(b.x1 - minW, Double(p.x)) }
+            wrapBand = w
+            return
+        }
         var o = overrides[oid] ?? Override()
         if let h = dragHandle {
             _ = h
@@ -794,14 +969,8 @@ final class CanvasView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = [] }
-        if let i = dragGuide, userGuides.indices.contains(i) {
-            dragGuide = nil
-            let g = userGuides[i], limit = g.vertical ? Double(frameSize.width) : Double(frameSize.height)
-            if g.pos < 0 || g.pos > limit { userGuides.remove(at: i) }          // dragged off the slide: gone
-            onGuidesChange?()
-            return
-        }
+        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = []; wrapBand = nil }
+        if dragGuide != nil { endGuideDrag(); return }
         if drawTool == "pen" {
             let pts = CanvasView.simplify(penPoints, tolerance: 1.2)
             penPoints = []
@@ -822,6 +991,10 @@ final class CanvasView: MTKView {
         if dragEnd != nil, let oid = dragOID, let e = lineOverrides[oid] {
             let o = stop?.lines?[String(oid)] ?? e
             if hypot(e[0] - o[0], e[1] - o[1]) + hypot(e[2] - o[2], e[3] - o[3]) > 1 { onEndpoints?(oid, e) } else { lineOverrides[oid] = nil }
+            return
+        }
+        if let h = dragHandle, h.isSide, let oid = dragOID, let b = dragBox, let w = wrapBand {
+            if abs(w.w - b.w) >= 2 { onWrap?(oid, w.w, h == .e ? "right" : "left") }
             return
         }
         guard let oid = dragOID, var o = overrides[oid] else { return }
@@ -862,10 +1035,153 @@ final class CanvasView: MTKView {
         case 124: onNudge?(s, n, 0)
         case 126: onNudge?(s, 0, -n)
         case 125: onNudge?(s, 0, n)
-        case 36: onEdit?(s)
+        case 36: onEdit?(s, nil)
         case 51, 117: onDelete?(s)
         case 53: selection = nil; onSelect?(nil)
         default: super.keyDown(with: event)
         }
+    }
+}
+
+// MARK: inline text editing
+
+/// Borderless editor laid over a Text object: ↵ new line, ⌘↵ or clicking away applies, esc reverts.
+fileprivate final class InlineTextView: NSTextView {
+    var onCommit: (() -> Void)?
+    var onCancel: (() -> Void)?
+    var onBlur: (() -> Void)?
+    var onTab: (() -> Void)?
+    override func insertTab(_ sender: Any?) { if let t = onTab { t() } else { super.insertTab(sender) } }
+    override func insertBacktab(_ sender: Any?) { if let t = onTab { t() } else { super.insertBacktab(sender) } }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "\r" { onCommit?(); return true }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onBlur?() }
+        return accepted
+    }
+}
+
+extension CanvasView: NSTextViewDelegate {
+    private static func editorFont(_ family: String?, bold: Bool, italic: Bool, size: CGFloat) -> NSFont {
+        let traits: NSFontTraitMask = [bold ? .boldFontMask : [], italic ? .italicFontMask : []]
+        for f in [family, "Helvetica"].compactMap({ $0 }) {
+            if let font = NSFontManager.shared.font(withFamily: f, traits: traits, weight: bold ? 9 : 5, size: size) { return font }
+        }
+        return NSFont.systemFont(ofSize: size, weight: bold ? .bold : .regular)
+    }
+
+    /// Start typing into a Text object on the slide, the caret where `at` (window coordinates) falls, or all
+    /// selected. `done` gets the new text (nil: cancelled or unchanged) and a closure that removes the editor;
+    /// call it once the new text's preview is up so the old text never flashes back.
+    /// With `cell`, types into that cell of a table instead (`sizing`: the text its ink shows, when not `text`).
+    func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool, color: String?,
+                       at: CGPoint?, cell: (row: Int, col: Int, cell: Box, ink: Box)? = nil, sizing: String? = nil,
+                       changed: @escaping (String) -> Void,
+                       done: @escaping (String?, @escaping () -> Void) -> Void) -> Bool {
+        if let e = inline { e.view.removeFromSuperview(); inline = nil }
+        guard let b = cell?.ink ?? rawBox(oid), b.w > 0, b.h > 0 else { return false }
+        // size the font so the widest line spans the object's ink width (height when the text is blank)
+        let lines = (sizing ?? text).components(separatedBy: "\n")
+        let ref = CanvasView.editorFont(family, bold: bold, italic: italic, size: 100)
+        let widest = lines.map { ($0 as NSString).size(withAttributes: [.font: ref]).width }.max() ?? 0
+        let lineH = NSLayoutManager().defaultLineHeight(for: ref)
+        let byHeight = 100 * CGFloat(b.h) / (CGFloat(lines.count) * lineH * 0.8)
+        let fontPx = widest > 1 ? min(max(100 * CGFloat(b.w) / widest, byHeight * 0.5), byHeight * 2) : byHeight
+
+        var c = NSColor(hex: color ?? "#FFFFFF").usingColorSpace(.sRGB) ?? .white
+        if colorView != .normal {
+            let (r, g, bl) = DarkMode.map(Float(c.redComponent), Float(c.greenComponent), Float(c.blueComponent), colorView)
+            c = NSColor(srgbRed: CGFloat(r), green: CGFloat(g), blue: CGFloat(bl), alpha: 1)
+        }
+        let tv = InlineTextView(frame: .zero)
+        tv.isRichText = false; tv.allowsUndo = true; tv.drawsBackground = false; tv.focusRingType = .none
+        tv.isAutomaticQuoteSubstitutionEnabled = false; tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticTextReplacementEnabled = false; tv.isAutomaticSpellingCorrectionEnabled = false
+        tv.isContinuousSpellCheckingEnabled = false
+        tv.textContainerInset = .zero
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = false; tv.textContainer?.heightTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(width: 1e6, height: 1e6)
+        tv.isHorizontallyResizable = false; tv.isVerticallyResizable = false
+        tv.textColor = c; tv.insertionPointColor = c
+        tv.string = text
+        tv.delegate = self
+        tv.onCommit = { [weak self] in self?.finishTextEdit(commit: true) }
+        tv.onBlur = { [weak self] in self?.finishTextEdit(commit: true) }
+        tv.onCancel = { [weak self] in self?.finishTextEdit(commit: false) }
+        textEditorChanged = changed
+        // the cell's old text is left out of the table's sprite, its grid lines kept
+        let area = cell.map { c -> Box in
+            let d = max(3, 0.08 * min(c.cell.w, c.cell.h))
+            return Box(x0: c.cell.x0 + d, y0: c.cell.y0 + d, x1: c.cell.x1 - d, y1: c.cell.y1 - d)
+        }
+        if cell != nil { tv.onTab = { [weak self] in self?.finishTextEdit(commit: true) } }
+        inline = InlineEdit(oid: oid, view: tv, center: CGPoint(x: area?.cx ?? b.cx, y: area?.cy ?? b.cy), fontPx: fontPx,
+                            family: family, bold: bold, italic: italic, original: text, done: done,
+                            cell: cell.map { ($0.row, $0.col, area!) })
+        addSubview(tv)
+        layoutTextEditor()
+        setNeedsDisplay(bounds)
+        window?.makeFirstResponder(tv)
+        if let at = at {
+            let i = tv.characterIndexForInsertion(at: tv.convert(at, from: nil))
+            tv.setSelectedRange(NSRange(location: min(max(0, i), (tv.string as NSString).length), length: 0))
+        } else {
+            tv.selectAll(nil)
+        }
+        return true
+    }
+
+    /// Stop typing: hand the text over (or revert); the editor stays, read-only, until `done`'s closure removes it.
+    func finishTextEdit(commit: Bool) {
+        guard let e = inline, let done = e.done else { return }
+        inline?.done = nil
+        e.view.isEditable = false; e.view.isSelectable = false
+        e.view.setSelectedRange(NSRange(location: 0, length: 0))
+        if window?.firstResponder === e.view { window?.makeFirstResponder(self) }
+        let v = e.view.string
+        let release: () -> Void = { [weak self, weak view = e.view] in
+            guard let self = self, let e = self.inline, e.view === view else { return }
+            e.view.removeFromSuperview()
+            self.inline = nil
+            self.setNeedsDisplay(self.bounds)
+        }
+        done(commit && v != e.original ? v : nil, release)
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard let e = inline else { return }
+        layoutTextEditor()
+        setNeedsDisplay(bounds)
+        textEditorChanged?(e.view.string)
+    }
+
+    /// Keep the editor over its object at the current zoom, centred where the re-render will be.
+    fileprivate func layoutTextEditor() {
+        guard let e = inline, let lm = e.view.layoutManager, let tc = e.view.textContainer else { return }
+        let s = effectiveScale
+        let font = CanvasView.editorFont(e.family, bold: e.bold, italic: e.italic, size: max(1, e.fontPx * s))
+        if e.view.font?.pointSize != font.pointSize { e.view.font = font }
+        e.view.typingAttributes[.font] = font
+        lm.ensureLayout(for: tc)
+        let used = lm.usedRect(for: tc)
+        let w = max(used.width, 2) + 2, h = max(used.height, lm.defaultLineHeight(for: font))
+        let r = slideRect
+        let cx = r.minX + e.center.x * s, cy = r.maxY - e.center.y * s
+        let f = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
+        if e.view.frame != f { e.view.frame = f }
+    }
+
+    /// The editor's area in frame px (it stands in for the object's box while typing).
+    fileprivate var textEditorBox: Box? {
+        guard let e = inline else { return nil }
+        let r = slideRect, s = Double(effectiveScale), f = e.view.frame
+        return Box(x0: (Double(f.minX) - Double(r.minX)) / s, y0: (Double(r.maxY) - Double(f.maxY)) / s,
+                   x1: (Double(f.maxX) - Double(r.minX)) / s, y1: (Double(r.maxY) - Double(f.minY)) / s)
     }
 }

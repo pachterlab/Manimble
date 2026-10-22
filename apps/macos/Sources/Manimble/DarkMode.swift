@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import CoreImage
 
 /// How slides are shown (nothing is written to the deck).
@@ -65,6 +66,19 @@ enum DarkMode {
         f.setValue(CGColorSpace(name: CGColorSpace.sRGB)!, forKey: "inputColorSpace")
         guard let out = f.outputImage else { return nil }
         return context.createCGImage(out, from: out.extent, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+    }
+
+    /// Plays a clip through the same map (the animated player).
+    static func videoComposition(for asset: AVAsset) -> AVVideoComposition {
+        let data = cube(mode)                 // built here: the handler runs off the main thread
+        return AVVideoComposition(asset: asset) { req in
+            let f = CIFilter(name: "CIColorCubeWithColorSpace")
+            f?.setValue(req.sourceImage, forKey: kCIInputImageKey)
+            f?.setValue(32, forKey: "inputCubeDimension")
+            f?.setValue(data, forKey: "inputCubeData")
+            f?.setValue(CGColorSpace(name: CGColorSpace.sRGB)!, forKey: "inputColorSpace")
+            req.finish(with: f?.outputImage ?? req.sourceImage, context: nil)
+        }
     }
 
     /// A slide picture as it should be shown right now (mapped in dark mode or with inverted colours).
