@@ -167,6 +167,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.onSelect = { [weak self] oid in self?.selection = oid }
         canvas.onMove = { [weak self] oid, dx, dy in self?.commitMove(oid, dx, dy) }
         canvas.onResize = { [weak self] oid, r in self?.commitResize(oid, r) }
+        canvas.onWrap = { [weak self] oid, w, side in self?.commitWrap(oid, w, side) }
         canvas.onEndpoints = { [weak self] oid, e in self?.commitEndpoints(oid, e) }
         canvas.onEdit = { [weak self] oid, at in self?.beginEdit(oid, at: at) }
         canvas.onNudge = { [weak self] oid, dx, dy in self?.nudgeObject(oid, dx, dy) }
@@ -1574,6 +1575,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func commitResize(_ oid: Int, _ ratio: Double) {
         if canvas.overrides[oid] == nil { canvas.overrides[oid] = Override(scale: ratio) }
         submit { [weak self] in await self?.runEdit(["op": "resize", "oid": oid, "ratio": ratio]) }
+    }
+
+    func commitWrap(_ oid: Int, _ width: Double, _ side: String) {
+        submit { [weak self] in await self?.runEdit(["op": "wrap", "oid": oid, "width": width, "side": side]) }
     }
 
     func nudgeObject(_ oid: Int, _ dx: Double, _ dy: Double) {

@@ -144,7 +144,11 @@ struct Override {
     var replacement: (tex: MTLTexture, w: Double, h: Double)?   // new text/formula raster
 }
 
-enum Handle: Int { case nw, ne, sw, se }
+enum Handle: Int {
+    case nw, ne, sw, se
+    case w, e                 // text box sides: set the wrap width, the font size stays
+    var isSide: Bool { self == .w || self == .e }
+}
 
 /// Metal-drawn slide canvas: exact frame when idle; backdrop + object sprites while editing.
 final class CanvasView: MTKView {
@@ -208,6 +212,8 @@ final class CanvasView: MTKView {
     var onSelect: ((Int?) -> Void)?
     var onMove: ((Int, Double, Double) -> Void)?
     var onResize: ((Int, Double) -> Void)?
+    /// A text box's side was dragged: its new width (frame px) and the side ("left" / "right") that moved.
+    var onWrap: ((Int, Double, String) -> Void)?
     /// Edit an object; for a double-click, the click's window location (where text editing puts the caret).
     var onEdit: ((Int, CGPoint?) -> Void)?
     var onNudge: ((Int, Double, Double) -> Void)?
@@ -234,6 +240,8 @@ final class CanvasView: MTKView {
     private var dragOID: Int?
     private var dragHandle: Handle?
     private var dragBox: Box?
+    /// The text box's outline while a side handle is dragged.
+    private var wrapBand: Box? { didSet { needsDisplay2() } }
     private var dragBase = (dx: 0.0, dy: 0.0)   // the object's previewed offset when this drag began (moves still rendering)
     /// The object being dragged right now, if any.
     var dragging: Int? { dragOID }
@@ -720,6 +728,7 @@ final class CanvasView: MTKView {
                     outline(Box(x0: min(d.0, d.2), y0: min(d.1, d.3), x1: max(d.0, d.2), y1: max(d.1, d.3)), c, th * 1.4)
                 }
             }
+            if let w = wrapBand { outline(w, SIMD4(0.486, 0.361, 1, 1), th * 1.4) }
             if let g = ghost {
                 outline(Box(x0: g.cx - g.w / 2, y0: g.cy - g.h / 2, x1: g.cx + g.w / 2, y1: g.cy + g.h / 2), SIMD4(0.486, 0.361, 1, 1), th * 1.6)
             }
@@ -735,9 +744,13 @@ final class CanvasView: MTKView {
             if let s = selection, let b = currentBox(s) {
                 outline(b, SIMD4(0.486, 0.361, 1, 1), th * 1.6)
                 let hs = 6.5 * pxPerPoint
-                let corners: [(Double, Double)]
+                var corners: [(Double, Double)]
                 if let p = lineEnds(s) { corners = [(p[0], p[1]), (p[2], p[3])] }
                 else { corners = [(b.x0, b.y0), (b.x1, b.y0), (b.x0, b.y1), (b.x1, b.y1)] }
+                if wrappable(s) {
+                    let sb = wrapBand ?? b
+                    corners += [(sb.x0, b.cy), (sb.x1, b.cy)]
+                }
                 for (x, y) in corners {
                     var u = Uniforms2(rect: accentRGB, color: SIMD4(1, 1, 1, 1), frame: frame, pad: SIMD2(0.28, 0),
                                       geo: SIMD4(Float(x - hs + ox), Float(y - hs + oy), Float(2 * hs), Float(2 * hs)))
@@ -785,9 +798,16 @@ final class CanvasView: MTKView {
         return best?.0
     }
 
-    private func handleAt(_ p: CGPoint, _ b: Box) -> Handle? {
+    /// Plain text whose string is in the source: its box can be made wider or narrower (re-wrapping it).
+    private func wrappable(_ oid: Int) -> Bool {
+        guard let o = sceneObjects[String(oid)] else { return false }
+        return o.kind == "text" && o.textOk != false && inline?.oid != oid
+    }
+
+    private func handleAt(_ p: CGPoint, _ b: Box, sides: Bool = false) -> Handle? {
         let tol = 9 * pxPerPoint
-        let corners: [(Handle, Double, Double)] = [(.nw, b.x0, b.y0), (.ne, b.x1, b.y0), (.sw, b.x0, b.y1), (.se, b.x1, b.y1)]
+        var corners: [(Handle, Double, Double)] = [(.nw, b.x0, b.y0), (.ne, b.x1, b.y0), (.sw, b.x0, b.y1), (.se, b.x1, b.y1)]
+        if sides { corners += [(.w, b.x0, b.cy), (.e, b.x1, b.cy)] }
         for (h, x, y) in corners where abs(Double(p.x) - x) <= tol && abs(Double(p.y) - y) <= tol { return h }
         return nil
     }
@@ -807,7 +827,9 @@ final class CanvasView: MTKView {
         if h != hover { hover = h; needsDisplay2() }
         let p = framePoint(event), px = Double(p.x), py = Double(p.y), reach: Double = 10 * pxPerPoint
         if let s = selection, let e = lineEnds(s), (0..<2).contains(where: { i -> Bool in hypot(px - e[i * 2], py - e[i * 2 + 1]) <= reach }) { NSCursor.crosshair.set() }
-        else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), handleAt(framePoint(event), b) != nil { NSCursor.crosshair.set() }
+        else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let hd = handleAt(framePoint(event), b, sides: wrappable(s)) {
+            (hd.isSide ? NSCursor.resizeLeftRight : NSCursor.crosshair).set()
+        }
         else if h != nil { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
     }
 
@@ -834,8 +856,9 @@ final class CanvasView: MTKView {
                 return
             }
         }
-        if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let h = handleAt(p, b) {
+        if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let h = handleAt(p, b, sides: wrappable(s)) {
             dragStart = p; dragOID = s; dragHandle = h; dragBox = b
+            if h.isSide { wrapBand = b }
             return
         }
         let oid = hit(p)
@@ -889,6 +912,13 @@ final class CanvasView: MTKView {
         }
         guard let s = dragStart, let oid = dragOID, let b = dragBox else { return }
         let p = framePoint(event)
+        if let h = dragHandle, h.isSide {           // the far side stays put; at least a few characters wide
+            var w = b
+            let minW = 24 * pxPerPoint
+            if h == .e { w.x1 = max(b.x0 + minW, Double(p.x)) } else { w.x0 = min(b.x1 - minW, Double(p.x)) }
+            wrapBand = w
+            return
+        }
         var o = overrides[oid] ?? Override()
         if let h = dragHandle {
             _ = h
@@ -939,7 +969,7 @@ final class CanvasView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = [] }
+        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = []; wrapBand = nil }
         if dragGuide != nil { endGuideDrag(); return }
         if drawTool == "pen" {
             let pts = CanvasView.simplify(penPoints, tolerance: 1.2)
@@ -961,6 +991,10 @@ final class CanvasView: MTKView {
         if dragEnd != nil, let oid = dragOID, let e = lineOverrides[oid] {
             let o = stop?.lines?[String(oid)] ?? e
             if hypot(e[0] - o[0], e[1] - o[1]) + hypot(e[2] - o[2], e[3] - o[3]) > 1 { onEndpoints?(oid, e) } else { lineOverrides[oid] = nil }
+            return
+        }
+        if let h = dragHandle, h.isSide, let oid = dragOID, let b = dragBox, let w = wrapBand {
+            if abs(w.w - b.w) >= 2 { onWrap?(oid, w.w, h == .e ? "right" : "left") }
             return
         }
         guard let oid = dragOID, var o = overrides[oid] else { return }

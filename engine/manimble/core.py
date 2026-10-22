@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 
 from .srcedit import (BLANK_CELLS, EditError, Planner, Project, Src, _stmt_lines, ensure_helpers, fmt, py_str, py_tex,
-                      remove_kwargs)
+                      remove_kwargs, unwrap_soft, wrap_soft)
 
 HERE = Path(__file__).resolve().parent
 
@@ -83,7 +83,7 @@ class WorkerProc:
 
 # ------------------------------------------------------------------- state
 
-TEXT_OPS = ("text", "font", "color", "style", "table", "delete", "decorate", "highlight", "align", "columns",
+TEXT_OPS = ("text", "wrap", "font", "color", "style", "table", "delete", "decorate", "highlight", "align", "columns",
             "spacing", "clear_format")
 
 
@@ -595,7 +595,19 @@ class Manimble:
             try:
                 if op == "text":
                     label = "edit text" if obj["kind"] == "text" else "edit formula"
-                    attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True)))]
+                    box = self.planner.box_width(obj) if obj["kind"] == "text" else None
+                    if box and before_box:          # a text box: the new text flows to its width
+                        value = self._wrapped(obj, req["value"], box, (before_box[3] - before_box[1]) * ux)
+                        attempts = [(label, self.planner.plan_wrap(obj, value, box))]
+                    else:
+                        attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True)))]
+                elif op == "wrap":
+                    label = "text box width"
+                    if obj["kind"] != "text" or not before_box:
+                        return {"ok": False, "error": "only text can be given a box width"}
+                    box = max(0.05, float(req["width"]) * ux)
+                    value = self._wrapped(obj, obj["value"], box, (before_box[3] - before_box[1]) * ux)
+                    attempts = [("re-wrapped the text", self.planner.plan_wrap(obj, value, box))]
                 elif op == "font":
                     label = "font size"
                     v = float(req["value"])
@@ -705,9 +717,11 @@ class Manimble:
                                 + last_error[-300:] + hint}
                     continue
                 ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy)
+                if ok and op == "wrap":
+                    written, new = self._keep_edge(name, oid, req, stop, before_box, new, ux, uy, written)
                 if ok:
                     held, along = [], []
-                    if op in ("move", "resize", "endpoints", "size", "rotate"):
+                    if op in ("move", "resize", "endpoints", "size", "rotate", "wrap"):
                         written, held, along = self._hold_others(name, oid, obj, data, new["data"], stop, ux, uy, written)
                     self._commit(label if op in TEXT_OPS else f"{label} ({how})", written)
                     msg = how
@@ -735,6 +749,56 @@ class Manimble:
                 fr = e["frames"][-1]
                 last_error += f" (position is set by .{e['method']}() at {fr['file']}:{fr['pos'][0]})"
             return {"ok": False, "error": "Could not apply this change: " + last_error}
+
+    def _wrapped(self, obj: dict, value: str, box: float, shown_w: float) -> str:
+        """`value` word-wrapped to `box` manim units in the object's font. Widths come from the font file,
+        scaled so the text's current widest line measures what it shows on the slide (shown_w)."""
+        from .importer import _font
+        bold = str(obj.get("weight") or "NORMAL").upper() in ("BOLD", "SEMIBOLD", "ULTRABOLD", "HEAVY", "ULTRAHEAVY")
+        italic = str(obj.get("slant") or "NORMAL").upper() in ("ITALIC", "OBLIQUE")
+        ft = _font(obj.get("font") or "Helvetica", bold, italic)
+
+        def ems(line: str) -> float:
+            line = line.rstrip()
+            return ft.getlength(line) / 1000 if ft is not None else len(line) * 0.5
+
+        widest = max((ems(ln) for ln in obj["value"].split("\n")), default=0.0)
+        if widest <= 0 or shown_w <= 0:
+            return value
+        return wrap_soft(value, box * widest / shown_w, ems)
+
+    def _keep_edge(self, name, oid, req, stop, before_box, new, ux, uy, written):
+        """A re-wrapped text box keeps its top edge and the edge opposite the dragged handle where they were."""
+        st = new["data"]["stops"][min(stop, len(new["data"]["stops"]) - 1)]
+        after = next((v for v in st["visible"] if str(v[0]) == oid), None)
+        o = new["data"]["objects"].get(oid)
+        if after is None or o is None:
+            return written, new
+        side = req.get("side", "right")
+        dx = (before_box[3] - after[3]) if side == "left" else (before_box[1] - after[1])
+        dy = before_box[2] - after[2]
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+            return written, new
+        try:
+            plan = next((e for _, e in self.planner.plan_move(o, dx * ux, -dy * uy) if e), None)
+        except EditError:
+            plan = None
+        if not plan:
+            return written, new
+        try:
+            extra = self.project.apply(plan)
+            self._sig_at = 0
+        except Exception:                                  # noqa: BLE001
+            return written, new
+        moved = self.render_now(name, interactive=True)
+        if "error" in moved:
+            self._restore(extra, 0)
+            self.results.pop(name, None)
+            return written, self.render_now(name, interactive=True)
+        merged = dict(written)
+        for rel, (b, a) in extra.items():
+            merged[rel] = (written[rel][0], a) if rel in written else (b, a)
+        return merged, moved
 
     def _hold_others(self, name, oid, obj, data, new_data, stop, ux, uy, written):
         """Keep every other object where it was.
