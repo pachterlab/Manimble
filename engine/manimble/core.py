@@ -17,7 +17,8 @@ import time
 import traceback
 from pathlib import Path
 
-from .srcedit import EditError, Planner, Project, Src, _stmt_lines, fmt, py_str, py_tex, remove_kwargs
+from .srcedit import (BLANK_CELLS, EditError, Planner, Project, Src, _stmt_lines, ensure_helpers, fmt, py_str, py_tex,
+                      remove_kwargs)
 
 HERE = Path(__file__).resolve().parent
 
@@ -323,6 +324,8 @@ class Manimble:
                     self.results[name] = rec
                 (self.cache_dir / name).mkdir(exist_ok=True)
                 (self.cache_dir / name / "data.json").write_text(json.dumps(rec))
+                if "data" in rec and b" sub=1" in self.project.read(s["file"]):
+                    threading.Thread(target=self._sync_sub_count, args=(name,), daemon=True).start()
                 return rec
             finally:
                 self.rendering.discard(name)
@@ -487,6 +490,7 @@ class Manimble:
                 "png": base + st["png"], "bg": base + st["bg"], "visible": st["visible"],
                 "sprites": [dict(sp, file=base + sp["file"]) for sp in st["sprites"]],
                 "lines": st.get("lines", {}),
+                "cells": st.get("cells", {}),
             } for st in data["stops"]],
             "objects": objects,
             "source": self.api_source(name),
@@ -718,7 +722,8 @@ class Manimble:
                                   and o["frames"][-1]["file"] == obj["frames"][-1]["file"])
                         if cnt > 1:
                             sib = cnt
-                    return {"ok": True, "message": msg, "siblings": sib, "changed": self.last_changed}
+                    return {"ok": True, "message": msg, "siblings": sib, "changed": self.last_changed,
+                            "pageNumber": self._touched_page_line(self.last_changed)}
                 last_error = why
                 self._restore(written, 0)
                 self.results.pop(name, None)
@@ -1037,9 +1042,10 @@ class Manimble:
 
     # ------------------------------------------------------- slide numbers
     PAGE_MARK = "# manimble page number"
-    PAGE_RE = re.compile(r"# manimble page number(?: pos=(\w+))?(?: start=(-?\d+))?(?: skip=([01]))?(?: total=([01]))?(?: size=(\d+))?")
+    PAGE_RE = re.compile(r"# manimble page number(?: pos=(\w+))?(?: start=(-?\d+))?(?: skip=([01]))?(?: total=([01]))?(?: size=(\d+))?(?: sub=([01]))?")
     PAGE_PLACES = {"DR": "to_corner(DR, buff=0.35)", "DOWN": "to_edge(DOWN, buff=0.35)", "DL": "to_corner(DL, buff=0.35)"}
-    PAGE_DEFAULTS = {"pos": "DR", "start": 1, "skip": True, "total": True, "size": 24}
+    PAGE_DEFAULTS = {"pos": "DR", "start": 1, "skip": True, "total": True, "size": 24, "sub": False}
+    SUB_RE = re.compile(r" · \d+/\d+$")
 
     @classmethod
     def _page_parse(cls, text: str) -> dict | None:
@@ -1048,7 +1054,8 @@ class Manimble:
             return None
         pos = m.group(1) or "DR"
         return {"pos": pos if pos in cls.PAGE_PLACES else "DR", "start": int(m.group(2) or 1),
-                "skip": m.group(3) == "1", "total": m.group(4) == "1", "size": int(m.group(5) or 24)}
+                "skip": m.group(3) == "1", "total": m.group(4) == "1", "size": int(m.group(5) or 24),
+                "sub": m.group(6) == "1"}
 
     def _page_settings(self) -> dict | None:
         """The slide-number options recorded in the deck's marker comments; None when the deck has no numbers."""
@@ -1061,6 +1068,17 @@ class Manimble:
             if hit:
                 return self._page_parse(hit[2]) or dict(self.PAGE_DEFAULTS)
         return None
+
+    def _touched_page_line(self, changed: dict) -> bool:
+        """Whether an edit's changed lines include a slide-number line (so the app can offer it to every slide)."""
+        if not changed or not changed.get("file"):
+            return False
+        try:
+            lines = self.project.read(changed["file"]).decode("utf-8").split("\n")
+        except Exception:                           # noqa: BLE001
+            return False
+        return any(self.PAGE_MARK in lines[i - 1] for a, b in changed.get("ranges") or []
+                   for i in range(a, b + 1) if 0 < i <= len(lines))
 
     def _page_stmt(self, src, fn):
         """(start, end, text) of the slide-number statement Manimble wrote into construct(), if any."""
@@ -1087,12 +1105,62 @@ class Manimble:
             return False
         return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.6
 
-    def _page_line(self, n: int, total: int, st: dict, src=None, fn=None) -> str:
+    def _sub_label(self, label: str, stops: int) -> str:
+        """`label` with its sub-slide count ("29 / 47 · 1/3") for a slide of `stops` builds; none for a single one."""
+        label = self.SUB_RE.sub("", label)
+        return f"{label} · 1/{stops}" if stops > 1 else label
+
+    def _stop_count(self, name: str) -> int:
+        """The slide's number of builds as last rendered (1 when it has not rendered yet)."""
+        rec = self.results.get(name) or {}
+        return len((rec.get("data") or {}).get("stops") or [None])
+
+    def _page_line(self, n: int, total: int, st: dict, src=None, fn=None, stops: int = 1) -> str:
         label = f"{n} / {total}" if st["total"] else str(n)
+        if st.get("sub"):
+            label = self._sub_label(label, stops)
         font = ", font=FONT" if self._font_const() else ""
         color = '"#333333"' if self._background_is_light(src, fn) else '"#FFFFFF"'
-        return (f"self.add(Text({py_str(label)}, font_size={st['size']}{font}, color={color}).{self.PAGE_PLACES[st['pos']]})"
-                f"  {self.PAGE_MARK} pos={st['pos']} start={st['start']} skip={int(st['skip'])} total={int(st['total'])} size={st['size']}")
+        number = f"Text({py_str(label)}, font_size={st['size']}{font}, color={color}).{self.PAGE_PLACES[st['pos']]}"
+        if st.get("sub"):                           # counts on at every next_slide() (manimble_helpers.py)
+            number = f"sub_slides(self, {number})"
+        return (f"self.add({number})"
+                f"  {self.PAGE_MARK} pos={st['pos']} start={st['start']} skip={int(st['skip'])} total={int(st['total'])}"
+                f" size={st['size']} sub={int(bool(st.get('sub')))}")
+
+    def _sync_sub_count(self, name: str):
+        """A slide whose number counts its sub-slides gained or lost a build: bring the "1/3" in step with the render.
+        Folded into the last undo step when that step wrote this file, so undo/redo keep the two together."""
+        from .srcedit import Edit
+        with self.edit_lock:
+            try:
+                s = self.scene(name)
+                if self.results.get(name, {}).get("key") != self.scene_key(s):
+                    return
+                src, fn = self._construct(s)
+            except Exception:                       # noqa: BLE001
+                return
+            hit = self._page_stmt(src, fn)
+            st = self._page_parse(hit[2]) if hit else None
+            if not st or not st["sub"]:
+                return
+            a, b, text = hit
+            m = re.search(r'Text\("([^"\\]*)"', text)
+            if not m:
+                return
+            want = self._sub_label(m.group(1), self._stop_count(name))
+            if want == m.group(1):
+                return
+            try:
+                written = self.project.apply([Edit(src.rel, a, b, text[:m.start(1)] + want + text[m.end(1):])])
+            except Exception:                       # noqa: BLE001
+                return
+            self._sig_at = 0
+            before, after = written[src.rel]
+            last = self.history[-1]["files"].get(src.rel) if self.history else None
+            if last and last[1] == before:
+                self.history[-1]["files"][src.rel] = (last[0], after)
+        self.enqueue(name, front=True)
 
     def _is_preamble(self, src, st) -> bool:
         """Statements that stay at the top of construct(): docstring, background, slide number, speaker notes."""
@@ -1145,7 +1213,8 @@ class Manimble:
                 src, fn = self._construct(self.scene(n))
             except Exception:                       # noqa: BLE001
                 continue
-            want = None if (st["skip"] and i == 0) else self._page_line(st["start"] + i, total, st, src, fn)
+            want = None if (st["skip"] and i == 0) else self._page_line(st["start"] + i, total, st, src, fn,
+                                                                         self._stop_count(n))
             e = self._page_edit(src, fn, want, rewrite=False)
             if e:
                 edits.append(e)
@@ -1171,7 +1240,9 @@ class Manimble:
 
     def page_numbers(self, req: dict) -> dict:
         """Slide numbers: op=get reads the options; op=set writes `self.add(Text("3 / 10") ...)` into every slide of the
-        show (pos DR|DOWN|DL, start, skip the title slide, show the total, font size); op=remove deletes them."""
+        show (pos DR|DOWN|DL, start, skip the title slide, show the total, font size); op=remove deletes them;
+        op=spread copies `scene`'s number line (moved, restyled) to every numbered slide, each keeping its own label."""
+        from .srcedit import Edit
         op = req.get("op", "get")
         self.refresh_scenes()
         if op == "get":
@@ -1194,18 +1265,55 @@ class Manimble:
                 pos = str(req.get("pos") or "DR").upper()
                 st = {"pos": pos if pos in self.PAGE_PLACES else "DR", "start": int(req.get("start", 1)),
                       "skip": bool(req.get("skip", True)), "total": bool(req.get("total", True)),
-                      "size": max(6, min(200, int(req.get("size", 24) or 24)))}
+                      "size": max(6, min(200, int(req.get("size", 24) or 24))), "sub": bool(req.get("sub", False))}
                 total = st["start"] + len(names) - 1
+                helped = set()
                 for i, n in enumerate(names):
                     try:
                         src, fn = self._construct(self.scene(n))
                     except Exception:               # noqa: BLE001
                         continue
-                    want = None if (st["skip"] and i == 0) else self._page_line(st["start"] + i, total, st, src, fn)
+                    want = None if (st["skip"] and i == 0) else self._page_line(st["start"] + i, total, st, src, fn,
+                                                                                 self._stop_count(n))
                     e = self._page_edit(src, fn, want, rewrite=True)
                     if e:
                         edits.append(e)
+                    if want and st["sub"] and src.rel not in helped:
+                        helped.add(src.rel)
+                        edits += [h for h in ensure_helpers(self.project, src, ["sub_slides"])
+                                  if h.rel == src.rel or not any(x.rel == h.rel for x in edits)]
                 label = "slide numbers"
+            elif op == "spread":
+                try:
+                    src, fn = self._construct(self.scene(req.get("scene")))
+                except Exception:                   # noqa: BLE001
+                    return {"ok": False, "error": "no such slide"}
+                hit = self._page_stmt(src, fn)
+                if not hit:
+                    return {"ok": False, "error": "this slide has no slide number"}
+                template = hit[2].strip()
+                code, mark = template.split(self.PAGE_MARK, 1)
+                fs = re.search(r"font_size=(\d+(?:\.\d+)?)", code)
+                if fs:                              # keep the dialog's font size in step with the restyled number
+                    mark = re.sub(r" size=\d+", f" size={round(float(fs.group(1)))}", mark)
+                template = code + self.PAGE_MARK + mark
+                for n in names:
+                    try:
+                        src, fn = self._construct(self.scene(n))
+                    except Exception:               # noqa: BLE001
+                        continue
+                    old = self._page_stmt(src, fn)
+                    if not old:                     # the skipped title slide stays without a number
+                        continue
+                    a, b, text = old
+                    own = re.search(r'Text\("[^"]*"', text)
+                    if not own:
+                        continue
+                    indent = text[:len(text) - len(text.lstrip(" "))]
+                    new = indent + re.sub(r'Text\("[^"]*"', lambda m: own.group(0), template, count=1) + "\n"
+                    if new != text:
+                        edits.append(Edit(src.rel, a, b, new))
+                label = "slide number style on every slide"
             else:
                 return {"ok": False, "error": f"unknown slide-number operation {op}"}
             if not edits:
@@ -1465,8 +1573,10 @@ class Manimble:
         }
         if kind == "table":
             r, c = max(1, int(req.get("rows", 3))), max(1, int(req.get("cols", 3)))
-            data = "[" + ", ".join("[" + ", ".join(str(i * c + j + 1) for j in range(c)) + "]" for i in range(r)) + "]"
-            codes["table"] = f"MathTable({data}, include_outer_lines=True).scale(0.7).move_to({origin})"
+            words = req.get("style") == "word"         # Table of Paragraphs (plain text) vs MathTable (LaTeX cells)
+            data = "[" + ", ".join("[" + ", ".join('""' for _ in range(c)) + "]" for _ in range(r)) + "]"
+            codes["table"] = (f"{'Table' if words else 'MathTable'}({data}, include_outer_lines=True, "
+                              f"element_to_mobject={BLANK_CELLS['word' if words else 'math']}).scale(0.7).move_to({origin})")
         if kind == "image":
             iw = fmt(w) if drawn else "4"           # drawn / placed: the box's width in manim units
             if preview:

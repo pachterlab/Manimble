@@ -4,16 +4,17 @@ A Slideshow creator that provides a graphical interface for the animations creat
 
 ## Installation
 
-Currently only supports MacOS Silicon. Support for MacOS Intel, Windows, and Linux in development.
+Runs on macOS 13+ on both Apple Silicon and Intel Macs (the app is a universal binary). Support for Windows and Linux in development.
 
 ### Precompiled binary
 
-- Download precompiled binary in [Releases](https://github.com/pachterlab/Manimble/releases)
-- Unzip
-- Move to /Applications
-- To install Python/Manim/TeX dependencies, run: `git clone https://github.com/pachterlab/Manimble.git && cd Manimble && ./setup_python_env.sh`
-- To bypass the unidentified application warning, run: `xattr -dr com.apple.quarantine /Applications/Manimble.app`
+```bash
+curl -L -o /tmp/Manimble-macOS.zip https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip  # Download latest precompiled binary
+ditto -x -k /tmp/Manimble-macOS.zip /Applications/ && rm /tmp/Manimble-macOS.zip  # Unzip and move to Applications
+git clone https://github.com/pachterlab/Manimble.git && cd Manimble && ./setup_python_env.sh  # Install Python/Manim/TeX dependencies
+```
 
+See precompiled binaries in [Releases](https://github.com/pachterlab/Manimble/releases)
 
 ### Compile directly
 

@@ -2,9 +2,9 @@ import AppKit
 import SwiftTerm
 
 private let termBackground = NSColor(srgbRed: 0.098, green: 0.102, blue: 0.125, alpha: 1)
-private let barBackground = NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1)
+let drawerBarBackground = NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1)
 
-private func barButton(_ symbol: String, _ tip: String, _ target: AnyObject, _ sel: Selector) -> NSButton {
+func barButton(_ symbol: String, _ tip: String, _ target: AnyObject, _ sel: Selector) -> NSButton {
     let b = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: tip) ?? NSImage(), target: target, action: sel)
     b.isBordered = false; b.toolTip = tip; b.contentTintColor = NSColor(white: 1, alpha: 0.6)
     b.symbolConfiguration = .init(pointSize: 11, weight: .medium)
@@ -14,87 +14,46 @@ private func barButton(_ symbol: String, _ tip: String, _ target: AnyObject, _ s
 /// One terminal tab: one shell, or several split side by side.
 private final class TerminalTab {
     let panes = GrabSplitView()
+    let number: Int
     var sessions: [TerminalSession] = []
-    init() { panes.isVertical = true; panes.dividerStyle = .thin }
+    weak var lastActive: TerminalSession?
+    init(number: Int) { self.number = number; panes.isVertical = true; panes.dividerStyle = .thin }
 }
 
-/// The docked terminal, VS Code style: tabs of login shells in the working copy of the deck (e.g. `claude` in one,
-/// a plain shell in another), listed vertically on the right once there is more than one; a tab can be split.
+/// The terminals, VS Code style: tabs of login shells in the working copy of the deck (e.g. `claude` in one,
+/// a plain shell in another); a tab can be split. The tabs themselves are listed in the bottom drawer's tab strip.
 final class TerminalPanel: NSView {
-    private let title = NSTextField(labelWithString: "TERMINAL")
-    private let body = GrabSplitView()
     private let content = NSView()
-    private let tabList = NSStackView()
-    private let tabListScroll = NSScrollView()
     private var tabs: [TerminalTab] = []
     private var activeTab: TerminalTab?
     private weak var active: TerminalSession?
     private var directory: String = NSHomeDirectory()
     private var original: String?
     private var focusObservation: NSKeyValueObservation?
+    /// The last shell was killed.
     var onHide: (() -> Void)?
+    /// The tabs, their titles or the active one changed.
+    var onChange: (() -> Void)?
+    /// Buttons acting on the active terminal, shown in the drawer's header while a terminal tab is up.
+    let actions = NSStackView()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = termBackground.cgColor
-
-        // header bar: actions act on the active terminal
-        let bar = NSView(); bar.wantsLayer = true
-        bar.layer?.backgroundColor = barBackground.cgColor
-        title.font = Theme.font(10, .semibold); title.textColor = NSColor(white: 1, alpha: 0.5)
-        title.lineBreakMode = .byTruncatingMiddle
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let claude = NSButton(title: "Run claude", target: self, action: #selector(runClaude))
         claude.bezelStyle = .inline; claude.controlSize = .small; claude.font = Theme.font(11, .medium)
         claude.contentTintColor = Theme.accent
-        let row = NSStackView(views: [
-            title, NSView(), claude,
-            barButton("plus", "New terminal (⇧⌥⌘T)", self, #selector(addPressed)),
-            barButton("square.split.2x1", "Split terminal (⌘\\)", self, #selector(splitPressed)),
-            barButton("arrow.clockwise", "Restart shell", self, #selector(restartPressed)),
-            barButton("trash", "Kill terminal", self, #selector(killPressed)),
-            barButton("chevron.down", "Hide terminal (⌥⌘T)", self, #selector(hidePressed)),
-        ])
-        row.spacing = 10; row.alignment = .centerY
-        row.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(row)
+        for v in [claude,
+                  barButton("square.split.2x1", "Split terminal (⌘\\)", self, #selector(splitPressed)),
+                  barButton("arrow.clockwise", "Restart shell", self, #selector(restartPressed)),
+                  barButton("trash", "Kill terminal", self, #selector(killPressed))] { actions.addArrangedSubview(v) }
+        actions.spacing = 10; actions.alignment = .centerY
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 14), row.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
-            row.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-        ])
-
-        // body: the active tab on the left, the tab list on the right
-        tabList.orientation = .vertical; tabList.alignment = .leading; tabList.spacing = 0
-        tabList.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
-        let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false
-        tabList.translatesAutoresizingMaskIntoConstraints = false
-        doc.addSubview(tabList)
-        tabListScroll.documentView = doc
-        tabListScroll.hasVerticalScroller = true; tabListScroll.drawsBackground = true
-        tabListScroll.backgroundColor = barBackground.withAlphaComponent(0.5)
-        NSLayoutConstraint.activate([
-            tabList.leadingAnchor.constraint(equalTo: doc.leadingAnchor), tabList.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
-            tabList.topAnchor.constraint(equalTo: doc.topAnchor), tabList.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
-            doc.widthAnchor.constraint(equalTo: tabListScroll.contentView.widthAnchor),
-            tabListScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
-        ])
-        tabListScroll.isHidden = true
-        body.isVertical = true; body.dividerStyle = .thin
-        body.addArrangedSubview(content); body.addArrangedSubview(tabListScroll)
-        body.setHoldingPriority(.defaultLow, forSubviewAt: 0)
-        body.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
-
-        let stack = NSStackView(views: [bar, body]); stack.orientation = .vertical; stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        body.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            bar.heightAnchor.constraint(equalToConstant: 28), bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            body.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor), content.trailingAnchor.constraint(equalTo: trailingAnchor),
+            content.topAnchor.constraint(equalTo: topAnchor), content.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -121,7 +80,8 @@ final class TerminalPanel: NSView {
 
     /// Open a new tab with a fresh shell and switch to it.
     func addTab() {
-        let tab = TerminalTab()
+        let used = Set(tabs.map(\.number))
+        let tab = TerminalTab(number: (1...).first { !used.contains($0) }!)
         tabs.append(tab)
         tab.panes.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(tab.panes)
@@ -152,6 +112,7 @@ final class TerminalPanel: NSView {
     private func activate(_ s: TerminalSession, focus: Bool) {
         active = s
         activeTab = tabs.first { $0.sessions.contains { $0 === s } }
+        activeTab?.lastActive = s
         for t in tabs { t.panes.isHidden = t !== activeTab }
         refresh()
         if focus { DispatchQueue.main.async { s.focus() } }
@@ -178,29 +139,28 @@ final class TerminalPanel: NSView {
         if let n = next { activate(n, focus: true) } else { active = nil; activeTab = nil; refresh(); onHide?() }
     }
 
-    /// Rebuild the header title, the split highlight and the tab list.
+    /// Mark the active split and tell the drawer to redraw its tabs.
     private func refresh() {
-        title.stringValue = "TERMINAL" + (active.map { $0.shellTitle.isEmpty ? "" : "  ·  " + $0.shellTitle } ?? "")
         for t in tabs { for s in t.sessions { s.highlighted = t.sessions.count > 1 && s === active } }
-        tabList.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for t in tabs {
-            for (i, s) in t.sessions.enumerated() {
-                // split tabs are grouped with tree lines, as in VS Code
-                let n = t.sessions.count
-                let group: TerminalTabRow.Group = n == 1 ? .none : i == 0 ? .first : i == n - 1 ? .last : .middle
-                let row = TerminalTabRow(group: group, selected: s === active,
-                                         onSelect: { [weak self, weak s] in if let s = s { self?.activate(s, focus: true) } },
-                                         onClose: { [weak self, weak s] in if let s = s { self?.kill(s) } })
-                tabList.addArrangedSubview(row)
-                row.widthAnchor.constraint(equalTo: tabList.widthAnchor).isActive = true
-            }
-        }
-        let showList = allSessions.count > 1
-        if showList == tabListScroll.isHidden {
-            tabListScroll.isHidden = !showList
-            body.adjustSubviews()
-            if showList { body.setPosition(body.bounds.width - 72, ofDividerAt: 0) }
-        }
+        onChange?()
+    }
+
+    // MARK: tabs, for the drawer's tab strip
+
+    /// "Terminal 1", "Terminal 2", … with the shell's own title as a tooltip.
+    var tabTitles: [(title: String, tip: String)] {
+        tabs.map { t in ("Terminal \(t.number)" + (t.sessions.count > 1 ? " ×\(t.sessions.count)" : ""),
+                         t.sessions.map(\.shellTitle).filter { !$0.isEmpty }.joined(separator: "  ·  ")) }
+    }
+    var activeTabIndex: Int? { activeTab.flatMap { a in tabs.firstIndex { $0 === a } } }
+    func selectTab(_ i: Int) {
+        guard tabs.indices.contains(i) else { return }
+        if let s = tabs[i].lastActive ?? tabs[i].sessions.first { activate(s, focus: true) }
+    }
+    /// Kill every shell of a tab.
+    func closeTab(_ i: Int) {
+        guard tabs.indices.contains(i) else { return }
+        for s in tabs[i].sessions.reversed() { kill(s) }
     }
 
     var hasStarted: Bool { !tabs.isEmpty }
@@ -211,11 +171,9 @@ final class TerminalPanel: NSView {
     func focus() { active?.focus() }
 
     @objc private func runClaude() { active?.type("claude\r"); active?.focus() }
-    @objc private func addPressed() { addTab() }
     @objc private func splitPressed() { splitActive() }
     @objc private func restartPressed() { active?.start(in: directory, original: original); active?.focus() }
     @objc private func killPressed() { if let a = active { kill(a) } }
-    @objc private func hidePressed() { onHide?() }
 }
 
 private extension NSSplitView {
@@ -226,70 +184,6 @@ private extension NSSplitView {
         let w = bounds.width - dividerThickness * CGFloat(n - 1)
         for i in 0..<(n - 1) { setPosition(w * CGFloat(i + 1) / CGFloat(n) + dividerThickness * CGFloat(i), ofDividerAt: i) }
     }
-}
-
-/// A row in the tab list: a terminal icon and a close button.
-private final class TerminalTabRow: NSView {
-    private let onSelect: () -> Void
-    private let onClose: () -> Void
-    private let close: NSButton
-    private let selected: Bool
-    private let group: Group
-    private var tracking: NSTrackingArea?
-    enum Group { case none, first, middle, last }
-
-    init(group: Group, selected: Bool, onSelect: @escaping () -> Void, onClose: @escaping () -> Void) {
-        self.onSelect = onSelect; self.onClose = onClose; self.selected = selected; self.group = group
-        close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Kill terminal") ?? NSImage(), target: nil, action: nil)
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.backgroundColor = selected ? Theme.accentSoft.cgColor : NSColor.clear.cgColor
-        let icon = NSImageView(image: NSImage(systemSymbolName: "terminal", accessibilityDescription: nil) ?? NSImage())
-        icon.symbolConfiguration = .init(pointSize: 12, weight: .regular)
-        icon.contentTintColor = NSColor(white: 1, alpha: selected ? 0.85 : 0.5)
-        close.isBordered = false; close.toolTip = "Kill terminal"; close.contentTintColor = NSColor(white: 1, alpha: 0.6)
-        close.symbolConfiguration = .init(pointSize: 9, weight: .medium)
-        close.target = self; close.action = #selector(closePressed)
-        close.isHidden = !selected
-        for v in [icon, close] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 26),
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: group == .none ? 12 : 20),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), close.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        if selected {   // accent bar on the left edge of the active row
-            let edge = NSView(); edge.wantsLayer = true; edge.layer?.backgroundColor = Theme.accent.cgColor
-            edge.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(edge)
-            NSLayoutConstraint.activate([
-                edge.leadingAnchor.constraint(equalTo: leadingAnchor), edge.widthAnchor.constraint(equalToConstant: 2),
-                edge.topAnchor.constraint(equalTo: topAnchor), edge.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ])
-        }
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    // split tabs only: the tree line grouping the tab's terminals
-    override func draw(_ dirtyRect: NSRect) {
-        guard group != .none else { return }
-        let x: CGFloat = 10, mid = bounds.midY
-        let top = group == .first ? mid : bounds.maxY, bottom = group == .last ? mid : bounds.minY
-        NSColor(white: 1, alpha: 0.3).setFill()
-        NSRect(x: x, y: bottom, width: 1, height: top - bottom).fill()
-        if group != .middle { NSRect(x: x, y: mid, width: 5, height: 1).fill() }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let t = tracking { removeTrackingArea(t) }
-        tracking = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self)
-        addTrackingArea(tracking!)
-    }
-    override func mouseEntered(with event: NSEvent) { close.isHidden = false }
-    override func mouseExited(with event: NSEvent) { close.isHidden = !selected }
-    override func mouseDown(with event: NSEvent) { onSelect() }
-    @objc private func closePressed() { onClose() }
 }
 
 /// One shell. In a split tab the active one is marked by an accent line along its top.

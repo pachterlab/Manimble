@@ -9,11 +9,41 @@ struct BCIcon: Codable, Equatable {
     var source_name: String?
     var credit: String?
     var license: String?
-    var category: String?
+    var category: String?       // the database's own categories, ", " between several
+    var author: String?
     var url: String?            // a web URL, or a local path for the user's own uploads
     var png_local: String?
     var width: Double?
     var height: Double?
+
+    /// The database the icon is listed under: BioCartoon's own drawings are uploads (source `user`) by "BioCartoon".
+    var database: String { source == "user" && author == "BioCartoon" ? "biocartoon" : source }
+}
+
+/// A category of BioCartoon's taxonomy (`biocartoon --categories --json`); a slug with a dot is a subcategory.
+struct BCCategory: Decodable {
+    var slug: String
+    var name: String
+    var icons: Int?
+}
+
+/// How many icons each filter choice finds under the search words and the other filters (`biocartoon search --facets --json`):
+/// a choice isn't counted under its own dropdown, so picking one leaves the others of that dropdown listed.
+struct BCFacets: Decodable {
+    struct Row: Decodable {
+        var source: String?
+        var license: String?
+        var slug: String?
+        var category: String?
+        var icons: Int
+    }
+    var sources: [Row]
+    var licenses: [Row]
+    var categories: [Row]
+    var db_categories: [Row]
+
+    func source(_ key: String) -> Int { sources.first { $0.source == key }?.icons ?? 0 }
+    func taxon(_ slug: String) -> Int { categories.first { $0.slug == slug }?.icons ?? 0 }
 }
 
 /// A collection of the catalog (`biocartoon --sources --json`).
@@ -78,14 +108,83 @@ enum BioCartoonCLI {
         try await Task.detached(priority: .userInitiated) { try runSync(exe, args, timeout: timeout) }.value
     }
 
-    static func search(_ exe: String, query: String, source: String?, sort: String, offset: Int, limit: Int) async throws -> [BCIcon] {
+    /// The first version whose `search` takes the author, category, DB-category and license filters and counts their
+    /// choices (`--facets`).
+    static let filtersSince = "0.3.1"
+
+    /// `biocartoon --version --json`: the program's version ("0.3.0").
+    static func version(_ exe: String) async throws -> String {
+        struct V: Decodable { var version: String }
+        return try JSONDecoder().decode(V.self, from: try await run(exe, ["--version", "--json"])).version
+    }
+
+    /// One page of `biocartoon search` keeping what passes `filter` (each option repeated per value; 0.3.0+).
+    static func search(_ exe: String, query: String, filter: BCFilter, sort: String, offset: Int, limit: Int) async throws -> [BCIcon] {
         var args = ["search"]
         if !query.isEmpty { args.append(query) }
         args += ["--icons", "--no-sql", "--json", "--limit", String(limit), "--offset", String(offset), "--sort", sort]
-        if let s = source { args += ["--source", s] }
         struct Hits: Decodable { var icons: [BCIcon]? }
         // the first search downloads the catalog, so it may take a while
-        return try JSONDecoder().decode(Hits.self, from: try await run(exe, args, timeout: 300)).icons ?? []
+        return try JSONDecoder().decode(Hits.self, from: try await run(exe, args + filterArgs(filter), timeout: 300)).icons ?? []
+    }
+
+    /// `search`'s options for what passes `filter`.
+    private static func filterArgs(_ filter: BCFilter) -> [String] {
+        var args: [String] = []
+        for s in filter.sources.sorted() { args += ["--source", s] }
+        for a in filter.authorParts { args += ["--author", a] }
+        for c in filter.categories.sorted() { args += ["--category", c] }
+        for s in filter.subcategories.sorted() { args += ["--subcategory", s] }
+        for k in filter.dbCats.sorted() { let d = BCFilter.split(k); args += ["--db-category", "\(d.database):\(d.category)"] }
+        for l in filter.licenses.sorted() { args += ["--license", l] }
+        return args
+    }
+
+    /// How many icons each dropdown's choices find under `query` and the other filters (`search --facets`, 0.3.1+).
+    static func facets(_ exe: String, query: String, filter: BCFilter) async throws -> BCFacets {
+        var args = ["search"]
+        if !query.isEmpty { args.append(query) }
+        args += ["--facets", "--icons", "--no-sql", "--json"]
+        return try JSONDecoder().decode(BCFacets.self, from: try await run(exe, args + filterArgs(filter)))
+    }
+
+    static func categories(_ exe: String) async throws -> [BCCategory] {
+        try JSONDecoder().decode([BCCategory].self, from: try await run(exe, ["--categories", "--json"]))
+    }
+
+    /// Each database's own categories with their icon counts (`biocartoon --db-categories --json`).
+    static func dbCategories(_ exe: String) async throws -> [(database: String, category: String, count: Int)] {
+        struct Row: Decodable { var source: String; var category: String; var icons: Int? }
+        return try JSONDecoder().decode([Row].self, from: try await run(exe, ["--db-categories", "--json"]))
+            .map { ($0.source, $0.category, $0.icons ?? 0) }
+    }
+
+    /// A value of a `search --sql` row.
+    enum SQLValue: Decodable {
+        case string(String), number(Double), null
+        init(from d: Decoder) throws {
+            let c = try d.singleValueContainer()
+            if c.decodeNil() { self = .null }
+            else if let n = try? c.decode(Double.self) { self = .number(n) }
+            else if let b = try? c.decode(Bool.self) { self = .number(b ? 1 : 0) }
+            else { self = .string(try c.decode(String.self)) }
+        }
+        var string: String {
+            switch self { case .string(let s): return s; case .number(let n): return String(Int(n)); case .null: return "" }
+        }
+        var int: Int { if case .number(let n) = self { return Int(n) }; return 0 }
+    }
+
+    /// One read-only statement on the catalog (`search --sql`): its rows.
+    static func sql(_ exe: String, _ statement: String, maxRows: Int = 4000) async throws -> [[SQLValue]] {
+        struct Result: Decodable { var rows: [[SQLValue]] }
+        return try JSONDecoder().decode(Result.self, from: try await run(exe, ["search", statement, "--sql", "--json", "--max-rows", String(maxRows)])).rows
+    }
+
+    /// The licenses in the catalog with their icon counts (one per drawing: colour variants count once), for the License dropdown.
+    static func licenseCounts(_ exe: String) async throws -> [(String, Int)] {
+        try await sql(exe, "SELECT a.license, count(DISTINCT coalesce(a.grp, a.source || '/' || a.title)) FROM assets a WHERE a.png_key IS NOT NULL GROUP BY a.license ORDER BY a.license")
+            .compactMap { r in r.count == 2 && !r[0].string.isEmpty ? (r[0].string, r[1].int) : nil }
     }
 
     static func sources(_ exe: String) async throws -> [BCSource] {
@@ -120,9 +219,9 @@ enum BioCartoonCLI {
         return r.size
     }
 
-    /// `pip install biocartoon` into Manimble's Python environment.
+    /// `pip install --upgrade biocartoon` into Manimble's Python environment.
     static func install() async throws {
-        _ = try await run(python, ["-m", "pip", "install", "--disable-pip-version-check", "biocartoon"], timeout: 600)
+        _ = try await run(python, ["-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "biocartoon"], timeout: 600)
     }
 
     /// Badge colours of the BioCartoon app, one per collection.
@@ -136,6 +235,7 @@ enum BioCartoonCLI {
         case "reactome": return NSColor(hex: "#C0392B")
         case "openmoji": return NSColor(hex: "#F1C40F")
         case "biocartoon": return Theme.warm
+        case "user": return NSColor(hex: "#607D8B")
         default: return NSColor(hex: "#9E9E9E")
         }
     }
@@ -216,7 +316,7 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
     func show(_ icon: BCIcon, code: String) {
         self.icon = icon
         badge.stringValue = code
-        badge.backgroundColor = BioCartoonCLI.badgeColor(icon.source)
+        badge.backgroundColor = BioCartoonCLI.badgeColor(icon.database)
         badge.isHidden = code.isEmpty
         var tip = icon.title
         if let c = icon.category, !c.isEmpty { tip += "\n" + c }
@@ -242,7 +342,7 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
                   hypot(e.locationInWindow.x - start.x, e.locationInWindow.y - start.y) > 4 else { return }
             o.downAt = nil
             let item = NSPasteboardItem()
-            item.setData((try? JSONEncoder().encode(icon)) ?? Data(), forType: BioCartoonPanel.dragType)
+            item.setData((try? JSONEncoder().encode(icon)) ?? Data(), forType: BioCartoonPane.dragType)
             let drag = NSDraggingItem(pasteboardWriter: item)
             let img = o.thumb.image ?? BioCartoonCLI.logo
             let side: CGFloat = 96
@@ -263,18 +363,111 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
     }
 }
 
-/// The BioCartoon icon search (Insert ▸ BioCartoon Icons…): a floating panel laid out like the BioCartoon editor's
-/// search sidebar, backed by the `biocartoon` command line.
+/// What the filter dropdowns keep (the funnel of the BioCartoon editor's search), as `biocartoon search` takes them: each
+/// one keeps what matches any of its entries (none keeps everything), and an icon has to pass all of them.
+struct BCFilter: Equatable {
+    var sources: Set<String> = []        // databases, by key ("bioart")
+    var authors = ""                      // parts of names, commas between
+    var categories: Set<String> = []     // taxonomy slugs ("cells")
+    var subcategories: Set<String> = []  // subcategory slugs ("cells.cell_types")
+    var dbCats: Set<String> = []          // a database's own categories, as `key(_:_:)` makes them
+    var licenses: Set<String> = []
+
+    var authorParts: [String] {
+        authors.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+    }
+    var isEmpty: Bool {
+        sources.isEmpty && authorParts.isEmpty && categories.isEmpty && subcategories.isEmpty && dbCats.isEmpty && licenses.isEmpty
+    }
+
+    static func key(_ database: String, _ category: String) -> String { database + "\t" + category }
+    static func split(_ key: String) -> (database: String, category: String) {
+        let p = key.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+        return (String(p[0]), p.count > 1 ? String(p[1]) : "")
+    }
+}
+
+/// A dropdown whose entries tick on and off, titled with what is picked ("Any" when nothing is).
+final class BCMultiPopup: NSPopUpButton {
+    private(set) var picked: Set<String> = []
+    private var names: [String: String] = [:]
+    var onChange: (() -> Void)?
+
+    override init(frame: NSRect, pullsDown: Bool) {
+        super.init(frame: frame, pullsDown: true)
+        controlSize = .small
+        font = Theme.font(11)
+        menu?.autoenablesItems = false
+        target = self; action = #selector(toggled)
+        setChoices([])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// (key, name, icon count) in display order; picks of keys no longer offered are dropped.
+    func setChoices(_ choices: [(key: String, name: String, count: Int?)]) {
+        removeAllItems()
+        addItem(withTitle: "Any")          // the pull-down's title slot
+        names = [:]
+        for c in choices {
+            let item = NSMenuItem(title: c.count.map { "\(c.name) (\(NumberFormatter.localizedString(from: NSNumber(value: $0), number: .decimal)))" } ?? c.name,
+                                  action: nil, keyEquivalent: "")
+            item.representedObject = c.key
+            menu?.addItem(item)
+            names[c.key] = c.name
+        }
+        picked = picked.filter { names[$0] != nil }
+        refreshTitle()
+    }
+
+    func clear() { picked = []; refreshTitle() }
+    func pick(_ keys: Set<String>) { picked = keys.filter { names[$0] != nil }; refreshTitle() }
+
+    @objc private func toggled() {
+        guard let k = selectedItem?.representedObject as? String else { return }
+        if picked.contains(k) { picked.remove(k) } else { picked.insert(k) }
+        refreshTitle()
+        onChange?()
+    }
+
+    private func refreshTitle() {
+        var shown: [String] = []
+        for item in itemArray.dropFirst() {
+            let k = item.representedObject as? String ?? ""
+            item.state = picked.contains(k) ? .on : .off
+            if picked.contains(k) { shown.append(names[k] ?? k) }
+        }
+        item(at: 0)?.title = shown.isEmpty ? "Any" : shown.joined(separator: ", ")
+        synchronizeTitleAndSelectedItem()
+    }
+}
+
+/// A view painted in the window's background colour: the pane sits where the inspector's scroll view, which paints its own, was.
+final class BCBackdrop: NSView {
+    override func draw(_ r: NSRect) { NSColor.windowBackgroundColor.setFill(); r.fill() }
+}
+
+/// The BioCartoon icon search (Insert ▸ BioCartoon Icons…), shown in the inspector's place: the BioCartoon
+/// editor's search sidebar, backed by the `biocartoon` command line.
 @MainActor
-final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchFieldDelegate, NSWindowDelegate {
+final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegateFlowLayout, NSSearchFieldDelegate {
     static let dragType = NSPasteboard.PasteboardType("com.manimble.biocartoon-icon")
-    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 352, height: 640),
-                        styleMask: [.titled, .closable, .resizable, .utilityWindow, .fullSizeContentView], backing: .buffered, defer: false)
+    let view: NSView = BCBackdrop()
     /// Insert an icon at the slide's centre (a click on its tile).
     var onInsert: ((BCIcon) -> Void)?
+    /// The × in the corner: back to the inspector.
+    var onClose: (() -> Void)?
 
     private let search = NSSearchField()
-    private let sourceBar = NSSegmentedControl()
+    private let funnel = NSButton()
+    private let filterBox = NSBox()
+    private let summary = NSTextField(wrappingLabelWithString: "")
+    private let dbPopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let authorField = NSTextField()
+    private let catPopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let subPopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let dbCatPopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let licensePopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let clearButton = NSButton(title: "Clear filters", target: nil, action: nil)
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let status = NSTextField(labelWithString: "")
     private let installButton = NSButton(title: "Install BioCartoon", target: nil, action: nil)
@@ -282,9 +475,20 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
     private let scroll = NSScrollView()
     private let creditLabel = NSTextField(wrappingLabelWithString: "")
     private let copyCredit = NSButton(title: "Copy credit", target: nil, action: nil)
+    private var creditBox: NSStackView!
 
     private(set) var exe: String?
+    private var filtersSupported = true     // a `biocartoon` from before 0.3.1 has no filter options (or their counts)
     private var sources: [BCSource] = []
+    private var categories: [BCCategory] = []
+    private var dbCategories: [(database: String, category: String, count: Int)] = []
+    private var licenses: [(String, Int)] = []
+    /// The dropdowns' counts under the search and the filters (nil until they come: the whole catalog's counts then),
+    /// and the search and filters they are for (or loading for).
+    private(set) var facets: BCFacets?
+    private var facetsFor: (query: String, filter: BCFilter)?
+    private var facetsRequest = 0, facetsAnswered = 0
+    private(set) var filter = BCFilter()
     private var results: [BCIcon] = []
     private var more = false
     private var loading = false
@@ -295,37 +499,79 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
 
     override init() {
         super.init()
-        panel.title = "BioCartoon"
-        panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = true
-        panel.becomesKeyOnlyIfNeeded = false
-        panel.minSize = NSSize(width: 300, height: 360)
-        panel.setFrameAutosaveName("manimble.biocartoon")
-        panel.delegate = self
-
         let logo = NSImageView(image: BioCartoonCLI.logo)
-        logo.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        logo.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        let heading = NSTextField(labelWithString: "Search BioCartoon")
-        heading.font = Theme.font(13, .semibold)
-        let head = NSStackView(views: [logo, heading]); head.spacing = 7
+        logo.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        logo.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        let heading = NSTextField(labelWithString: "BioCartoon")
+        heading.font = Theme.font(14, .semibold)
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close") ?? NSImage(),
+                             target: self, action: #selector(closePressed))
+        close.isBordered = false
+        close.contentTintColor = .tertiaryLabelColor
+        close.toolTip = "Back to the inspector"
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let head = NSStackView(views: [logo, heading, spacer, close]); head.spacing = 7
 
         search.placeholderString = "Search icons (cell, neuron, mouse…)"
         search.delegate = self
         search.sendsSearchStringImmediately = false
         search.target = self; search.action = #selector(searchSubmitted)
+        search.setContentHuggingPriority(.init(1), for: .horizontal)
+        funnel.image = NSImage(systemSymbolName: "line.3.horizontal.decrease.circle", accessibilityDescription: "Filters")
+        funnel.isBordered = false
+        funnel.imageScaling = .scaleProportionallyDown
+        funnel.target = self; funnel.action = #selector(funnelPressed)
+        funnel.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        let searchRow = NSStackView(views: [search, funnel]); searchRow.spacing = 2
 
-        sourceBar.segmentStyle = .roundRect
-        sourceBar.controlSize = .small
-        sourceBar.trackingMode = .selectOne
-        sourceBar.target = self; sourceBar.action = #selector(filterChanged)
-        setSources([])
+        summary.font = Theme.font(10); summary.textColor = .secondaryLabelColor
+        summary.maximumNumberOfLines = 2
+        summary.isHidden = true
+
+        // the filters, laid out like the BioCartoon editor's: a label and a dropdown per row
+        for p in [dbPopup, subPopup, dbCatPopup, licensePopup] { p.onChange = { [weak self] in self?.filtersEdited() } }
+        catPopup.onChange = { [weak self] in self?.categoriesEdited() }
+        authorField.placeholderString = "Any (commas for several)"
+        authorField.font = Theme.font(11); authorField.controlSize = .small
+        authorField.delegate = self
+        let dbCatLabel = fieldLabel("DB category")
+        dbCatLabel.toolTip = "A database's own categories, by its code (BA: NIAID NIH BioArt, …)"
+        let rows: [[NSView]] = [[fieldLabel("Database"), dbPopup], [fieldLabel("Author"), authorField], [fieldLabel("Category"), catPopup],
+                                [fieldLabel("Subcategory"), subPopup], [dbCatLabel, dbCatPopup], [fieldLabel("License"), licensePopup]]
+        for r in rows { r[1].setContentHuggingPriority(.init(1), for: .horizontal) }
+        let table = NSGridView(views: rows)
+        table.rowSpacing = 6; table.columnSpacing = 8
+        table.column(at: 0).width = 78
+        table.column(at: 1).xPlacement = .fill
+        table.rowAlignment = .none
+        for r in 0..<table.numberOfRows { table.row(at: r).yPlacement = .center }
+        table.translatesAutoresizingMaskIntoConstraints = false
+        clearButton.controlSize = .small; clearButton.bezelStyle = .rounded
+        clearButton.target = self; clearButton.action = #selector(clearFilters)
+        clearButton.isHidden = true
+        let filterStack = NSStackView(views: [table, clearButton])
+        filterStack.orientation = .vertical; filterStack.alignment = .leading; filterStack.spacing = 8
+        filterStack.translatesAutoresizingMaskIntoConstraints = false
+        filterBox.boxType = .custom; filterBox.cornerRadius = 8; filterBox.borderWidth = 0
+        filterBox.fillColor = .quaternaryLabelColor
+        filterBox.contentViewMargins = .zero
+        if let cv = filterBox.contentView {
+            cv.addSubview(filterStack)
+            NSLayoutConstraint.activate([
+                filterStack.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 10), filterStack.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -10),
+                filterStack.topAnchor.constraint(equalTo: cv.topAnchor, constant: 8), filterStack.bottomAnchor.constraint(equalTo: cv.bottomAnchor, constant: -8),
+                table.widthAnchor.constraint(equalTo: filterStack.widthAnchor),
+            ])
+        }
+        filterBox.isHidden = true
+        setSources([]); setCategories([]); setLicenses([]); setDbCategories([])
 
         sortPopup.controlSize = .small
         sortPopup.font = Theme.font(11)
         sortPopup.addItems(withTitles: Self.sorts.map { $0.0 })
         sortPopup.selectItem(at: max(0, Self.sorts.firstIndex { $0.1 == UserDefaults.standard.string(forKey: "biocartoonSort") } ?? 0))
-        sortPopup.target = self; sortPopup.action = #selector(filterChanged)
+        sortPopup.target = self; sortPopup.action = #selector(sortChanged)
         status.font = Theme.font(11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -341,6 +587,7 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
         layout.sectionInset = NSEdgeInsets(top: 2, left: 0, bottom: 12, right: 0)
         grid.collectionViewLayout = layout
         grid.dataSource = self
+        grid.delegate = self
         grid.isSelectable = false
         grid.backgroundColors = [.clear]
         grid.register(BCTile.self, forItemWithIdentifier: BCTile.id)
@@ -348,7 +595,9 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.contentView.postsBoundsChangedNotifications = true
+        scroll.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(resized), name: NSView.frameDidChangeNotification, object: scroll)
 
         creditLabel.font = Theme.font(10); creditLabel.textColor = .secondaryLabelColor
         creditLabel.maximumNumberOfLines = 3
@@ -360,34 +609,27 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
         creditBox.isHidden = true
         self.creditBox = creditBox
 
-        let stack = NSStackView(views: [head, search, sourceBar, sortRow, installButton, scroll, creditBox])
+        let stack = NSStackView(views: [head, searchRow, summary, filterBox, sortRow, installButton, scroll, creditBox])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 36, left: 14, bottom: 12, right: 14)
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for v in [search, sourceBar, sortRow, scroll, creditBox] as [NSView] {
+        for v in [head, searchRow, summary, filterBox, sortRow, scroll, creditBox] as [NSView] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true
         }
-        creditLabel.preferredMaxLayoutWidth = 320
+        creditLabel.preferredMaxLayoutWidth = 300
+        summary.preferredMaxLayoutWidth = 300
         stack.setHuggingPriority(.defaultLow, for: .vertical)
         scroll.setContentHuggingPriority(.init(1), for: .vertical)
-        let content = NSView()
-        content.addSubview(stack)
+        view.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor), stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: content.topAnchor), stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-        panel.contentView = content
     }
-    private var creditBox: NSStackView!
 
-    /// Show the panel next to `window` and get the command line ready.
-    func show(beside window: NSWindow?) {
-        if !panel.isVisible, let w = window, UserDefaults.standard.string(forKey: "NSWindow Frame manimble.biocartoon") == nil {
-            let f = w.frame
-            panel.setFrame(NSRect(x: f.minX + 12, y: f.maxY - 80 - 640, width: 352, height: 640), display: false)
-        }
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(search)
+    /// The pane came into view: focus the search box and get the command line ready.
+    func activate(in window: NSWindow?) {
+        window?.makeFirstResponder(search)
         if exe == nil { locate() }
     }
 
@@ -396,14 +638,35 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
         Task {
             let found = await Task.detached { BioCartoonCLI.find() }.value
             exe = found
+            facets = nil; facetsFor = nil
             installButton.isHidden = found != nil
             guard let exe = found else {
                 status.stringValue = ""
                 setMessage("The BioCartoon command line is not installed. Install it into Manimble's Python environment (pip install biocartoon) to search 15,000+ open-licensed science icons.")
                 return
             }
+            // the first call downloads the catalog, so it goes alone; the dropdowns fill in behind the results
             if let s = try? await BioCartoonCLI.sources(exe) { setSources(s) }
+            let version = (try? await BioCartoonCLI.version(exe)) ?? "0"
+            filtersSupported = version.compare(BioCartoonCLI.filtersSince, options: .numeric) != .orderedAscending
+            funnel.isEnabled = filtersSupported
+            if !filtersSupported {
+                filter = BCFilter()
+                filterBox.isHidden = true
+                refreshFilterChrome()
+                installButton.title = "Update BioCartoon"
+                installButton.isHidden = false
+                creditLabel.stringValue = "biocartoon \(version) is installed; the filters need \(BioCartoonCLI.filtersSince) or newer (pip install --upgrade biocartoon)."
+                creditBox.isHidden = false
+                copyCredit.isHidden = true
+            }
             reload()
+            async let cats = BioCartoonCLI.categories(exe)
+            async let lics = BioCartoonCLI.licenseCounts(exe)
+            async let own = BioCartoonCLI.dbCategories(exe)
+            if let c = try? await cats { setCategories(c) }
+            if let l = try? await lics { setLicenses(l) }
+            if let d = try? await own { setDbCategories(d) }
         }
     }
 
@@ -415,35 +678,208 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
         copyCredit.isHidden = true
     }
 
-    private func setSources(_ list: [BCSource]) {
-        sources = list.filter { ($0.icons ?? 1) > 0 }
-        sourceBar.segmentCount = sources.count + 1
-        sourceBar.setLabel("All", forSegment: 0)
-        sourceBar.setWidth(0, forSegment: 0)
-        for (i, s) in sources.enumerated() {
-            sourceBar.setLabel(s.code, forSegment: i + 1)
-            sourceBar.setToolTip(s.name + (s.icons.map { " (\($0) icons)" } ?? ""), forSegment: i + 1)
-        }
-        sourceBar.selectedSegment = 0
+    // MARK: filter choices
+
+    // Each dropdown lists the choices that find icons under the search and the other filters, with how many (as the
+    // BioCartoon editor's do); picked ones stay listed so they can be taken out. Until the counts come, all of them.
+
+    /// A choice's count: under the search when the counts have come, else the catalog's; nil to leave it out.
+    private func shown(_ n: Int?, catalog: Int?, picked: Bool) -> (Int?)? {
+        guard let n = n else { return .some(catalog) }
+        return n > 0 || picked ? .some(n) : nil
     }
 
-    private var sourceCode: String? { sourceBar.selectedSegment > 0 ? sources[sourceBar.selectedSegment - 1].code : nil }
-    private func code(for source: String) -> String { sources.first { $0.source == source }?.code ?? "" }
+    private func setSources(_ list: [BCSource]) {
+        sources = list
+        refreshSources()
+        refreshDbCategories()
+    }
 
-    @objc private func filterChanged() {
+    private func refreshSources() {
+        dbPopup.setChoices(sources.filter { ($0.icons ?? 0) > 0 }.compactMap { s in
+            shown(facets?.source(s.source), catalog: s.icons, picked: dbPopup.picked.contains(s.source)).map { (s.source, s.name, $0) }
+        })
+    }
+
+    private func setCategories(_ list: [BCCategory]) {
+        categories = list
+        refreshCategories()
+        refreshSubcategories()
+    }
+
+    private func refreshCategories() {
+        catPopup.setChoices(categories.filter { !$0.slug.contains(".") }.compactMap { c in
+            shown(facets?.taxon(c.slug), catalog: c.icons, picked: catPopup.picked.contains(c.slug)).map { (c.slug, c.name, $0) }
+        })
+    }
+
+    /// The subcategories of the picked categories (of all of them, "Cells: Cell types", when none is).
+    private func refreshSubcategories() {
+        let picked = filter.categories
+        var choices: [(key: String, name: String, count: Int?)] = []
+        for c in categories where c.slug.contains(".") {
+            let top = String(c.slug.prefix { $0 != "." })
+            if !picked.isEmpty, !picked.contains(top) { continue }
+            guard let n = shown(facets?.taxon(c.slug), catalog: c.icons, picked: subPopup.picked.contains(c.slug)) else { continue }
+            let name = picked.count == 1 ? c.name : "\(categories.first { $0.slug == top }?.name ?? top): \(c.name)"
+            choices.append((c.slug, name, n))
+        }
+        subPopup.setChoices(choices)
+    }
+
+    private func setLicenses(_ list: [(String, Int)]) {
+        licenses = list
+        refreshLicenses()
+    }
+
+    private func refreshLicenses() {
+        guard let fc = facets else { licensePopup.setChoices(licenses.map { ($0.0, $0.0, $0.1) }); return }
+        var counts: [String: Int] = [:]
+        for r in fc.licenses { if let l = r.license { counts[l] = r.icons } }
+        for l in licensePopup.picked where counts[l] == nil { counts[l] = 0 }
+        licensePopup.setChoices(counts.keys.sorted().map { ($0, $0, counts[$0]) })
+    }
+
+    private func setDbCategories(_ list: [(database: String, category: String, count: Int)]) {
+        dbCategories = list
+        refreshDbCategories()
+    }
+
+    /// Each database's own categories, "BA: Viruses", in the order of the databases (of the picked ones when any are).
+    private func refreshDbCategories() {
+        var all = dbCategories
+        if let fc = facets {
+            all = fc.db_categories.compactMap { r in r.source.flatMap { s in r.category.map { (s, $0, r.icons) } } }
+            for k in dbCatPopup.picked where !all.contains(where: { BCFilter.key($0.database, $0.category) == k }) {
+                let d = BCFilter.split(k)
+                all.append((d.database, d.category, 0))
+            }
+        }
+        let order = sources.map(\.source)
+        let rows = all.filter { filter.sources.isEmpty || filter.sources.contains($0.database) }.sorted { a, b in
+            let (ia, ib) = (order.firstIndex(of: a.database) ?? order.count, order.firstIndex(of: b.database) ?? order.count)
+            return ia != ib ? ia < ib : a.category.localizedCaseInsensitiveCompare(b.category) == .orderedAscending
+        }
+        dbCatPopup.setChoices(rows.map { (BCFilter.key($0.database, $0.category), "\(code(forDatabase: $0.database)): \($0.category)", $0.count) })
+    }
+
+    /// Count the dropdowns' choices under the search and the filters, unless they are counted for these already.
+    private func requestFacets() {
+        guard let exe = exe, filtersSupported else { return }
+        let query = search.stringValue.trimmingCharacters(in: .whitespaces), f = filter
+        if let done = facetsFor, done.query == query, done.filter == f { return }
+        facetsFor = (query, f)
+        facetsRequest += 1
+        let req = facetsRequest
+        Task {
+            do {
+                let fc = try await BioCartoonCLI.facets(exe, query: query, filter: f)
+                guard req == facetsRequest else { return }
+                facets = fc; facetsAnswered = req
+                refreshSources(); refreshCategories(); refreshSubcategories(); refreshLicenses(); refreshDbCategories()
+            } catch {
+                if req == facetsRequest { facetsFor = nil }      // ask again with the next search
+            }
+        }
+    }
+
+    private static func label(_ name: String, _ n: Int?) -> String {
+        guard let n = n else { return name }
+        return "\(name) (\(NumberFormatter.localizedString(from: NSNumber(value: n), number: .decimal)))"
+    }
+    private func code(forDatabase db: String) -> String { sources.first { $0.source == db }?.code ?? db.prefix(2).uppercased() }
+
+    // MARK: filter changes
+
+    @objc private func closePressed() { onClose?() }
+    @objc private func funnelPressed() { filterBox.isHidden.toggle(); refreshFilterChrome() }
+
+    @objc private func clearFilters() {
+        filter = BCFilter()
+        for p in [dbPopup, catPopup, subPopup, dbCatPopup, licensePopup] { p.clear() }
+        authorField.stringValue = ""
+        refreshSubcategories()
+        refreshDbCategories()
+        refreshFilterChrome()
+        reload()
+    }
+
+    /// A category was ticked on or off: the subcategory list follows it (taking one out takes its subcategories with it).
+    private func categoriesEdited() {
+        filter.categories = catPopup.picked
+        refreshSubcategories()
+        filtersEdited()
+    }
+
+    private func filtersEdited() {
+        filter.sources = dbPopup.picked
+        refreshDbCategories()           // another database's own categories would find nothing
+        filter.categories = catPopup.picked
+        filter.subcategories = subPopup.picked
+        filter.dbCats = dbCatPopup.picked
+        filter.licenses = licensePopup.picked
+        filter.authors = authorField.stringValue
+        refreshFilterChrome()
+        reload()
+    }
+
+    /// Set the filters from code (the headless check).
+    func apply(_ f: BCFilter) {
+        filter = f
+        dbPopup.pick(f.sources); catPopup.pick(f.categories)
+        refreshSubcategories()
+        subPopup.pick(f.subcategories)
+        refreshDbCategories()
+        dbCatPopup.pick(f.dbCats); licensePopup.pick(f.licenses)
+        authorField.stringValue = f.authors
+        filterBox.isHidden = false
+        refreshFilterChrome()
+        reload()
+    }
+
+    /// The funnel lights up while filters are set or shown; set ones are summed up in a line while hidden.
+    private func refreshFilterChrome() {
+        let active = !filter.isEmpty
+        funnel.contentTintColor = active || !filterBox.isHidden ? Theme.accent : .secondaryLabelColor
+        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category or license" : "Hide the filters"
+        clearButton.isHidden = !active
+        summary.stringValue = summaryText()
+        summary.isHidden = !(active && filterBox.isHidden)
+    }
+
+    /// The set filters in a line: "Bioicons, OpenMoji · by Ann · Cells · CC0-1.0".
+    private func summaryText() -> String {
+        var parts: [String] = []
+        if !filter.sources.isEmpty { parts.append(sources.filter { filter.sources.contains($0.source) }.map(\.name).joined(separator: ", ")) }
+        let authors = filter.authors.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if !authors.isEmpty { parts.append("by " + authors.joined(separator: ", ")) }
+        let taxa = filter.categories.sorted() + filter.subcategories.sorted()
+        if !taxa.isEmpty { parts.append(taxa.map { s in categories.first { $0.slug == s }?.name ?? s }.joined(separator: ", ")) }
+        if !filter.dbCats.isEmpty {
+            parts.append(filter.dbCats.sorted().map { let k = BCFilter.split($0); return "\(code(forDatabase: k.database)): \(k.category)" }.joined(separator: ", "))
+        }
+        if !filter.licenses.isEmpty { parts.append(filter.licenses.sorted().joined(separator: ", ")) }
+        return parts.joined(separator: "  ·  ")
+    }
+
+    @objc private func sortChanged() {
         UserDefaults.standard.set(Self.sorts[sortPopup.indexOfSelectedItem].1, forKey: "biocartoonSort")
         reload()
     }
     @objc private func searchSubmitted() { typing?.cancel(); reload() }
     func controlTextDidChange(_ n: Notification) {
         typing?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.reload() }
+        let author = (n.object as? NSTextField) === authorField
+        let w = DispatchWorkItem { [weak self] in author ? self?.filtersEdited() : self?.reload() }
         typing = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
     }
 
+    // MARK: results
+
     /// Start a new search from the first page.
     func reload() {
+        requestFacets()
         generation += 1
         results = []; more = false; loading = false
         grid.reloadData()
@@ -454,21 +890,21 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
     private func loadPage() {
         guard let exe = exe, !loading else { return }
         loading = true
-        let gen = generation, offset = results.count
+        let gen = generation
         let query = search.stringValue.trimmingCharacters(in: .whitespaces)
-        status.stringValue = offset == 0 ? "Searching…" : "Loading more…"
+        let f = filter, sort = Self.sorts[sortPopup.indexOfSelectedItem].1
+        status.stringValue = results.isEmpty ? "Searching…" : "Loading more…"
         Task {
             do {
-                let page = try await BioCartoonCLI.search(exe, query: query, source: sourceCode,
-                                                          sort: Self.sorts[sortPopup.indexOfSelectedItem].1, offset: offset, limit: Self.pageSize)
+                let page = try await BioCartoonCLI.search(exe, query: query, filter: f, sort: sort, offset: results.count, limit: Self.pageSize)
                 guard gen == generation else { return }
                 loading = false
                 more = page.count == Self.pageSize
                 let start = results.count
                 results += page
                 if start == 0 { grid.reloadData() }
-                else { grid.insertItems(at: Set((start..<results.count).map { IndexPath(item: $0, section: 0) })) }
-                status.stringValue = results.isEmpty ? "No results" : "\(results.count)\(more ? "+" : "") icons"
+                else if !page.isEmpty { grid.insertItems(at: Set((start..<results.count).map { IndexPath(item: $0, section: 0) })) }
+                status.stringValue = results.isEmpty ? "No results" : "\(results.count)\(more ? "+" : "") icon\(results.count == 1 && !more ? "" : "s")"
             } catch {
                 guard gen == generation else { return }
                 loading = false
@@ -482,6 +918,7 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
         guard more, !loading, let doc = scroll.documentView else { return }
         if scroll.contentView.bounds.maxY > doc.frame.height - 3 * 102 { loadPage() }
     }
+    @objc private func resized() { grid.collectionViewLayout?.invalidateLayout() }
 
     @objc private func installPressed() {
         installButton.isEnabled = false
@@ -490,7 +927,9 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
             do {
                 try await BioCartoonCLI.install()
                 installButton.isEnabled = true
+                installButton.title = "Install BioCartoon"
                 creditBox.isHidden = true
+                exe = nil
                 locate()
             } catch {
                 installButton.isEnabled = true
@@ -509,6 +948,9 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
     // for the headless check
     var resultCount: Int { results.count }
     var firstResult: BCIcon? { results.first }
+    var allResults: [BCIcon] { results }
+    var isLoading: Bool { loading }
+    var facetsSettled: Bool { facetsAnswered == facetsRequest }
     func type(_ query: String) { search.stringValue = query; reload() }
 
     @objc private func copyCreditPressed() {
@@ -525,18 +967,46 @@ final class BioCartoonPanel: NSObject, NSCollectionViewDataSource, NSSearchField
     func collectionView(_ cv: NSCollectionView, itemForRepresentedObjectAt ip: IndexPath) -> NSCollectionViewItem {
         let item = cv.makeItem(withIdentifier: BCTile.id, for: ip) as! BCTile
         let icon = results[ip.item]
-        item.show(icon, code: code(for: icon.source))
+        item.show(icon, code: code(forDatabase: icon.database))
         item.onClick = { [weak self] icon in self?.onInsert?(icon) }
         return item
+    }
+
+    /// Square tiles, as many across as fit at about 96 px, stretched to fill the pane's width.
+    func collectionView(_ cv: NSCollectionView, layout: NSCollectionViewLayout, sizeForItemAt ip: IndexPath) -> NSSize {
+        let w = scroll.contentSize.width
+        let n = max(2, Int((w + 6) / 102))
+        let side = max(40, floor((w - 6 * CGFloat(n - 1)) / CGFloat(n)))
+        return NSSize(width: side, height: side)
     }
 }
 
 extension MainController {
+    /// Insert ▸ BioCartoon Icons… (and the toolbar palette): the search takes the inspector's place; again puts it away.
     @objc func showBioCartoon() {
-        let p = biocartoonPanel ?? BioCartoonPanel()
-        p.onInsert = { [weak self] icon in self?.insertBioCartoon(icon, at: nil) }
-        biocartoonPanel = p
-        p.show(beside: window)
+        if let p = biocartoonPane, !p.view.isHidden { hideBioCartoon(); return }
+        let p = biocartoonPane ?? BioCartoonPane()
+        if biocartoonPane == nil {
+            p.onInsert = { [weak self] icon in self?.insertBioCartoon(icon, at: nil) }
+            p.onClose = { [weak self] in self?.hideBioCartoon() }
+            p.view.translatesAutoresizingMaskIntoConstraints = false
+            inspectorHost.addSubview(p.view)
+            NSLayoutConstraint.activate([
+                p.view.leadingAnchor.constraint(equalTo: inspectorHost.leadingAnchor), p.view.trailingAnchor.constraint(equalTo: inspectorHost.trailingAnchor),
+                p.view.topAnchor.constraint(equalTo: inspectorHost.topAnchor), p.view.bottomAnchor.constraint(equalTo: inspectorHost.bottomAnchor),
+            ])
+            biocartoonPane = p
+        }
+        p.view.isHidden = false
+        inspectorScroll?.isHidden = true
+        if let right = mainSplit?.subviews.last, right.isHidden { right.isHidden = false; mainSplit?.adjustSubviews() }
+        p.activate(in: window)
+    }
+
+    /// Back to the inspector.
+    func hideBioCartoon() {
+        biocartoonPane?.view.isHidden = true
+        inspectorScroll?.isHidden = false
     }
 
     func biocartoonDropped(_ data: Data, at p: CGPoint) -> Bool {
@@ -548,7 +1018,7 @@ extension MainController {
     /// Download the icon's PNG into the deck folder and insert it as a picture, centred on `point`
     /// (frame px; nil = the slide's centre), its longer side 3 manim units.
     func insertBioCartoon(_ icon: BCIcon, at point: CGPoint?) {
-        guard let ws = workspace, sceneName != nil, player == nil, let exe = biocartoonPanel?.exe else { return }
+        guard let ws = workspace, sceneName != nil, player == nil, let exe = biocartoonPane?.exe else { return }
         let slug = icon.title.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
             .prefix(6).joined(separator: "_")
         let stem = slug.isEmpty ? "biocartoon" : slug
@@ -567,7 +1037,7 @@ extension MainController {
             let half = 1.5 * canvas.unitPx * min(1, size.width / max(size.height, 1))
             insert(kind: "image", extra: ["file": name, "path": dest.path,
                                           "sx": Double(c.x) - half, "sy": Double(c.y), "ex": Double(c.x) + half, "ey": Double(c.y)])
-            biocartoonPanel?.showCredit(icon)
+            biocartoonPane?.showCredit(icon)
         }
     }
 }
@@ -578,12 +1048,15 @@ extension MainController {
     func biocartoonTest() {
         let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
         func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "biocartoon.log") }
-        func shot(_ w: NSWindow, _ name: String) {
-            guard let v = w.contentView?.superview, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+        func shot(_ v: NSView?, _ name: String) {
+            guard let v = v, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
             v.cacheDisplay(in: v.bounds, to: rep)
             try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
         }
         func images() -> [String] { (scene?.objects?.values.compactMap { $0.kind == "image" ? $0.image : nil } ?? []).sorted() }
+        func counts(_ rows: [BCFacets.Row], _ name: KeyPath<BCFacets.Row, String?>) -> String {
+            rows.map { "\($0[keyPath: name] ?? "?") \($0.icons)" }.joined(separator: ", ")
+        }
         func wait(_ what: String, _ ok: () -> Bool) async {
             for _ in 0..<600 where !ok() { try? await Task.sleep(nanoseconds: 100_000_000) }
             log("\(what): \(ok() ? "ok" : "TIMED OUT")")
@@ -591,13 +1064,31 @@ extension MainController {
         Task { @MainActor in
             log("biocartoon at \(BioCartoonCLI.find() ?? "-")")
             showBioCartoon()
-            guard let p = biocartoonPanel else { log("no panel"); return }
+            guard let p = biocartoonPane else { log("no pane"); return }
+            log("pane shown: \(!p.view.isHidden), inspector hidden: \(inspectorScroll?.isHidden == true)")
             await wait("first page") { p.resultCount > 0 }
             p.type("mitochondria")
             try? await Task.sleep(nanoseconds: 300_000_000)
             await wait("search") { p.resultCount > 0 && p.firstResult?.title.lowercased().contains("mito") == true }
+            let plain = p.resultCount
+            // the dropdowns count what the search finds
+            await wait("facets") { p.facetsSettled && p.facets != nil }
+            log("facets for mitochondria: databases \(counts(p.facets?.sources ?? [], \.source))")
+            // the filters go to the command line
+            var f = BCFilter(); f.licenses = ["CC0-1.0"]; f.sources = ["bioicons", "healthicons", "scidraw"]; f.categories = ["cells"]
+            p.apply(f)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await wait("filtered") { !p.isLoading && p.resultCount > 0 }
+            let bad = p.allResults.filter { $0.license != "CC0-1.0" || !f.sources.contains($0.database) }
+            log("filtered: \(p.resultCount) of \(plain), off: \(bad.count)")
+            await wait("filtered facets") { p.facetsSettled }
+            log("filtered facets: databases \(counts(p.facets?.sources ?? [], \.source)); licenses \(counts(p.facets?.licenses ?? [], \.license))")
             try? await Task.sleep(nanoseconds: 2_000_000_000)      // thumbnails
-            shot(p.panel, "biocartoon_panel.png")
+            shot(p.view, "biocartoon_pane.png")
+            shot(window.contentView, "biocartoon_filters_window.png")
+            p.apply(BCFilter())
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await wait("unfiltered") { !p.isLoading && p.resultCount > 0 }
             guard let icon = p.firstResult, let data = try? JSONEncoder().encode(icon) else { log("no result"); return }
             log("first: \(icon.id) \(icon.title) \(Int(icon.width ?? 0))x\(Int(icon.height ?? 0))")
             let before = images()
@@ -611,7 +1102,9 @@ extension MainController {
                 log("placed: \(o.loc)")
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
-            shot(window, "biocartoon_window.png")
+            shot(window.contentView, "biocartoon_window.png")
+            hideBioCartoon()
+            log("closed: pane hidden \(p.view.isHidden), inspector shown \(inspectorScroll?.isHidden == false)")
             log("done")
         }
     }

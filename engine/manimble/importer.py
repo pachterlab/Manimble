@@ -1,4 +1,4 @@
-"""Import a PowerPoint (.pptx) or Keynote (.key) presentation as a new Manim Slides deck.
+"""Import a PowerPoint (.pptx/.ppt) or Keynote (.key) presentation as a new Manim Slides deck.
 
 Every slide becomes a scene class. Text boxes become `Text(...)`, pictures `ImageMobject(...)`, rectangles /
 ellipses / lines the matching manim shapes, tables `Table(...)`. Elements are written one per line, directly in
@@ -15,12 +15,62 @@ FW, FH = 14.222222222222221, 8.0          # manim frame in units; 1280 x 720 px
 DEFAULT_FONT = "Helvetica Neue"          # used when the presentation does not name a font
 PT_PER_FONT_SIZE = 0.945                  # same calibration as the exporter
 
+# written into an imported deck's common.py when it has a table
+TABLE_GRID_SOURCE = '''
+
+def _baseline(line):
+    bottoms = sorted(g.get_bottom()[1] for g in line.family_members_with_points())
+    return bottoms[len(bottoms) // 2]
+
+
+def table_grid(table, col_widths, row_heights, align=UL, margin=(0.1, 0.05)):
+    """Lay a Table out the way PowerPoint does: fixed column widths and minimum row heights (in units),
+    each entry aligned in its cell by `align` inside `margin` with the text on common baselines, the lines
+    moved onto the cell edges."""
+    cells = table.mob_table
+    n_r, n_c = len(cells), len(cells[0])
+    if len(col_widths) != n_c:          # columns added or removed since the import: share the width
+        col_widths = [sum(col_widths) / n_c] * n_c
+    if len(row_heights) != n_r:
+        row_heights = [sum(row_heights) / len(row_heights)] * n_r
+    mx, my = margin
+    # each entry's text block runs from the tallest glyph's height above its first baseline down to its last
+    # baseline, so cells with and without ascenders line up
+    lines = {id(m): [l for l in m.submobjects if l.family_members_with_points()] if isinstance(m, Paragraph) else []
+             for row in cells for m in row}
+    asc = max([l[0].get_top()[1] - _baseline(l[0]) for l in lines.values() if l] or [0])
+
+    def block(m):                        # (top, bottom) of the text block
+        ls = lines[id(m)]
+        return (_baseline(ls[0]) + asc, _baseline(ls[-1])) if ls else (m.get_top()[1], m.get_bottom()[1])
+    row_heights = [max(h, max(t - b for t, b in map(block, row)) + 2 * my) for h, row in zip(row_heights, cells)]
+    xs, ys = [0.0], [0.0]
+    for w in col_widths:
+        xs.append(xs[-1] + w)
+    for h in row_heights:
+        ys.append(ys[-1] - h)
+    for r, row in enumerate(cells):
+        for c, m in enumerate(row):
+            x = xs[c] + mx if align[0] < 0 else xs[c + 1] - mx if align[0] > 0 else (xs[c] + xs[c + 1]) / 2
+            m.move_to((x, 0, 0), np.array([align[0], 0, 0]))
+            t, b = block(m)
+            top = ys[r] - my if align[1] > 0 else ys[r + 1] + my + t - b if align[1] < 0 else (ys[r] + ys[r + 1] + t - b) / 2
+            m.shift((top - t) * UP)
+    # move the Table's own lines (outer ones first, as Table makes them) rather than drawing new ones
+    order = (lambda v: [v[0], v[-1], *v[1:-1]]) if table.include_outer_lines else (lambda v: v[1:-1])
+    for line, x in zip(table.vertical_lines, order(xs)):
+        line.put_start_and_end_on((x, ys[0], 0), (x, ys[-1], 0))
+    for line, y in zip(table.horizontal_lines, order(ys)):
+        line.put_start_and_end_on((xs[0], y, 0), (xs[-1], y, 0))
+    return table
+'''
+
 
 def keynote_to_pptx(key_path: str, pptx_path: str) -> dict:
     from .export import ensure_keynote_running
     if not Path("/Applications/Keynote.app").exists():
-        return {"ok": False, "error": "Keynote is not installed, so a .key file cannot be read. "
-                                      "Export it to PowerPoint from Keynote and import the .pptx."}
+        return {"ok": False, "error": "Keynote is not installed, so a .key or .ppt file cannot be read. "
+                                      "Save it as .pptx and import that instead."}
     ensure_keynote_running()
     script = f'''
     set src to POSIX file "{key_path}"
@@ -186,7 +236,7 @@ def import_presentation(src: str, dest: str, progress=None) -> dict:
                                       "(pip install python-pptx)."}
     src_p = Path(src)
     tmp = None
-    if src_p.suffix.lower() == ".key":
+    if src_p.suffix.lower() in (".key", ".ppt"):         # python-pptx reads only .pptx; Keynote converts
         tmp = Path(tempfile.mkdtemp()) / (src_p.stem + ".pptx")
         r = keynote_to_pptx(str(src_p), str(tmp))
         if not r.get("ok"):
@@ -235,6 +285,7 @@ def import_presentation(src: str, dest: str, progress=None) -> dict:
     scene_names: list[str] = []
     classes: list[str] = []
     n_img = 0
+    uses_tables = False
 
     def emit_shape(shape, bg_is_dark: bool, lines: list[str], slide_idx: int):
         nonlocal n_img
@@ -274,12 +325,39 @@ def import_presentation(src: str, dest: str, progress=None) -> dict:
 
         # -------------------------------------------------------------- tables
         if getattr(shape, "has_table", False) and shape.has_table:
-            rows = []
-            for r in shape.table.rows:
+            # manim's Table sizes each column to its text, which collapses empty columns; lay the cells out on
+            # PowerPoint's column widths and row heights instead (table_grid in common.py)
+            tbl = shape.table
+            rows, sizes, fonts, haligns, valigns = [], [], [], [], []
+            for r in tbl.rows:
                 rows.append([c.text.strip().replace("\n", " ") or " " for c in r.cells])
-            lines.append(f'self.add(Table({rows!r}, include_outer_lines=True, line_config={{"color": "{default_text}"}}, '
-                         f'element_to_mobject_config={{"color": "{default_text}", "font": "{DEFAULT_FONT}"}})'
-                         f'.scale_to_fit_width({_num(w_u)}).move_to(({_num(cx)}, {_num(cy)}, 0)))  # manimble')
+                for c in r.cells:
+                    if not c.text.strip():
+                        continue
+                    para = c.text_frame.paragraphs[0]
+                    f = next((fnt for t, fnt in _runs(para) if fnt is not None and t.strip()), para.font)
+                    sizes.append(f.size.pt if f.size is not None else 18)
+                    fonts.append(f.name or DEFAULT_FONT)
+                    haligns.append(para.alignment)
+                    valigns.append(c.vertical_anchor)
+
+            def most(values, default):
+                return max(set(values), key=values.count) if values else default
+            size_pt = most(sizes, 18)
+            fs = max(6.0, size_pt * s_ref / PT_PER_FONT_SIZE)
+            # PowerPoint's default cell insets (0.1in, 0.05in); the cap height starts about a quarter em below the inset
+            margin = f"({_num(uw(91440))}, {_num(uw(45720 + 0.25 * size_pt * 12700))})"
+            h = {PP_ALIGN.CENTER: "", PP_ALIGN.RIGHT: "RIGHT"}.get(most(haligns, None), "LEFT")
+            v = {MSO_ANCHOR.MIDDLE: "", MSO_ANCHOR.BOTTOM: "DOWN"}.get(most(valigns, None), "UP")
+            align = " + ".join(d for d in (v, h) if d) or "ORIGIN"
+            col_w = [_num(uw(c.width)) for c in tbl.columns]
+            row_h = [_num(uw(r.height)) for r in tbl.rows]
+            nonlocal uses_tables
+            uses_tables = True
+            lines.append(f'self.add(table_grid(Table({rows!r}, include_outer_lines=True, line_config={{"color": "{default_text}"}}, '
+                         f'element_to_mobject_config={{"color": "{default_text}", "font": "{most(fonts, DEFAULT_FONT)}", '
+                         f'"font_size": {_num(fs, 1)}}}), [{", ".join(col_w)}], [{", ".join(row_h)}], align={align}, margin={margin})'
+                         f'.move_to(({_num(ux(left))}, {_num(uy(top))}, 0), UL))  # manimble')
             return
 
         # ------------------------------------------------------ lines / arrows
@@ -538,7 +616,8 @@ def import_presentation(src: str, dest: str, progress=None) -> dict:
 
     (deck / "common.py").write_text(
         '"""Shared base class for the imported deck."""\n\nfrom pathlib import Path\n\nfrom manim import *\nfrom manim_slides import Slide\n\n'
-        'ASSETS = Path(__file__).resolve().parent.parent / "assets"\n\n\nclass Deck(Slide):\n    skip_reversing = True\n')
+        'ASSETS = Path(__file__).resolve().parent.parent / "assets"\n\n\nclass Deck(Slide):\n    skip_reversing = True\n'
+        + (TABLE_GRID_SOURCE if uses_tables else ""))
     (deck / "slides.py").write_text(
         '"""Slides imported from ' + src_p.name + '."""\n\nfrom common import *\n\n\n' + "\n\n\n".join(classes) + "\n")
     (deck / "order.txt").write_text(" ".join(scene_names) + "\n")

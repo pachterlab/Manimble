@@ -143,7 +143,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             shapeItem,
             drawItem,
             item("BioCartoon Icons…", #selector(MainController.showBioCartoon), "", []),
-            item("Table…", #selector(MainController.insertTablePressed), "", []),
+            { let i = item("Word Table…", #selector(MainController.insertTablePressed), "", []); i.representedObject = "word"; return i }(),
+            { let i = item("Math Table…", #selector(MainController.insertTablePressed), "", []); i.representedObject = "math"; return i }(),
             item("Image…", #selector(MainController.insertImagePressed), "i", [.command, .shift]),
             item("Extract Elements from Image…", #selector(MainController.extractElementsPressed), "", []),
             .separator(),
@@ -250,23 +251,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Hide/Show Slide Navigator", #selector(MainController.toggleNavigator), "n", [.command, .option]),
             item("Hide/Show Inspector and Source", #selector(MainController.toggleInspector), "i", [.command, .option]),
         ])
-        let resolution = NSMenu(title: "Animation Resolution")
+        let animations = NSMenu(title: "Animation Resolution")
         for (title, h) in [("720p (fastest builds)", 720), ("1080p", 1080), ("1440p", 1440), ("4K (slowest builds)", 2160)] {
             let mi = NSMenuItem(title: title, action: #selector(MainController.animationResolutionChosen(_:)), keyEquivalent: "")
             mi.representedObject = h
-            resolution.addItem(mi)
+            animations.addItem(mi)
         }
-        let resolutionItem = NSMenuItem(title: "Animation Resolution", action: nil, keyEquivalent: ""); resolutionItem.submenu = resolution
+        let animationsItem = NSMenuItem(title: "Animation Resolution", action: nil, keyEquivalent: ""); animationsItem.submenu = animations
+        // Show/Hide Animations switches the three items below it between the animated show and the stills slideshow.
         add("Play", [
-            item("Play from Current Slide", #selector(MainController.playFromCurrent), "p", [.command, .option]),
-            item("Play from Beginning", #selector(MainController.playFromBeginning), "p", [.command, .option, .shift]),
-            item("Presenter View (notes, next slide, timer)", #selector(MainController.presenterView), "p", [.command, .control]),
+            item("Show Animations", #selector(MainController.toggleShowAnimations), "a", [.command, .option]),
+            .separator(),
+            item("Play from Beginning", #selector(MainController.playMenuFromBeginning), "p", [.command, .option, .shift]),
+            item("Play from Current Slide", #selector(MainController.playMenuFromCurrent), "p", [.command, .option]),
+            item("Presenter View (notes, next slide, timer)", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
-            item("Play with Animations from Current Slide", #selector(MainController.presentFromCurrent), "a", [.command, .option]),
-            item("Play with Animations from Beginning", #selector(MainController.presentFromBeginning), "a", [.command, .option, .shift]),
-            item("Presenter View with Animations", #selector(MainController.presenterViewAnimated), "a", [.command, .control]),
-            resolutionItem,
+            animationsItem,
         ])
         let win = NSMenu(title: "Window")
         win.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))

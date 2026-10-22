@@ -34,6 +34,7 @@ final class AnimationPreviewView: NSView {
     private var endObserver: NSObjectProtocol?
     private var statusObserver: NSKeyValueObservation?
     private var keyMonitor: Any?
+    private var pendingAdvance: DispatchWorkItem?
     private let video = AVPlayerView()
     private let image = NSImageView()
     private let clickArea = PreviewClickArea()
@@ -127,6 +128,7 @@ final class AnimationPreviewView: NSView {
     private func playBuild(_ newIndex: Int) {
         guard clips.indices.contains(newIndex) else { return }
         if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
+        pendingAdvance?.cancel(); pendingAdvance = nil
         statusObserver = nil
         video.player?.pause()
         video.player = nil
@@ -140,6 +142,7 @@ final class AnimationPreviewView: NSView {
             if image.image == nil { onError?("Could not open animation image: \(clip.url.lastPathComponent)") }
             image.isHidden = false
             video.isHidden = true
+            advance(after: 1.0)
         } else {
             image.isHidden = true
             video.isHidden = false
@@ -157,13 +160,25 @@ final class AnimationPreviewView: NSView {
             ) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, self.video.player?.currentItem === item else { return }
-                    self.counter.stringValue = self.index + 1 < self.clips.count
-                        ? "Build \(self.index + 1) of \(self.clips.count) · Next →"
-                        : "Build \(self.clips.count) of \(self.clips.count) · End"
+                    if self.index + 1 < self.clips.count { self.advance(after: 0.4) }
+                    else { self.counter.stringValue = "Build \(self.clips.count) of \(self.clips.count) · End" }
                 }
             }
             player.playImmediately(atRate: clip.playbackRate > 0 ? clip.playbackRate : 1)
         }
+    }
+
+    /// Plays the builds straight through, as a preview should, with a short beat between them; the build
+    /// buttons, arrow keys and clicks still step through by hand.
+    private func advance(after delay: TimeInterval) {
+        guard index + 1 < clips.count else { return }
+        let from = index
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.index == from else { return }
+            self.playBuild(from + 1)
+        }
+        pendingAdvance = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     @objc private func previousBuild() { playBuild(index - 1); window?.makeFirstResponder(self) }
@@ -177,6 +192,7 @@ final class AnimationPreviewView: NSView {
     }
 
     func stop() {
+        pendingAdvance?.cancel(); pendingAdvance = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver); self.endObserver = nil }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor); self.keyMonitor = nil }
         statusObserver = nil

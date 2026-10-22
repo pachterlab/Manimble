@@ -264,6 +264,17 @@ def _ab_getattr(self, method_name):
 _AnimationBuilder.__getattr__ = _ab_getattr
 
 
+def _built_by_table(frame):
+    f = frame.f_back
+    for _ in range(4):
+        if f is None:
+            return False
+        if f.f_code.co_filename.replace("\\", "/").endswith("manim/mobject/table.py"):
+            return True
+        f = f.f_back
+    return False
+
+
 def _track(kind, cls, value_of, only=None):
     """Report every construction of cls by deck code; `only(mobject, source_line)` can restrict that further."""
     orig_init = cls.__init__
@@ -276,6 +287,8 @@ def _track(kind, cls, value_of, only=None):
             # Only objects constructed directly by deck code are editable.
             if not in_project(caller.f_code.co_filename):
                 return
+            if caller.f_code.co_name == "<lambda>" and _built_by_table(caller):
+                return            # a table's element_to_mobject: the entry is part of the table
             if "_sl_id" in self.__dict__:
                 return
             stack = project_stack(caller)
@@ -480,7 +493,11 @@ class Slide(Scene):
                 continue
             top.add(id(m))
             stack.extend(m.submobjects)
-        vis, sprites, taken, lines = [], [], set(), {}
+        vis, sprites, taken, lines, cells = [], [], set(), {}, {}
+
+        def box(mob):
+            return [(mob.get_left()[0] + fw / 2) / fw * pw, (fh / 2 - mob.get_top()[1]) / fh * ph,
+                    (mob.get_right()[0] + fw / 2) / fw * pw, (fh / 2 - mob.get_bottom()[1]) / fh * ph]
         sites = {}
         for m in TRACKED:
             k = (m._sl_frames[-1]["file"], tuple(m._sl_frames[-1]["pos"]))
@@ -513,6 +530,12 @@ class Slide(Scene):
                     lines[str(m._sl_id)] = [(a[0] + fw / 2) / fw * pw, (fh / 2 - a[1]) / fh * ph,
                                             (b[0] + fw / 2) / fw * pw, (fh / 2 - b[1]) / fh * ph,
                                             float(m.get_stroke_width()) * 0.01 * pw / fw]
+                if m._sl_kind == "table" and getattr(m, "row_labels", None) is None and getattr(m, "col_labels", None) is None:
+                    try:          # each data cell's area and its entry's ink, for typing into a cell on the slide
+                        cells[str(m._sl_id)] = [[i, j] + box(m.get_cell((i + 1, j + 1))) + box(e)
+                                                for i, row in enumerate(m.mob_table) for j, e in enumerate(row)]
+                    except Exception:
+                        traceback.print_exc()
                 if id(m) in nested_ids:
                     continue                      # selectable, but rendered as part of its parent's sprite
                 fam = extract_mobject_family_members([m], use_z_index=True, only_those_with_points=True)
@@ -530,17 +553,54 @@ class Slide(Scene):
         cam.capture_mobjects([m for m in members if id(m) not in taken], include_submobjects=False)
         Image.fromarray(np.array(cam.pixel_array)[..., :3].astype("uint8")).save(os.path.join(out, f"bg{n}.png"))
         _STATE["stops"].append({"png": f"stop{n}.png", "bg": f"bg{n}.png", "visible": vis, "sprites": sprites, "lines": lines,
+                                "cells": cells,
                                 "site": site})
 
 
+def _offslide_camera(members, pw, ph):
+    """A camera on the frame's pixel grid that covers the members' whole extent (up to one frame past each
+    edge), or None when they fit on the slide. Returns (camera, x offset, y offset) in frame px."""
+    pts = [f.points for f in members if len(f.points)]
+    if not pts:
+        return None
+    pts = np.vstack(pts)
+    fw, fh = config.frame_width, config.frame_height
+    sx, sy = pw / fw, ph / fh
+    margin = 0.15 * sx                                   # room for strokes and glyph overhang
+    X0 = max(-pw, math.floor((pts[:, 0].min() + fw / 2) * sx - margin))
+    X1 = min(2 * pw, math.ceil((pts[:, 0].max() + fw / 2) * sx + margin))
+    Y0 = max(-ph, math.floor((fh / 2 - pts[:, 1].max()) * sy - margin))
+    Y1 = min(2 * ph, math.ceil((fh / 2 - pts[:, 1].min()) * sy + margin))
+    if X0 >= 0 and Y0 >= 0 and X1 <= pw and Y1 <= ph or X1 <= X0 or Y1 <= Y0:
+        return None
+    w, h = X1 - X0, Y1 - Y0
+    cam = Camera(pixel_width=w, pixel_height=h, frame_width=w / sx, frame_height=h / sy,
+                 frame_center=np.array([((X0 + X1) / 2 - pw / 2) / sx, (ph / 2 - (Y0 + Y1) / 2) / sy, 0]))
+    cam.max_allowable_norm = 10 * max(fw, fh)            # manim squashes points past one frame width otherwise
+    return cam, X0, Y0
+
+
 def raster(cam, members, out):
-    """Render mobjects alone on a transparent canvas; save a cropped straight-alpha PNG."""
+    """Render mobjects alone on a transparent canvas; save a cropped straight-alpha PNG. Parts past the
+    slide's edges are kept (the sprite's x/y may be negative) so the editor can show them off the slide."""
+    pw, ph = cam.pixel_width, cam.pixel_height
     cam.reset()
     cam.pixel_array[:] = 0
     cam.capture_mobjects(members, include_submobjects=False)
     arr = np.array(cam.pixel_array)
     a = arr[..., 3]
     cols, rows = np.flatnonzero(a.any(axis=0)), np.flatnonzero(a.any(axis=1))
+    ox = oy = 0
+    if len(cols) == 0 or cols[0] == 0 or rows[0] == 0 or cols[-1] == pw - 1 or rows[-1] == ph - 1:
+        wide = _offslide_camera(members, pw, ph)
+        if wide:
+            cam, ox, oy = wide
+            cam.reset()
+            cam.pixel_array[:] = 0
+            cam.capture_mobjects(members, include_submobjects=False)
+            arr = np.array(cam.pixel_array)
+            a = arr[..., 3]
+            cols, rows = np.flatnonzero(a.any(axis=0)), np.flatnonzero(a.any(axis=1))
     if len(cols) == 0:
         return None
     x0, x1, y0, y1 = cols[0], cols[-1] + 1, rows[0], rows[-1] + 1
@@ -553,7 +613,7 @@ def raster(cam, members, out):
     path = os.path.join(out, name)
     if not os.path.exists(path):
         Image.fromarray(img, "RGBA").save(path, compress_level=1)
-    return {"file": name, "x": int(x0), "y": int(y0), "w": int(x1 - x0), "h": int(y1 - y0)}
+    return {"file": name, "x": int(x0 + ox), "y": int(y0 + oy), "w": int(x1 - x0), "h": int(y1 - y0)}
 
 
 class _NotSimple(Exception):

@@ -57,19 +57,29 @@ extension MainController {
             let a = NSAlert()
             a.messageText = "Slide numbers"
             a.informativeText = "Every slide of the show gets a number: a Text at the top of its construct(). The numbers follow along when slides are added, deleted or reordered."
-            let positions = [("Bottom right", "DR"), ("Bottom centre", "DOWN"), ("Bottom left", "DL")]
+            let positions = [("Bottom right", "DR"), ("Bottom center", "DOWN"), ("Bottom left", "DL")]
             let pos = NSPopUpButton(frame: .zero, pullsDown: false)
             pos.addItems(withTitles: positions.map { $0.0 })
             pos.selectItem(at: positions.firstIndex(where: { $0.1 == (info?.pos ?? "DR") }) ?? 0)
             let start = NSTextField(string: String(info?.start ?? 1))
             let size = NSTextField(string: String(info?.size ?? 24))
             for f in [start, size] { f.widthAnchor.constraint(equalToConstant: 64).isActive = true }
-            let skip = NSButton(checkboxWithTitle: "Don't show on the title slide", target: nil, action: nil)
+            let skip = NSButton(checkboxWithTitle: "Skip title slide", target: nil, action: nil)
             skip.state = (info?.skip ?? true) ? .on : .off
-            let total = NSButton(checkboxWithTitle: "Show the total  (3 / 10)", target: nil, action: nil)
+            let total = NSButton(checkboxWithTitle: "Show total slides", target: nil, action: nil)
             total.state = (info?.total ?? true) ? .on : .off
+            let sub = NSButton(checkboxWithTitle: "Show sub-slide numbers", target: nil, action: nil)
+            sub.state = (info?.sub ?? false) ? .on : .off
+            sub.toolTip = "Slides with several builds also count them: 29 / 47 · 1/3 rather than 29 / 47"
+            // saved as soon as it is picked: Update Numbers would also reset numbers that were moved or restyled
+            let spread = NSPopUpButton(frame: .zero, pullsDown: false)
+            spread.addItems(withTitles: Self.pageSpreadChoices.map { $0.0 })
+            let saved = UserDefaults.standard.string(forKey: Self.pageSpreadKey)
+            spread.selectItem(at: Self.pageSpreadChoices.firstIndex(where: { $0.1 == saved }) ?? 0)
+            spread.target = self; spread.action = #selector(pageSpreadPicked(_:))
             let grid = NSGridView(views: [[fieldLabel("Position"), pos], [fieldLabel("Start at"), start],
-                                          [fieldLabel("Font size"), size], [NSView(), skip], [NSView(), total]])
+                                          [fieldLabel("Font size"), size], [NSView(), skip], [NSView(), total], [NSView(), sub],
+                                          [fieldLabel("When one is changed"), spread]])
             grid.rowSpacing = 7; grid.columnSpacing = 10
             grid.column(at: 0).xPlacement = .trailing
             grid.frame = NSRect(origin: .zero, size: NSSize(width: max(300, grid.fittingSize.width), height: grid.fittingSize.height))
@@ -80,15 +90,47 @@ extension MainController {
             let r = a.runModal()
             if r == .alertFirstButtonReturn {
                 runPageNumbers(["op": "set", "pos": positions[pos.indexOfSelectedItem].1, "start": start.integerValue,
-                                "size": max(6, size.integerValue), "skip": skip.state == .on, "total": total.state == .on])
+                                "size": max(6, size.integerValue), "skip": skip.state == .on, "total": total.state == .on,
+                                "sub": sub.state == .on])
             } else if info?.on == true, r == .alertSecondButtonReturn {
                 runPageNumbers(["op": "remove"])
             }
         }
     }
 
-    func runPageNumbers(_ args: [String: Any]) {
-        guard let name = sceneName else { return }
+    /// What to do when one slide's number is moved or restyled; nil (Ask) is the default.
+    static let pageSpreadKey = "pageNumberSpread"
+    static let pageSpreadChoices: [(String, String?)] = [("Ask", nil), ("Apply to all slides", "all"), ("Only that slide", "one")]
+
+    @objc func pageSpreadPicked(_ p: NSPopUpButton) {
+        UserDefaults.standard.set(Self.pageSpreadChoices[p.indexOfSelectedItem].1, forKey: Self.pageSpreadKey)
+    }
+
+    /// The slide number on `scene` was moved or restyled: ask whether every slide's number should match it, unless
+    /// "Don't ask again" was ticked (Insert ▸ Slide Numbers… turns the question back on).
+    func offerPageNumberSpread(_ scene: String) {
+        switch UserDefaults.standard.string(forKey: Self.pageSpreadKey) {
+        case "all": runPageNumbers(["op": "spread"], scene: scene); return
+        case "one": return
+        default: break
+        }
+        let a = NSAlert()
+        a.messageText = "Apply to all slides?"
+        a.informativeText = "You changed this slide's number. Give every slide's number the same position and style?"
+        a.addButton(withTitle: "Apply to All Slides")
+        a.addButton(withTitle: "Only This Slide")
+        a.showsSuppressionButton = true
+        a.suppressionButton?.title = "Don't ask again"
+        let all = a.runModal() == .alertFirstButtonReturn
+        if a.suppressionButton?.state == .on {
+            UserDefaults.standard.set(all ? "all" : "one", forKey: Self.pageSpreadKey)
+            toast("Won't ask again · change this in Insert ▸ Slide Numbers…")
+        }
+        if all { runPageNumbers(["op": "spread"], scene: scene) }
+    }
+
+    func runPageNumbers(_ args: [String: Any], scene: String? = nil) {
+        guard let name = scene ?? sceneName else { return }
         submit { [weak self] in
             guard let self = self else { return }
             self.busy += 1
@@ -98,7 +140,7 @@ extension MainController {
             guard let res = r, res.ok == true else { self.toast(r?.error ?? "could not write the slide numbers", error: true); return }
             self.lastChanged = res.changed
             self.toast(res.message == "no change" ? "No change" : "Saved · \(res.message ?? "slide numbers")")
-            await self.loadScene(name, keepStop: true)
+            if let shown = self.sceneName { await self.loadScene(shown, keepStop: true) }
             await self.reloadState()
         }
     }
@@ -108,65 +150,31 @@ extension MainController {
     func buildNotesPane() {
         notesPane.wantsLayer = true
         notesPane.layer?.backgroundColor = Theme.canvasBottom.cgColor
-        let head = NSTextField(labelWithString: "SPEAKER NOTES")
-        head.font = Theme.font(10, .semibold); head.textColor = NSColor(white: 1, alpha: 0.45)
-        let hint = NSTextField(labelWithString: "shown in Presenter View and by Manim Slides  ·  ⌘↵ or click away to save")
-        hint.font = Theme.font(10); hint.textColor = NSColor(white: 1, alpha: 0.3)
-        let minimize = NSButton(image: NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Hide speaker notes") ?? NSImage(),
-                                target: self, action: #selector(hideNotesPane))
-        minimize.isBordered = false; minimize.toolTip = "Hide speaker notes (⌥⌘K)"
-        minimize.contentTintColor = NSColor(white: 1, alpha: 0.5)
-        minimize.symbolConfiguration = .init(pointSize: 11, weight: .medium)
-        let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let headRow = NSStackView(views: [head, hint, spacer, minimize]); headRow.spacing = 10
         notesBox.font = Theme.font(13)
         notesBox.textColor = NSColor(white: 0.92, alpha: 1)
         notesBox.editorBackground = NSColor(white: 1, alpha: 0.07)
         notesBox.borderType = .noBorder
         notesBox.wantsLayer = true; notesBox.layer?.cornerRadius = 6; notesBox.layer?.masksToBounds = true
         notesBox.onCommit = { [weak self] text in self?.commitNotes(text) }
-        notesBox.fillsContainer = true                 // the pane's height comes from the divider above it
-        let stack = NSStackView(views: [headRow, notesBox])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 4
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 8, right: 12)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        notesPane.addSubview(stack)
+        notesBox.fillsContainer = true                 // the pane's height comes from the drawer's divider
+        notesBox.translatesAutoresizingMaskIntoConstraints = false
+        notesPane.addSubview(notesBox)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: notesPane.leadingAnchor), stack.trailingAnchor.constraint(equalTo: notesPane.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: notesPane.topAnchor), stack.bottomAnchor.constraint(equalTo: notesPane.bottomAnchor),
-            notesBox.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
-            headRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            notesBox.leadingAnchor.constraint(equalTo: notesPane.leadingAnchor, constant: 12),
+            notesBox.trailingAnchor.constraint(equalTo: notesPane.trailingAnchor, constant: -12),
+            notesBox.topAnchor.constraint(equalTo: notesPane.topAnchor, constant: 8),
+            notesBox.bottomAnchor.constraint(equalTo: notesPane.bottomAnchor, constant: -8),
         ])
-        notesMinHeight = notesPane.heightAnchor.constraint(greaterThanOrEqualToConstant: 64)
-        let on = UserDefaults.standard.object(forKey: "showNotes") as? Bool ?? true
-        notesPane.isHidden = !on
-        notesMinHeight?.isActive = on
-        if on, UserDefaults.standard.object(forKey: "NSSplitView Subview Frames manimble.notes") == nil {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, let sp = self.notesSplit else { return }
-                sp.setPosition(max(160, sp.bounds.height - 110), ofDividerAt: 0)
-            }
-        }
     }
 
-    func setNotesVisible(_ on: Bool) {
-        guard let sp = notesSplit else { return }
-        let wasHidden = notesPane.isHidden
-        notesPane.isHidden = !on
-        notesMinHeight?.isActive = on
-        sp.adjustSubviews()
-        if on, wasHidden, notesPane.frame.height < 64 { sp.setPosition(max(160, sp.bounds.height - 110), ofDividerAt: 0) }
-        UserDefaults.standard.set(on, forKey: "showNotes")
-    }
+    @objc func hideNotesPane() { setDrawerOpen(false) }
 
-    @objc func hideNotesPane() {
-        if notesBox.isEditing { window.makeFirstResponder(canvas) }     // commits the notes first
-        setNotesVisible(false)
-    }
-
+    /// ⌥⌘K: the drawer on the notes tab, or closed if that is already showing.
     @objc func toggleNotesPane() {
-        setNotesVisible(notesPane.isHidden)
-        if !notesPane.isHidden { notesBox.beginEditing() }
+        if drawerShowsNotes { setDrawerOpen(false); return }
+        drawer.show(.notes)
+        setDrawerOpen(true)
+        notesBox.beginEditing()
     }
 
     func commitNotes(_ text: String) {
@@ -298,7 +306,7 @@ extension MainController {
         func values() -> [String] { (scene?.objects?.values.map { $0.kind == "image" ? "image:" + ($0.image ?? "") : $0.value } ?? []).sorted() }
         Task { @MainActor in
             await selectScene("Formula")
-            setNotesVisible(true)
+            drawer.show(.notes); setDrawerOpen(true)
             commitNotes("Explain Euler's identity.\nThen ask for questions.")
             await queueTail?.value
             log("notes: \(scene?.notes ?? "-") box=\(notesBox.stringValue.replacingOccurrences(of: "\n", with: "|"))")
@@ -331,13 +339,14 @@ extension MainController {
             log("hidden: \(state?.scenes.map { "\($0.name):\($0.hidden == true)" } ?? []) menu=\(navigatorMenu(row: 1)?.items.map { $0.title } ?? [])")
             let deck = try? await engine.call("deck_pages", as: DeckPages.self)
             log("deck_pages: \(deck?.slides.map { $0.scene } ?? [])")
-            if let sp = notesSplit {
+            if let sp = centerSplit {
+                drawer.show(.notes); setDrawerOpen(true); sp.layoutSubtreeIfNeeded()
                 let before = notesPane.frame.height
                 sp.setPosition(sp.bounds.height - 200, ofDividerAt: 0); sp.layoutSubtreeIfNeeded()
                 let dragged = notesPane.frame.height
-                setNotesVisible(false); sp.layoutSubtreeIfNeeded()
-                let hiddenH = notesPane.isHidden ? 0 : notesPane.frame.height
-                setNotesVisible(true); sp.layoutSubtreeIfNeeded()
+                setDrawerOpen(false); sp.layoutSubtreeIfNeeded()
+                let hiddenH = drawer.isHidden ? 0 : notesPane.frame.height
+                setDrawerOpen(true); sp.layoutSubtreeIfNeeded()
                 log("notes pane: before=\(Int(before)) dragged=\(Int(dragged)) hidden=\(Int(hiddenH)) shown=\(Int(notesPane.frame.height)) stage=\(Int(stageArea.frame.height))")
             }
             if let ws = workspace { log("terminal dir: \(terminalDirectory(ws))") }
