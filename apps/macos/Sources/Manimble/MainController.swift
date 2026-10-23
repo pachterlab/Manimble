@@ -44,11 +44,17 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var sceneName: String?
     var stopIndex = 0
     var selection: Int? { didSet { canvas.selection = selection; rebuildInspector(); highlightSource() } }
-    var busy = 0 { didSet {
-        if busy > 0 { busyPill.show(busyText, symbol: nil, tint: nil, spinning: true) } else { busyPill.hide() }
-    } }
+    var busy = 0 { didSet { updateBusyPill() } }
+    /// The slide on screen shows an optimistic move/resize whose verifying render has not landed yet: objects laid
+    /// out from the moved one (arrows, labels) catch up only then, so the pill stays until the real frame is shown.
+    var verifying = false { didSet { if verifying != oldValue { updateBusyPill() } } }
+    func updateBusyPill() {
+        if busy > 0 || verifying { busyPill.show(busyText, symbol: nil, tint: nil, spinning: true) } else { busyPill.hide() }
+    }
     var queueTail: Task<Void, Never>?
     var lastChanged: ChangedLines?
+    /// The object just moved in one build only, so Select All (Cmd-A) can extend that move to every build.
+    var lastBuildMove: (scene: String, oid: Int, stop: Int)?
     var thumbCache = NSCache<NSString, NSImage>()
     var refreshTimer: Timer?
     var pendingStateRefresh = false
@@ -69,6 +75,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// Speaker notes of the slide on screen, a tab of the drawer below the canvas (View ▸ Speaker Notes).
     let notesBox = MultilineTextBox(string: "", maxLines: 4)
     let notesPane = NSView()
+    /// Speaker notes of the build on screen only, the drawer's Build Notes tab; `buildNotesFor` is the build its
+    /// text belongs to (a commit after the build changed still goes to the right one).
+    let buildNotesBox = MultilineTextBox(string: "", maxLines: 4)
+    let buildNotesView = NSView()
+    var buildNotesFor: (scene: String, stop: Int)?
     var previewScene: String?
     let stageArea = NSView()
     /// PowerPoint-style rulers above and left of the slide (View ▸ Ruler).
@@ -76,7 +87,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var rulerThickness: [NSLayoutConstraint] = []
     let terminal = TerminalPanel()
     /// Below the slide: the notes and the terminals as tabs, with one divider above them.
-    lazy var drawer = BottomDrawer(notes: notesPane, terminal: terminal)
+    lazy var drawer = BottomDrawer(notes: notesPane, buildNotes: buildNotesView, terminal: terminal)
     var sourceBox: NSView?                 // the PYTHON card's contents (PaneOverlay.swift swaps them out)
     var paneOverlay: AuxPaneView?
     var paneOverlayMonitor: Any?
@@ -136,6 +147,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         table.rowHeight = SlideCell.baseHeight
         table.dataSource = self; table.delegate = self
         table.onDelete = { [weak self] in self?.deleteSlide() }
+        table.onDeleteBuild = { [weak self] in self?.deleteBuild() }
         table.onMenu = { [weak self] row in self?.navigatorMenu(row: row) }
         table.target = table; table.action = #selector(SlideTable.rowClicked(_:))
         table.onReclick = { [weak self] _ in self?.toggleBuildsList() }
@@ -362,6 +374,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         split.addArrangedSubview(sideBox); split.addArrangedSubview(center); split.addArrangedSubview(right)
         split.setHoldingPriority(.init(260), forSubviewAt: 0)
         split.setHoldingPriority(.init(250), forSubviewAt: 2)
+        split.collapsesEdgePanes = true                    // push a side panel all the way off; drag the edge to bring it back
         split.autosaveName = "manimble.split"            // remembers where you dragged the dividers
         mainSplit = split
         sideScroll = side
@@ -423,7 +436,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let pending = pendingDeck {
             pendingDeck = nil
             open(deck: pending)
-        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE"].lazy
+        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE", "MOVE", "NOTES"].lazy
                     .compactMap({ ProcessInfo.processInfo.environment["MANIMBLE_TEST_" + $0] }).first
                     ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"].flatMap({ $0.hasPrefix("/") ? $0 : nil }) {
             open(deck: d)
@@ -774,6 +787,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
             return
         }
+        if ev["event"] as? String == "edit_failed" {          // an optimistic move/resize did not survive its render
+            toast((ev["error"] as? String ?? "edit failed") + " (undone)", error: true)
+            lastBuildMove = nil
+            if let n = ev["name"] as? String, n == sceneName {
+                Task { @MainActor in await self.loadScene(n, keepStop: true, keepOverrides: true); await self.reloadState() }
+            }
+            return
+        }
         guard ev["event"] as? String == "rendered" else { return }
         if !pendingStateRefresh {
             pendingStateRefresh = true
@@ -808,7 +829,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         // the slide on screen was re-rendered (an edit from outside, e.g. Claude in the terminal): show it
         if let n = sceneName, busy == 0, let cur = newRows.first(where: { $0.name == n }), cur.status == "ready",
            let t = cur.thumb, let shown = shownDir, URL(fileURLWithPath: t).deletingLastPathComponent().path != shown {
-            await loadScene(n, keepStop: true)
+            await loadScene(n, keepStop: true, keepOverrides: true)
         }
     }
 
@@ -822,7 +843,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func selectScene(_ name: String) async {
         if name != sceneName && sourceFocused { window.makeFirstResponder(canvas) }
-        if name != sceneName && notesBox.isEditing { window.makeFirstResponder(canvas) }     // commits the notes first
+        if name != sceneName && (notesBox.isEditing || buildNotesBox.isEditing) { window.makeFirstResponder(canvas) }     // commits the notes first
         if name != sceneName && sourceDraft != nil {
             await queueTail?.value
             if sourceDraft != nil {
@@ -832,7 +853,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 return
             }
         }
-        if name != sceneName { closeAnimationPreview() }
+        if name != sceneName { closeAnimationPreview(); table.buildFocused = false }
         sceneName = name; stopIndex = 0; selection = nil
         refreshRings()
         refreshBuildRows()
@@ -851,7 +872,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if sc.status != "ready" || sc.stops == nil {
             // keep showing the last good frame instead of a blank canvas
             if scene?.name != name || scene?.stops == nil { canvas.stop = nil }
-            scene = sc; selection = nil
+            scene = sc; selection = nil; verifying = false
             canvas.overrides = [:]
             toast("Slide failed to render: " + (sc.error ?? "unknown error").split(separator: "\n").suffix(3).joined(separator: " "), error: true)
             renderSource()
@@ -861,6 +882,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         scene = sc
+        verifying = sc.optimistic == true
         if !notesBox.isEditing { notesBox.setText(sc.notes ?? "") }
         shownDir = URL(fileURLWithPath: sc.stops![0].png).deletingLastPathComponent().path
         stopIndex = keepStop ? min(stopIndex, sc.stops!.count - 1) : 0
@@ -871,6 +893,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLAY"] != nil, !testRan { testRan = true; playTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PRESENT"] != nil, !testRan { testRan = true; presentTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"] != nil, !testRan { testRan = true; termTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_NOTES"] != nil, !testRan { testRan = true; notesTest() }
         if let tcase = ProcessInfo.processInfo.environment["MANIMBLE_TEST_FORMULA"], !testRan { testRan = true; formulaTest(tcase) }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BG"] != nil, !testRan { testRan = true; backgroundTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_DARK"] != nil, !testRan { testRan = true; darkModeTest() }
@@ -882,6 +905,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OFFSLIDE"] != nil, !testRan { testRan = true; offSlideTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_MOVE"] != nil, !testRan { testRan = true; moveTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -893,8 +917,66 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.unitPx = (sc.size?[0] ?? 1280) / (sc.frame?[0] ?? 14.2222)
         canvas.sceneObjects = sc.objects ?? [:]
         canvas.placeholders = sc.placeholders ?? []
+        canvas.optimistic = sc.optimistic ?? false
         canvas.stop = stops[stopIndex]
         canvas.selection = selection
+        if !buildNotesBox.isEditing {
+            buildNotesBox.setText(sc.buildNotes.flatMap { $0.indices.contains(stopIndex) ? $0[stopIndex] : nil } ?? "")
+            buildNotesFor = (sc.name, stopIndex)
+        }
+        drawer.buildLabel = stops.count > 1 ? "build \(stopIndex + 1) of \(stops.count)" : ""
+    }
+
+    /// Headless timing of one move: MANIMBLE_TEST_MOVE=deck, MANIMBLE_TEST_SCENE (default the first slide),
+    /// MANIMBLE_TEST_KIND (kind of the object to move, default image); move.log and shots in MANIMBLE_TEST_OUT.
+    func moveTest() {
+        let env = ProcessInfo.processInfo.environment
+        let dir = (env["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "move.log") }
+        func shot(_ name: String) {
+            guard let img = canvas.snapshotView(), let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return }
+            try? png.write(to: URL(fileURLWithPath: dir + name + ".png"))
+        }
+        func at(_ b: Box?) -> String { b.map { "\(Int($0.cx)),\(Int($0.cy))" } ?? "?" }
+        Task { @MainActor in
+            if let name = env["MANIMBLE_TEST_SCENE"] { await selectScene(name) }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            let kind = env["MANIMBLE_TEST_KIND"] ?? "image"
+            guard let stop = canvas.stop, let sc = scene,
+                  let oid = env["MANIMBLE_TEST_OID"].flatMap({ Int($0) })
+                      ?? stop.visible.map({ Int($0[0]) }).first(where: { sc.objects?[String($0)]?.kind == kind }),
+                  let b0 = stop.box(of: oid) else { log("no \(kind) on \(sceneName ?? "?")"); exit(0) }
+            for (k, l) in stop.lines ?? [:] { log("line \(k) at \(l.prefix(4).map { Int($0) })") }
+            selection = oid; canvas.selection = oid
+            log("\(sceneName ?? "?") object \(oid) (\(kind)) at \(at(b0)), sync=\(env["MANIMBLE_SYNC_EDITS"] != nil)")
+            shot("move-before")
+            let dir0 = shownDir
+            let t0 = Date()
+            canvas.overrides[oid] = Override(dx: 60, dy: 40)        // what a drag leaves behind on mouse-up
+            commitMove(oid, 60, 40)
+            var settled = false
+            for _ in 0..<750 {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                if !settled, busy == 0, canvas.overrides[oid] == nil {
+                    settled = true
+                    log("edit returned, preview settled at \(ms) ms; object at \(at(canvas.stop?.box(of: oid))) optimistic=\(scene?.optimistic ?? false) pill=\(busyPill.isHidden ? "hidden" : "shown")")
+                    for (k, l) in canvas.stop?.lines ?? [:] { log("line \(k) preview at \(l.prefix(4).map { Int($0) }) xform=\(canvas.stop?.xforms?[k]?.map { (($0 * 1000).rounded() / 1000) } ?? [])") }
+                    shot("move-settled")
+                }
+                if settled, shownDir != dir0, scene?.optimistic != true {
+                    log("verified render on screen at \(ms) ms; object at \(at(canvas.stop?.box(of: oid))) pill=\(busyPill.isHidden ? "hidden" : "shown")")
+                    for (k, l) in canvas.stop?.lines ?? [:] { log("line \(k) verified at \(l.prefix(4).map { Int($0) })") }
+                    shot("move-final")
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    log("1 s later: busy=\(busy) verifying=\(verifying) pill=\(busyPill.isHidden ? "hidden" : "shown")")
+                    break
+                }
+            }
+            if !settled { log("timed out") }
+            log("done")
+            exit(0)
+        }
     }
 
     /// Headless check of objects past the slide's edges showing on the pasteboard: MANIMBLE_TEST_OFFSLIDE=deck
@@ -1036,6 +1118,36 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
+    /// MANIMBLE_TEST_NOTES=deck: the drawer's Slide Notes / Build Notes tabs on MANIMBLE_TEST_SCENE (default the
+    /// first slide), saving notes for its second build; notes.log and shots in MANIMBLE_TEST_OUT.
+    func notesTest() {
+        let env = ProcessInfo.processInfo.environment
+        let dir = (env["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? s.appendLine(to: dir + "notes.log") }
+        func shot(_ name: String) {
+            guard let v = window.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
+        }
+        Task { @MainActor in
+            if let name = env["MANIMBLE_TEST_SCENE"] { await selectScene(name) }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            drawer.show(.notes); setDrawerOpen(true)
+            try? await Task.sleep(nanoseconds: 500_000_000); shot("drawer-slide.png")
+            goToStop(1); drawer.show(.buildNotes)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            commitBuildNotes("second build only")
+            for _ in 0..<40 { try? await Task.sleep(nanoseconds: 250_000_000); if busy == 0, scene?.buildNotes?[1] == "second build only" { break } }
+            log("buildNotes=\(scene?.buildNotes ?? []) stop=\(stopIndex) box=\(buildNotesBox.stringValue) target=\(String(describing: buildNotesFor))")
+            goToStop(0); try? await Task.sleep(nanoseconds: 300_000_000)
+            log("at stop 0 box=\(buildNotesBox.stringValue)")
+            goToStop(1); try? await Task.sleep(nanoseconds: 300_000_000); shot("drawer-build.png")
+            showTerminalPage(); try? await Task.sleep(nanoseconds: 1_500_000_000); shot("drawer-term.png")
+            log("terminals=\(terminal.tabCount)")
+            NSApp.terminate(nil)
+        }
+    }
+
     /// Headless check of the animated player: builds, plays, steps, and logs what it is showing over time.
     func presentTest() {
         let dir = (ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] ?? "/tmp") + "/"
@@ -1163,6 +1275,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         cell.onBuild = { [weak self] i in
             guard let self = self else { return }
             self.window.makeFirstResponder(self.table)     // so ↑/↓ keep stepping from the clicked build
+            self.table.buildFocused = true                  // and Delete removes this build, not the slide
             self.goToStop(i)
         }
         if row == buildsRow { cell.setBuilds(buildImages(), active: stopIndex) }
@@ -1211,9 +1324,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let count = scene?.name == n ? (scene?.stops?.count ?? 0) : 0
         if count > 1, (0..<count).contains(stopIndex + d) {
             collapsedBuilds.remove(n)
+            table.buildFocused = true
             goToStop(stopIndex + d)
             return
         }
+        table.buildFocused = false
         guard navigatorScenes.indices.contains(row + d) else { return }
         let next = navigatorScenes[row + d].name
         collapsedBuilds.remove(next)
@@ -1268,6 +1383,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// Show build `i` of the current slide.
     func goToStop(_ i: Int) {
         guard let n = scene?.stops?.count, (0..<n).contains(i) else { return }
+        if i != stopIndex && buildNotesBox.isEditing { window.makeFirstResponder(canvas) }     // commits its notes first
         stopIndex = i; canvas.overrides = [:]; canvas.lineOverrides = [:]; applyStop(); rebuildSteps(); rebuildInspector()
     }
 
@@ -1532,15 +1648,19 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let before = sceneName == name ? canvas.stop : nil
         busy += 1
         var r = req; r["scene"] = name; r["stop"] = stopIndex
+        if ProcessInfo.processInfo.environment["MANIMBLE_SYNC_EDITS"] != nil { r["optimistic"] = false }
         var result: EditResult?
         var failure: String?
         do { result = try await engine.call("edit", r, as: EditResult.self) } catch { failure = "\(error)" }
         busy -= 1
         var ok = false
+        lastBuildMove = nil
         if let res = result, res.ok == true {
             ok = true
             lastChanged = res.changed
+            if res.oneBuild == true, let oid = oid { lastBuildMove = (name, oid, r["stop"] as? Int ?? 0) }
             var msg = res.message == "no change" ? "No change" : "Saved · \(res.message ?? "")"
+            if res.oneBuild == true { msg += " · ⌘A applies it to every build" }
             if let n = res.siblings { msg += " (\(n) similar objects share this line; all moved)" }
             toast(msg)
         } else {
@@ -1567,7 +1687,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         pendingMoves[key] = (dx, dy)
         submit { [weak self] in
             guard let self = self, let p = self.pendingMoves.removeValue(forKey: key) else { return }
-            await self.runEdit(["op": "move", "oid": oid, "dx": p.dx, "dy": p.dy, "scene": scene])
+            await self.runEdit(["op": "move", "oid": oid, "dx": p.dx, "dy": p.dy, "scene": scene, "build": true])
+        }
+    }
+
+    /// Cmd-A right after a move in one build: the move applies to every build of the slide instead.
+    @objc func selectAll(_ sender: Any?) {
+        submit { [weak self] in                 // after the move itself, when it is still queued
+            guard let self = self, let m = self.lastBuildMove, m.scene == self.sceneName, m.stop == self.stopIndex else { return }
+            await self.runEdit(["op": "spread", "oid": m.oid, "scene": m.scene])
         }
     }
 
@@ -2040,6 +2168,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let other = NSScreen.screens.first { $0 != here }
             let p = PresenterController(deck: d, startScene: presentFrom, presenterScreen: here, audienceScreen: other)
             p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            // "Use Slide Show": the presenter window closes and the show carries on as the plain animated show
+            p.onDetach = { [weak self] src in
+                self?.presenter = nil
+                guard let a = src as? AnimatedPlayer else { return }
+                a.onExit = { [weak self] in self?.animatedPlayer = nil; self?.window.makeKeyAndOrderFront(nil) }
+                self?.animatedPlayer = a
+            }
             presenter = p
             if other == nil { toast("One display: the show is full screen behind the presenter window. With a second display it goes there.") }
             return
@@ -2093,6 +2228,25 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func newSlide() { slideOp("new", layout: "title_content") }
     @objc func duplicateSlide() { slideOp("duplicate") }
     @objc func deleteSlide() { slideOp("delete") }
+
+    /// Delete the current build of the slide: its next_slide() goes, so what it showed runs on into the next build.
+    func deleteBuild() {
+        guard let name = sceneName, scene?.name == name, (scene?.stops?.count ?? 0) > 1, player == nil else { return }
+        let stop = stopIndex
+        submit { [weak self] in
+            guard let self = self else { return }
+            self.busy += 1
+            let r = try? await self.engine.call("delete_build", ["scene": name, "stop": stop], as: SlideResult.self)
+            self.busy -= 1
+            guard let res = r, res.ok == true else { self.toast(r?.error ?? "could not delete the build", error: true); return }
+            self.lastChanged = res.changed
+            if let s = res.stop { self.stopIndex = s }
+            await self.loadScene(name, keepStop: true)
+            await self.reloadState()
+            self.refreshBuildRows()
+            self.toast((res.message ?? "deleted build").capitalized + " — ⌘Z to undo")
+        }
+    }
     @objc func restoreSlide() { slideOp("restore") }
     var selectedSlideIsHidden: Bool { state?.scenes.first(where: { $0.name == sceneName })?.hidden == true }
     @objc func toggleHideSlide() { slideOp(selectedSlideIsHidden ? "unhide" : "hide") }
@@ -2158,9 +2312,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func installDrawer() {
         drawer.willChangePage = { [weak self] _ in
             guard let self = self else { return }
-            if self.notesBox.isEditing { self.window.makeFirstResponder(self.canvas) }     // commits the notes first
+            if self.notesBox.isEditing || self.buildNotesBox.isEditing { self.window.makeFirstResponder(self.canvas) }     // commits the notes first
         }
-        drawer.onNewTerminal = { [weak self] in self?.newTerminal() }
+        drawer.onShowTerminal = { [weak self] in self?.showTerminalPage() }
+        drawer.onNewTerminal = { [weak self] in     // + beside Terminal 1 adds another, starting Terminal 1 too if need be
+            guard let self = self, self.workspace != nil else { return }
+            if !self.terminal.hasStarted { self.showTerminalPage() }
+            self.newTerminal()
+        }
         drawer.onHide = { [weak self] in self?.setDrawerOpen(false) }
         terminal.onHide = { [weak self] in self?.drawer.show(.notes) }    // the last shell was killed
         let open = UserDefaults.standard.object(forKey: "showNotes") as? Bool ?? true
@@ -2173,13 +2332,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    var drawerShowsNotes: Bool { !drawer.isHidden && drawer.page == .notes }
+    var drawerShowsNotes: Bool { !drawer.isHidden && (drawer.page == .notes || drawer.page == .buildNotes) }
     var drawerShowsTerminal: Bool { !drawer.isHidden && drawer.page == .terminal }
 
     /// Open or close the drawer, keeping the slide at least 160pt tall.
     func setDrawerOpen(_ on: Bool, minHeight: CGFloat = 110) {
         guard let cs = centerSplit else { return }
-        if !on, notesBox.isEditing { window.makeFirstResponder(canvas) }
+        if !on, notesBox.isEditing || buildNotesBox.isEditing { window.makeFirstResponder(canvas) }
         let wasHidden = drawer.isHidden
         drawer.isHidden = !on
         cs.adjustSubviews()
@@ -2246,6 +2405,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(toggleGrid): item.state = canvas.showGrid ? .on : .off; return true
         case #selector(toggleRuler): item.state = showRuler ? .on : .off; return true
         case #selector(toggleSnap): item.state = canvas.snapEnabled ? .on : .off; return true
+        case #selector(toggleTips): item.state = showTips ? .on : .off; return true
         case #selector(addVerticalGuide), #selector(addHorizontalGuide): return sceneName != nil
         case #selector(clearGuides): return !canvas.userGuides.isEmpty
         case #selector(drawToolMenu(_:)):
@@ -2327,8 +2487,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func nextStop() { moveStop(1) }
     func moveStop(_ d: Int) { goToStop(stopIndex + d) }
 
+    /// View ▸ Show Tips: the transient confirmations and hints ("Saved · …", "Inserted …"). Off by default;
+    /// errors always show. Headless self-tests read the toast text, so they always get the tips.
+    var showTips: Bool {
+        UserDefaults.standard.bool(forKey: "showTips")
+            || ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("MANIMBLE_TEST_") || $0 == "MANIMBLE_SELFTEST" }
+    }
+    @objc func toggleTips() {
+        UserDefaults.standard.set(!showTips, forKey: "showTips")
+        if showTips { toast("Tips on: short confirmations and hints appear here after each action") }
+        else { toastWork?.cancel(); toastPill.hide() }
+    }
+
     var toastWork: DispatchWorkItem?
     func toast(_ s: String, error: Bool = false) {
+        if !error && !showTips { return }
         toastPill.show(s, symbol: error ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
                        tint: error ? .systemOrange : Theme.accent)
         toastWork?.cancel()

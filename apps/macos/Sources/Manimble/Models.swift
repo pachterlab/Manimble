@@ -35,6 +35,7 @@ struct StopInfo: Decodable {
     var visible: [[Double]]          // [oid, x0, y0, x1, y1] in frame pixels
     var sprites: [SpriteInfo]
     var lines: [String: [Double]]?   // oid -> [sx, sy, ex, ey, strokePx]
+    var xforms: [String: [Double]]?  // oid -> [a, b, c, d, tx, ty]: an attached line's sprite mapped to follow an optimistic move
     var cells: [String: [[Double]]]? // table oid -> [row, col, cell x0, y0, x1, y1, entry ink x0, y0, x1, y1] per data cell
 }
 
@@ -51,6 +52,7 @@ struct FormatInfo: Decodable {
     var align: String?               // left | center | right
     var columns: Int?
     var lineSpacing: Double?         // manim line_spacing (0.3 = default)
+    var valign: String?              // top | mid: where text sits in its frame
 }
 
 struct ObjInfo: Decodable {
@@ -73,6 +75,10 @@ struct ObjInfo: Decodable {
     var rotation: Double?            // degrees, from the object's own rotate() calls
     var dims: [Double]?              // manim width/height in frame pixels
     var format: FormatInfo?
+    /// A text frame (x0, y0, x1, y1 in frame px): the box keeps this size whatever is typed, the text sits in it
+    /// by its alignment. Text typed into a layout placeholder gets one.
+    var frame: [Double]?
+    var frameBox: Box? { frame.flatMap { $0.count == 4 ? Box(x0: $0[0], y0: $0[1], x1: $0[2], y1: $0[3]) : nil } }
 }
 
 struct ChangedLines: Decodable {
@@ -98,8 +104,10 @@ struct SceneData: Decodable {
     var source: SourceInfo?
     var error: String?
     var notes: String?               // speaker notes (self.next_slide(notes=...) at the top of construct)
+    var buildNotes: [String]?        // each build's own notes (Presenter View shows them under the slide's)
     var placeholders: [Placeholder]? // empty layout boxes ("Click to add title"), drawn by the editor only
     var font: String?                // the deck's FONT constant
+    var optimistic: Bool?            // a move/resize shown before its verifying render: the exact frames are stale
 }
 
 /// An empty text box of a new slide's layout (a `# manimble placeholder` comment): nothing renders until it is typed into.
@@ -120,6 +128,7 @@ struct EditResult: Decodable {
     var siblings: Int?
     var changed: ChangedLines?
     var pageNumber: Bool?            // the edit changed a slide-number line
+    var oneBuild: Bool?              // a move that applies to the current build only
 }
 
 struct SourceEditResult: Decodable {
@@ -202,6 +211,7 @@ struct DeckSlide: Decodable {
     var pages: [String]
     var error: String?
     var notes: String?
+    var buildNotes: [String]?
 }
 
 struct PageNumberInfo: Decodable {
@@ -231,4 +241,6 @@ struct SlideResult: Decodable {
     var message: String?
     var error: String?
     var select: String?
+    var stop: Int?                   // delete_build: the build to show afterwards
+    var changed: ChangedLines?
 }

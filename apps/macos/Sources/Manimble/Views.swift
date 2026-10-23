@@ -141,9 +141,13 @@ extension NSColor {
     }
 }
 
-/// The slide navigator: Delete removes the selected slide, right-click offers the Slide menu for that row.
+/// The slide navigator: Delete removes the selected slide (or the build last clicked under it), right-click offers
+/// the Slide menu for that row.
 final class SlideTable: NSTableView {
     var onDelete: (() -> Void)?
+    var onDeleteBuild: (() -> Void)?
+    /// A build panel under the selected slide was clicked (or stepped to) since the last click on a slide row.
+    var buildFocused = false
     var onMenu: ((Int) -> NSMenu?)?
     /// Called when the already-selected slide is clicked again (toggles its builds list).
     var onReclick: ((Int) -> Void)?
@@ -153,6 +157,7 @@ final class SlideTable: NSTableView {
     override func mouseDown(with event: NSEvent) {
         let row = self.row(at: convert(event.locationInWindow, from: nil))
         clickedSelected = row >= 0 && row == selectedRow
+        buildFocused = false
         super.mouseDown(with: event)
     }
     /// The table's action fires after a click that was not a drag; a reclick of the selected row toggles.
@@ -161,7 +166,10 @@ final class SlideTable: NSTableView {
         onReclick?(clickedRow)
     }
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 51 || event.keyCode == 117, selectedRow >= 0 { onDelete?(); return }
+        if event.keyCode == 51 || event.keyCode == 117, selectedRow >= 0 {
+            if buildFocused, let d = onDeleteBuild { d() } else { onDelete?() }
+            return
+        }
         if event.keyCode == 125 || event.keyCode == 126, let arrow = onArrow,
            event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
             arrow(event.keyCode == 125 ? 1 : -1); return
@@ -453,8 +461,14 @@ extension String {
 }
 
 /// Split view with a wider, easy-to-grab divider that still draws as a hairline.
-final class GrabSplitView: NSSplitView {
+final class GrabSplitView: NSSplitView, NSSplitViewDelegate {
+    /// Let the first and last panes collapse when their divider is dragged past half their minimum
+    /// width; dragging the divider back out from the window edge brings them back.
+    var collapsesEdgePanes = false { didSet { delegate = collapsesEdgePanes ? self : nil } }
     override var dividerThickness: CGFloat { 9 }
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        collapsesEdgePanes && (subview === arrangedSubviews.first || subview === arrangedSubviews.last)
+    }
     override func drawDivider(in rect: NSRect) {
         NSColor.separatorColor.setFill()
         if isVertical { NSRect(x: rect.midX - 0.5, y: rect.minY, width: 1, height: rect.height).fill() }

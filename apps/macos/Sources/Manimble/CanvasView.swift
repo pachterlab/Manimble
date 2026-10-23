@@ -81,6 +81,36 @@ vertex VOut vs_line(uint vid [[vertex_id]], constant U &u [[buffer(0)]]) {
     return o;
 }
 
+// A sprite mapped by an affine transform (an arrow following a moved object before the render lands):
+// geo = x, y, w, h of the sprite; rect = (a, b, c, d) and pad = (tx, ty) of x' = a x + c y + tx, y' = b x + d y + ty;
+// color = (dark-mode chroma thresholds, 0, opacity).
+vertex VOut vs_xform(uint vid [[vertex_id]], constant U2 &u [[buffer(0)]]) {
+    const float2 c[6] = { float2(0,0), float2(1,0), float2(0,1), float2(1,0), float2(1,1), float2(0,1) };
+    float2 p = c[vid];
+    float2 q = u.geo.xy + p * u.geo.zw;
+    float2 px = float2(u.rect.x * q.x + u.rect.z * q.y + u.pad.x, u.rect.y * q.x + u.rect.w * q.y + u.pad.y);
+    VOut o;
+    o.pos = float4(px.x / u.frame.x * 2.0 - 1.0, 1.0 - px.y / u.frame.y * 2.0, 0.0, 1.0);
+    o.uv = p;
+    return o;
+}
+fragment float4 fs_tex_x(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U2 &u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    return t.sample(s, in.uv) * u.color.a;
+}
+float3 darkmap(float3 c, float2 th);
+fragment float4 fs_tex_x_dark(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U2 &u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 p = t.sample(s, in.uv);
+    if (p.a <= 0.0) return float4(0.0);
+    return float4(darkmap(p.rgb / p.a, u.color.xy) * p.a, p.a) * u.color.a;
+}
+fragment float4 fs_tex_x_invert(VOut in [[stage_in]], texture2d<float> t [[texture(0)]], constant U2 &u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float4 p = t.sample(s, in.uv);
+    return float4(p.a - p.rgb, p.a) * u.color.a;
+}
+
 bool in_hole(VOut in, constant U &u) {
     float2 px = u.rect.xy + in.uv * u.rect.zw;
     return u.hole.z > u.hole.x && all(px >= u.hole.xy) && all(px <= u.hole.zw);
@@ -158,6 +188,7 @@ final class CanvasView: MTKView {
     private var invertPipe: MTLRenderPipelineState!
     private var solidPipe: MTLRenderPipelineState!
     private var linePipe: MTLRenderPipelineState!
+    private var xformPipe: MTLRenderPipelineState!, xformDarkPipe: MTLRenderPipelineState!, xformInvertPipe: MTLRenderPipelineState!
     private var gradPipe: MTLRenderPipelineState!
     private var shadowPipe: MTLRenderPipelineState!
     private var discPipe: MTLRenderPipelineState!
@@ -167,6 +198,8 @@ final class CanvasView: MTKView {
 
     // content
     var frameSize = CGSize(width: 1280, height: 720) { didSet { onGeometryChange?() } }
+    /// A move/resize shown before its verifying render: the exact frame is stale, so the backdrop and sprites are composited.
+    var optimistic = false { didSet { if optimistic != oldValue { needsDisplay2() } } }
     var stop: StopInfo? { didSet { if let e = inline, e.placeholder == nil, stop?.box(of: e.oid) == nil { finishTextEdit(commit: true) }; needsDisplay2(); onGeometryChange?() } }
     var sceneObjects: [String: ObjInfo] = [:]
     var selection: Int? { didSet {
@@ -296,8 +329,13 @@ final class CanvasView: MTKView {
         var done: ((String?, @escaping () -> Void) -> Void)?
         var cell: (row: Int, col: Int, area: Box)?   // typing into one cell of a table; the rest of it stays drawn
         var placeholder: Int?                // typing into the layout box on this line (oid is -1)
-        var anchor: (x: Double, y: Double, top: Bool)?   // frame px: the text's left edge, at its top or vertical centre
+        var anchor: TextAnchor?              // a layout box or text frame: where the text is pinned
+        var align = "left"                   // the lines' alignment (left | center | right)
+        var lineSpacing: Double?             // manim line_spacing (0.3 when nil)
     }
+    /// Where text is pinned in its box (frame px): `x` is its left edge, centre or right edge by `align`; `y` its
+    /// top (`top`) or vertical centre.
+    struct TextAnchor { var x: Double; var y: Double; var top: Bool; var align: String }
     fileprivate var inline: InlineEdit?
     private var colorCache: [String: NSColor] = [:]
     private var promptCache: [String: MTLTexture] = [:]
@@ -346,6 +384,9 @@ final class CanvasView: MTKView {
         invertPipe = make("fs_tex_invert")
         solidPipe = make("fs_solid")
         linePipe = make("fs_solid", vertex: "vs_line")
+        xformPipe = make("fs_tex_x", vertex: "vs_xform")
+        xformDarkPipe = make("fs_tex_x_dark", vertex: "vs_xform")
+        xformInvertPipe = make("fs_tex_x_invert", vertex: "vs_xform")
         gradPipe = make("fs_gradient2", vertex: "vs_geo")
         shadowPipe = make("fs_shadow2", vertex: "vs_geo")
         discPipe = make("fs_disc2", vertex: "vs_geo")
@@ -354,8 +395,16 @@ final class CanvasView: MTKView {
     // MARK: textures
 
     /// Decode a PNG/JPEG into a premultiplied RGBA8 Metal texture (cached).
+    /// Sprites are named by their pixel content (`sp_<hash>.png`), so one that a new render wrote again under a new
+    /// folder is the same texture; frames (`stopN.png`, `bgN.png`) are known by their path.
+    static func textureKey(_ path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        return name.hasPrefix("sp_") ? name : path
+    }
+
     func texture(path: String) -> MTLTexture? {
-        if let t = cache[path] { return t }
+        let key = CanvasView.textureKey(path)
+        if let t = cache[key] { return t }
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
         let w = img.width, h = img.height
@@ -368,8 +417,8 @@ final class CanvasView: MTKView {
         d.usage = .shaderRead
         guard let t = device!.makeTexture(descriptor: d) else { return nil }
         t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: bytes, bytesPerRow: w * 4)
-        cache[path] = t
-        cacheOrder.append(path)
+        cache[key] = t
+        cacheOrder.append(key)
         if cacheOrder.count > 160 {            // bound memory: drop oldest
             for old in cacheOrder.prefix(40) { cache.removeValue(forKey: old) }
             cacheOrder.removeFirst(40)
@@ -377,7 +426,11 @@ final class CanvasView: MTKView {
         return t
     }
 
-    func dropTextures() { cache.removeAll(); cacheOrder.removeAll() }
+    /// A new render of the slide: its frames change; content-hashed sprites that come back are reused.
+    func dropTextures() {
+        for k in cacheOrder where !k.hasPrefix("sp_") { cache.removeValue(forKey: k) }
+        cacheOrder.removeAll { !$0.hasPrefix("sp_") }
+    }
 
     // MARK: geometry
 
@@ -465,9 +518,33 @@ final class CanvasView: MTKView {
         return nil
     }
 
-    /// Box inflated so thin objects (lines) stay easy to hit and see.
+    static let framePad = 0.1                  // the text's inset from its frame's edges (manim units)
+
+    /// The text frame of a text object that has one, as shown right now (a drag or scale preview included).
+    private func frameBox(_ oid: Int) -> Box? {
+        guard let f = sceneObjects[String(oid)]?.frameBox else { return nil }
+        guard let o = overrides[oid] else { return f }
+        let w = f.w * o.scale, h = f.h * o.scale
+        return Box(x0: f.cx + o.dx - w / 2, y0: f.cy + o.dy - h / 2, x1: f.cx + o.dx + w / 2, y1: f.cy + o.dy + h / 2)
+    }
+
+    /// Where a replacement raster of a text goes: pinned in its frame by its alignment, else centred on the ink.
+    private func replacementBox(_ oid: Int, _ o: Override, ink b: Box, _ rep: (tex: MTLTexture, w: Double, h: Double)) -> Box {
+        let w = rep.w * o.scale, h = rep.h * o.scale
+        if let f = frameBox(oid) {
+            let fmt = sceneObjects[String(oid)]?.format, pad = CanvasView.framePad * unitPx
+            let x0 = fmt?.align == "center" ? f.cx - w / 2 : fmt?.align == "right" ? f.x1 - pad - w : f.x0 + pad
+            let y0 = fmt?.valign == "mid" ? f.cy - h / 2 : f.y0 + pad
+            return Box(x0: x0, y0: y0, x1: x0 + w, y1: y0 + h)
+        }
+        let cx = b.cx + o.dx, cy = b.cy + o.dy
+        return Box(x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2)
+    }
+
+    /// The box an object is selected, hit and handled by: its text frame when it has one, else its ink,
+    /// inflated so thin objects (lines) stay easy to hit and see.
     private func currentBox(_ oid: Int) -> Box? {
-        guard var b = rawBox(oid) else { return nil }
+        guard var b = frameBox(oid) ?? rawBox(oid) else { return nil }
         let minSide = 10 * pxPerPoint
         if b.w < minSide { b.x0 = b.cx - minSide / 2; b.x1 = b.x0 + minSide }
         if b.h < minSide { b.y0 = b.cy - minSide / 2; b.y1 = b.y0 + minSide }
@@ -478,11 +555,7 @@ final class CanvasView: MTKView {
         if let e = inline, e.oid == oid, e.cell == nil { return textEditorBox }
         guard var b = stop?.box(of: oid) else { return nil }
         if let o = overrides[oid] {
-            if let rep = o.replacement {
-                let cx = b.cx + o.dx, cy = b.cy + o.dy
-                return Box(x0: cx - rep.w * o.scale / 2, y0: cy - rep.h * o.scale / 2,
-                           x1: cx + rep.w * o.scale / 2, y1: cy + rep.h * o.scale / 2)
-            }
+            if let rep = o.replacement { return replacementBox(oid, o, ink: b, rep) }
             let w = b.w * o.scale, h = b.h * o.scale
             b = Box(x0: b.cx + o.dx - w / 2, y0: b.cy + o.dy - h / 2, x1: b.cx + o.dx + w / 2, y1: b.cy + o.dy + h / 2)
         }
@@ -663,7 +736,7 @@ final class CanvasView: MTKView {
             // the exact frame has object edges blended into the background, so dark mode maps each layer on its own
             // (inverting is linear, but the same path keeps "leave images alone" working)
             let slide = layers.contains(.slide)
-            if slide && overrides.isEmpty && lineOverrides.isEmpty && !dark && inline == nil {
+            if slide && overrides.isEmpty && lineOverrides.isEmpty && !dark && inline == nil && !optimistic {
                 if let t = texture(path: stop.png) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
             } else {
                 if slide, let t = texture(path: stop.bg) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
@@ -673,11 +746,24 @@ final class CanvasView: MTKView {
                     let o = overrides[sp.oid]
                     let map = darkImages || sceneObjects[String(sp.oid)]?.kind != "image"
                     if let o = o, let rep = o.replacement, let b = stop.box(of: sp.oid) {
-                        let cx = b.cx + o.dx, cy = b.cy + o.dy
-                        drawTex(rep.tex, cx - rep.w * o.scale / 2, cy - rep.h * o.scale / 2, rep.w * o.scale, rep.h * o.scale)
+                        let r = replacementBox(sp.oid, o, ink: b, rep)
+                        drawTex(rep.tex, r.x0, r.y0, r.w, r.h)
                         continue
                     }
                     guard let t = texture(path: sp.file) else { continue }
+                    if o == nil, let xf = stop.xforms?[String(sp.oid)], xf.count >= 6 {
+                        // an arrow attached to an object just moved: its sprite is mapped to the new end points
+                        var u = Uniforms2(rect: SIMD4(Float(xf[0]), Float(xf[1]), Float(xf[2]), Float(xf[3])),
+                                          color: SIMD4(DarkMode.lo, DarkMode.hi, 0, 1), frame: frame,
+                                          pad: SIMD2(Float(xf[4] + ox), Float(xf[5] + oy)),
+                                          geo: SIMD4(Float(sp.x), Float(sp.y), Float(sp.w), Float(sp.h)))
+                        enc.setRenderPipelineState(!dark || !map ? xformPipe : view == .invert ? xformInvertPipe : xformDarkPipe)
+                        enc.setVertexBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
+                        enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
+                        enc.setFragmentTexture(t, index: 0)
+                        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                        continue
+                    }
                     if let o = o {
                         let b = stop.box(of: sp.oid) ?? Box(x0: sp.x, y0: sp.y, x1: sp.x + sp.w, y1: sp.y + sp.h)
                         let cx = b.cx, cy = b.cy
@@ -1234,9 +1320,12 @@ extension CanvasView: NSTextViewDelegate {
     /// selected. `done` gets the new text (nil: cancelled or unchanged) and a closure that removes the editor;
     /// call it once the new text's preview is up so the old text never flashes back.
     /// With `cell`, types into that cell of a table instead (`sizing`: the text its ink shows, when not `text`).
+    /// `align`, `valign` and `lineSpacing` lay the lines out as Manim will; with `frame`, the text is pinned
+    /// in that frame by them.
     func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool, color: String?,
                        at: CGPoint?, cell: (row: Int, col: Int, cell: Box, ink: Box)? = nil, sizing: String? = nil,
-                       placeholder: Placeholder? = nil,
+                       placeholder: Placeholder? = nil, align: String = "left", valign: String = "top",
+                       lineSpacing: Double? = nil, frame: Box? = nil,
                        changed: @escaping (String) -> Void,
                        done: @escaping (String?, @escaping () -> Void) -> Void) -> Bool {
         if let e = inline { e.view.removeFromSuperview(); inline = nil }
@@ -1283,10 +1372,16 @@ extension CanvasView: NSTextViewDelegate {
             return Box(x0: c.cell.x0 + d, y0: c.cell.y0 + d, x1: c.cell.x1 - d, y1: c.cell.y1 - d)
         }
         if cell != nil { tv.onTab = { [weak self] in self?.finishTextEdit(commit: true) } }
+        var anchor = placeholder.map { placeholderAnchor($0) }
+        if let f = frame, cell == nil, placeholder == nil {
+            let pad = CanvasView.framePad * unitPx
+            anchor = TextAnchor(x: align == "center" ? f.cx : align == "right" ? f.x1 - pad : f.x0 + pad,
+                                y: valign == "mid" ? f.cy : f.y0 + pad, top: valign != "mid", align: align)
+        }
         inline = InlineEdit(oid: oid, view: tv, center: CGPoint(x: area?.cx ?? b.cx, y: area?.cy ?? b.cy), fontPx: fontPx,
                             family: family, bold: bold, italic: italic, original: text, done: done,
                             cell: cell.map { ($0.row, $0.col, area!) }, placeholder: placeholder?.line,
-                            anchor: placeholder.map { placeholderAnchor($0) })
+                            anchor: anchor, align: cell == nil ? align : "left", lineSpacing: cell == nil ? lineSpacing : nil)
         addSubview(tv)
         layoutTextEditor()
         setNeedsDisplay(bounds)
@@ -1331,26 +1426,43 @@ extension CanvasView: NSTextViewDelegate {
         guard let e = inline, let lm = e.view.layoutManager, let tc = e.view.textContainer else { return }
         let s = effectiveScale
         let font = CanvasView.editorFont(e.family, bold: e.bold, italic: e.italic, size: max(1, e.fontPx * s))
-        if e.view.font?.pointSize != font.pointSize { e.view.font = font }
+        // Manim's line pitch is the em times (1 + line_spacing), 1.3 em by default; the editor's lines keep it
+        let ps = NSMutableParagraphStyle()
+        ps.alignment = e.align == "center" ? .center : e.align == "right" ? .right : .left
+        ps.lineSpacing = max(0, font.pointSize * (1 + (e.lineSpacing ?? 0.3)) - lm.defaultLineHeight(for: font))
+        if e.view.font?.pointSize != font.pointSize || e.view.defaultParagraphStyle != ps {
+            e.view.font = font
+            e.view.defaultParagraphStyle = ps
+            if let ts = e.view.textStorage { ts.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: ts.length)) }
+        }
         e.view.typingAttributes[.font] = font
+        e.view.typingAttributes[.paragraphStyle] = ps
+        // the lines align within the widest one: measure them unconstrained, then lay out at that width
+        tc.containerSize = NSSize(width: 1e6, height: 1e6)
         lm.ensureLayout(for: tc)
+        var widest: CGFloat = 0
+        lm.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: lm.numberOfGlyphs)) { _, used, _, _, _ in widest = max(widest, used.width) }
+        let w = max(widest, 2) + 2
+        if e.align != "left" { tc.containerSize = NSSize(width: w, height: 1e6); lm.ensureLayout(for: tc) }
         let used = lm.usedRect(for: tc)
-        let w = max(used.width, 2) + 2, h = max(used.height, lm.defaultLineHeight(for: font))
+        let h = max(used.height, lm.defaultLineHeight(for: font))
         let r = slideRect
         let cx = r.minX + e.center.x * s, cy = r.maxY - e.center.y * s
         var f = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
-        if let a = e.anchor {                     // a layout box: grows rightwards (and down) from its left edge
-            let ay = r.maxY - CGFloat(a.y) * s
-            f = CGRect(x: r.minX + CGFloat(a.x) * s, y: a.top ? ay - h : ay - h / 2, width: w, height: h)
+        if let a = e.anchor {                     // pinned: grows from its left edge, centre or right edge (and down)
+            let ax = r.minX + CGFloat(a.x) * s, ay = r.maxY - CGFloat(a.y) * s
+            let x = a.align == "center" ? ax - w / 2 : a.align == "right" ? ax - w : ax
+            f = CGRect(x: x, y: a.top ? ay - h : ay - h / 2, width: w, height: h)
         }
         if e.view.frame != f { e.view.frame = f }
     }
 
     /// Where text typed into a layout box starts (frame px), matching the engine's placement: 0.1 units in from
     /// the left edge, vertically centred for a title and 0.1 units below the top otherwise.
-    func placeholderAnchor(_ ph: Placeholder) -> (x: Double, y: Double, top: Bool) {
-        let b = ph.rect, pad = 0.1 * unitPx
-        return ph.role == "title" ? (b.x0 + pad, b.cy, false) : (b.x0 + pad, b.y0 + pad, true)
+    func placeholderAnchor(_ ph: Placeholder) -> TextAnchor {
+        let b = ph.rect, pad = CanvasView.framePad * unitPx
+        return ph.role == "title" ? TextAnchor(x: b.x0 + pad, y: b.cy, top: false, align: "left")
+                                  : TextAnchor(x: b.x0 + pad, y: b.y0 + pad, top: true, align: "left")
     }
 
     static let bullet = "\u{2022} "

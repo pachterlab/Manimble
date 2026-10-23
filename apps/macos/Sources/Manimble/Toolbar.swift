@@ -154,6 +154,7 @@ extension MainController: NSToolbarDelegate {
             m.addItem(.separator())
             add("Export PowerPoint (.pptx)…", #selector(exportPowerPoint))
             add("Export Keynote (.key)…", #selector(exportKeynote))
+            add("Export Movie (.mp4)…", #selector(exportMovie))
             m.addItem(.separator())
             add("Save PDF…", #selector(shareChosen(_:)), 3)
             i.menu = m
@@ -466,6 +467,32 @@ extension MainController: NSToolbarDelegate {
         Task { @MainActor in
             let r = try? await engine.call("export", req, as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); toast(r?.error ?? "could not start the export", error: true) }
+        }
+    }
+
+    // MARK: Movie (.mp4) export
+
+    /// File ▸ Export To ▸ Movie: the animated show as one MP4 (every build plays, then holds its last frame), built and
+    /// encoded by the engine (`export_movie`, progress by events). The Save panel asks which slides, the resolution,
+    /// the hold and the frame rate.
+    @objc func exportMovie() {
+        guard let ws = workspace, let scenes = state?.scenes, !scenes.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.nameFieldStringValue = (ws.original.deletingLastPathComponent().lastPathComponent == "slides"
+            ? "presentation" : ws.original.lastPathComponent) + ".mp4"
+        panel.message = "Export the animated show as a movie"
+        let options = MovieExportOptions(scenes: scenes, currentSlide: sceneName, height: animationHeight)
+        panel.accessoryView = options.view
+        panel.delegate = options
+        guard panel.runModal() == .OK, var url = panel.url, let names = try? options.selectedScenes() else { return }
+        if url.pathExtension.lowercased() != "mp4" { url.appendPathExtension("mp4") }
+        var req: [String: Any] = ["path": url.path, "height": options.height, "hold": options.holdSeconds, "fps": options.frameRate]
+        if let names { req["scenes"] = names }
+        busyPill.show("Exporting movie…", symbol: nil, tint: nil, spinning: true)
+        Task { @MainActor in
+            let r = try? await engine.call("export_movie", req, as: UndoResult.self)
+            if r?.ok != true { busyPill.hide(); toast(r?.error ?? "could not start the movie export", error: true) }
         }
     }
 

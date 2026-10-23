@@ -31,9 +31,35 @@ def py_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
-# A text box's wrap width (manim units), on the line of its string literal. The text is wrapped there by
-# soft line breaks, written " \n" (the space is invisible at the end of a line) so they can be undone.
+# A text box, on the line of its string literal: `# manimble box w=<width>` is the wrap width (manim units; the
+# text is wrapped there by soft line breaks, written " \n" (the space is invisible at the end of a line) so they
+# can be undone). With h=, x= and y= (top-left corner, y up) it is a text frame like PowerPoint's: the box keeps
+# its size whatever is typed, and the text sits inside it by its alignment (v=top|mid: the vertical anchor).
 BOX_RE = re.compile(r"# manimble box w=(\d+(?:\.\d+)?)")
+BOX_TAG_RE = re.compile(r"# manimble box((?: [whxyv]=-?[\d.]+| v=(?:top|mid))+)")
+BOX_PAD = 0.1          # the text's inset from the frame's edges (manim units)
+
+
+def parse_box_tag(line: str) -> dict | None:
+    """{w, h, x, y (floats), v (str)} from a `# manimble box` comment, whichever keys it carries."""
+    m = BOX_TAG_RE.search(line)
+    if not m:
+        return None
+    out: dict = {}
+    for tok in m.group(1).split():
+        k, v = tok.split("=", 1)
+        out[k] = v if k == "v" else float(v)
+    return out
+
+
+def box_tag(fields: dict) -> str:
+    parts = [f"w={fmt(fields['w'], 3)}"]
+    for k in ("h", "x", "y"):
+        if fields.get(k) is not None:
+            parts.append(f"{k}={fmt(fields[k], 3)}")
+    if fields.get("v"):
+        parts.append(f"v={fields['v']}")
+    return "# manimble box " + " ".join(parts)
 
 
 def unwrap_soft(s: str) -> str:
@@ -508,31 +534,53 @@ class Planner:
             raise EditError(f"the text is the shared constant {t.via['name']}; it cannot be wrapped for one object")
         return t.src, t.node.end_lineno
 
-    def box_width(self, obj: dict) -> float | None:
-        """The wrap width (manim units) a text box was given by dragging its side handles, if any."""
+    def box_info(self, obj: dict) -> dict | None:
+        """The text's `# manimble box` fields (w, and for a frame h, x, y, v), if it has the comment."""
         try:
             src, ln = self._box_line(obj)
         except EditError:
             return None
         end = src.line_starts[ln] if ln < len(src.line_starts) else len(src.data)
-        m = BOX_RE.search(src.data[src.line_starts[ln - 1]:end].decode("utf-8"))
-        return float(m.group(1)) if m else None
+        return parse_box_tag(src.data[src.line_starts[ln - 1]:end].decode("utf-8"))
 
-    def plan_wrap(self, obj: dict, new: str, width: float) -> list[Edit]:
-        """The text re-wrapped (`new`) plus the `# manimble box w=<width>` comment that remembers its box."""
+    def frame_box(self, obj: dict) -> dict | None:
+        """The text frame {x, y, w, h, v} (manim units, y up, x/y its top-left corner) when the box is one."""
+        info = self.box_info(obj)
+        if not info or any(info.get(k) is None for k in ("w", "h", "x", "y")):
+            return None
+        return {"x": info["x"], "y": info["y"], "w": info["w"], "h": info["h"], "v": info.get("v") or "top"}
+
+    def box_width(self, obj: dict) -> float | None:
+        """The width (manim units) the text wraps to: the box width from its side handles, or the inside of its frame."""
+        info = self.box_info(obj)
+        if not info or info.get("w") is None:
+            return None
+        return max(0.05, info["w"] - 2 * BOX_PAD) if self.frame_box(obj) else info["w"]
+
+    def plan_box(self, obj: dict, **fields) -> list[Edit]:
+        """Write the text's `# manimble box` comment with these fields changed (the rest kept)."""
         src, ln = self._box_line(obj)
-        edits = self.plan_text(obj, new, shared=False) if new != obj["value"] else []
         a = src.line_starts[ln - 1]
         b = src.line_starts[ln] - 1 if ln < len(src.line_starts) else len(src.data)
         line = src.data[a:b].decode("utf-8")
-        tag = f"box w={fmt(width, 3)}"
-        m = BOX_RE.search(line)
+        merged = dict(parse_box_tag(line) or {})
+        merged.update({k: v for k, v in fields.items() if v is not None})
+        if merged.get("w") is None:
+            raise EditError("a text box needs a width")
+        tag = box_tag(merged)
+        m = BOX_TAG_RE.search(line)
         if m:
             s, e = (len(line[:i].encode("utf-8")) for i in m.span())
-            return edits + [Edit(src.rel, a + s, a + e, "# manimble " + tag)]
+            return [Edit(src.rel, a + s, a + e, tag)]
         comment = next((tok for tok in _line_tokens(src, ln) if tok.type == tokenize.COMMENT), None)
-        add = (" " + tag) if comment is not None and comment.string.startswith("# manimble") else "  # manimble " + tag
-        return edits + [Edit(src.rel, b, b, add)]
+        add = (" " + tag[2:]) if comment is not None and comment.string.startswith("# manimble") else "  " + tag
+        return [Edit(src.rel, b, b, add)]
+
+    def plan_wrap(self, obj: dict, new: str, width: float, **fields) -> list[Edit]:
+        """The text re-wrapped (`new`) plus the `# manimble box w=<width>` comment that remembers its box
+        (`fields`: other box fields to change along, such as x when the frame's left side was dragged)."""
+        edits = self.plan_text(obj, new, shared=False) if new != obj["value"] else []
+        return edits + self.plan_box(obj, w=width, **fields)
 
     # ------------------------------------------------------ simple args
     def plan_arg(self, obj: dict, name: str, literal: str, outermost: bool = False) -> list[Edit]:
@@ -700,6 +748,116 @@ class Planner:
         line_end = csrc.off(estmt.end_lineno, estmt.end_col_offset)
         return [Edit(csrc.rel, line_end, line_end, f"\n{indent}{var}.shift({vec_expr(dx, dy)})")]
 
+    # ----------------------------------------------------- one build only
+    BUILD_MARK = "# manimble build"
+    BUILD_END_MARK = "# manimble build end"
+
+    def plan_build_move(self, scene: dict, obj: dict, stops: list, stop: int, dx: float, dy: float
+                        ) -> list[tuple[str, list[Edit]]]:
+        """Move an object in one build of its slide only: `var.shift((dx, dy, 0))  # manimble build` where the build
+        starts (after the previous build's next_slide(), or after the object is made when it first shows in this
+        build) and the opposite `# manimble build end` shift right after the next_slide() that ends it, so the other
+        builds keep their positions. Moving it again in the same build adjusts the same lines."""
+        src, var, pre, made, before, after = self._build_context(scene, obj, stops, stop)
+        end = [self._bump(src, after, var, self.BUILD_END_MARK, -dx, -dy)] if after is not None else []
+        attempts = []
+        start = before if before is not None and before.lineno > made.end_lineno else made
+        attempts.append((f"shifted it in build {stop + 1} only",
+                         pre + [self._bump(src, start, var, self.BUILD_MARK, dx, dy)] + end))
+        if after is not None and not pre:        # later code in the build places it: shift it just before the pause
+            attempts.append((f"shifted it at the end of build {stop + 1} only",
+                             [self._bump(src, after, var, self.BUILD_MARK, dx, dy, ahead=True)] + end))
+        return attempts
+
+    def plan_spread_build_move(self, scene: dict, obj: dict, stops: list, stop: int) -> list[tuple[str, list[Edit]]]:
+        """Turn the one-build move of `plan_build_move` at `stop` into a move in every build: its pair of shift lines
+        goes and the object's own position in the source moves by the same amount."""
+        src, var, pre, made, before, after = self._build_context(scene, obj, stops, stop)
+        if pre:
+            raise EditError("this element was not moved in this build alone")
+        start = before if before is not None and before.lineno > made.end_lineno else made
+        found = self._marked(src, start, var, self.BUILD_MARK)
+        if found is None and after is not None:
+            found = self._marked(src, after, var, self.BUILD_MARK, ahead=True)
+        if found is None:
+            raise EditError("this element was not moved in this build alone")
+        x, y = _shift_of(found)
+        edits = [Edit(src.rel, *_stmt_lines(src, found), "")]
+        if after is not None:
+            edits.append(self._bump(src, after, var, self.BUILD_END_MARK, x, y))
+        marks = {s.lineno for s in ast.walk(src.tree) if isinstance(s, ast.Expr) and self._is_mark(src, s)}
+        own = dict(obj, events=[e for e in obj["events"]
+                                if not (e["frames"][-1]["file"] == src.rel and e["frames"][-1]["pos"][0] in marks)])
+        return [(f"moved it in every build ({how})", edits + plan)
+                for how, plan in self.plan_move(own, x, y) if plan]
+
+    def _build_context(self, scene: dict, obj: dict, stops: list, stop: int):
+        """(src, var, edits naming the object, its creation statement, the next_slide() statements that start and
+        end the build) for a move in one build, or EditError when the slide's code is not laid out for one."""
+        if len(stops) < 2:
+            raise EditError("this slide has only one build")
+        src, _, top, stmt = self._creation(obj)
+        if src.rel != scene["file"]:
+            raise EditError("this element is made outside the slide's code")
+        cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == scene["name"]), None)
+        fn = next((n for n in (cls.body if cls else []) if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
+        loops = (ast.For, ast.AsyncFor, ast.While)
+        if fn is None or src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) is not fn \
+                or src.enclosing(stmt, loops) is not None:
+            raise EditError("this element is not made directly in construct()")
+        var, pre = self._ensure_var(obj, src, top, stmt)
+
+        def pause(i):
+            if i < 0 or i >= len(stops) - 1:
+                return None
+            site = stops[i].get("site")
+            call = src.find_call(site["pos"]) if site and site.get("file") == src.rel else None
+            s = src.parent.get(call) if call is not None else None
+            if not isinstance(s, ast.Expr) or src.enclosing(s, loops) is not None \
+                    or src.enclosing(s, (ast.FunctionDef, ast.AsyncFunctionDef)) is not fn:
+                raise EditError("this build's next_slide() is not a plain call in construct()")
+            return s
+        before, after = pause(stop - 1), pause(stop)
+        if after is not None and after.lineno < stmt.end_lineno:
+            raise EditError("this element is made after this build")
+        return src, var, pre, stmt, before, after
+
+    def _is_mark(self, src: Src, s) -> bool:
+        a, b = _stmt_lines(src, s)
+        return self.BUILD_MARK in src.data[a:b].decode("utf-8")
+
+    def _marked(self, src: Src, anchor, var: str, mark: str, ahead: bool = False):
+        """The `var.shift(...)  <mark>` statement among the marked lines right after `anchor` (right before it when
+        `ahead`), if any."""
+        body = _body_of(src, anchor)
+        i = body.index(anchor)
+        run = body[i + 1:] if not ahead else body[:i][::-1]
+        for s in run:
+            if not (isinstance(s, ast.Expr) and self._is_mark(src, s)):
+                break
+            a, b = _stmt_lines(src, s)
+            if src.data[a:b].decode("utf-8").rstrip().endswith(mark) and _shift_of(s) is not None \
+                    and ast.unparse(s.value.func) == f"{var}.shift":
+                return s
+        return None
+
+    def _bump(self, src: Src, anchor, var: str, mark: str, dx: float, dy: float, ahead: bool = False) -> Edit:
+        """Add (dx, dy) to the marked shift next to `anchor`: a new line, the old one adjusted, or the line removed
+        when the shifts cancel."""
+        s = self._marked(src, anchor, var, mark, ahead)
+        if s is not None:
+            x, y = _shift_of(s)
+            dx, dy = x + dx, y + dy
+        line = f"{var}.shift(({fmt(dx)}, {fmt(dy)}, 0))  {mark}"
+        if s is not None:
+            a, b = _stmt_lines(src, s)
+            keep = abs(dx) > 5e-4 or abs(dy) > 5e-4
+            return Edit(src.rel, a, b, " " * s.col_offset + line + "\n" if keep else "")
+        if ahead:
+            at = src.line_starts[anchor.lineno - 1]
+            return Edit(src.rel, at, at, " " * anchor.col_offset + line + "\n")
+        return _after_stmt(src, anchor, line)
+
     # --------------------------------------------------------- resizing
     def plan_resize(self, obj: dict, ratio: float) -> list[tuple[str, list[Edit]]]:
         attempts = []
@@ -786,6 +944,25 @@ class Planner:
         indent = " " * last.col_offset
         at = src.line_starts[last.end_lineno] - 1 if last.end_lineno < len(src.line_starts) else len(src.data)
         return Edit(src.rel, at, at, "\n" + indent + line), last.end_lineno + 1
+
+    def plan_delete_stop(self, scene: dict, site: dict | None) -> list[Edit]:
+        """Remove the `self.next_slide()` at `site` (recorded while the scene ran), so the build it ends runs on
+        into the next one. Only a plain call written in the scene's own code qualifies: one reached through a
+        helper, a loop that pauses several times, or a call with options other than notes= (loop=..., auto_next=...)
+        is left alone. Speaker notes on the call go with it."""
+        if not site or site.get("file") != scene["file"]:
+            raise EditError("this build's pause is not in the slide's own code; remove it in the source instead")
+        src = self.p.src(scene["file"])
+        call = src.find_call(site["pos"])
+        stmt = src.parent.get(call) if call is not None else None
+        if not isinstance(stmt, ast.Expr) or ast.unparse(call.func) != "self.next_slide":
+            raise EditError("this build is ended by a helper, not by self.next_slide(); remove it in the source instead")
+        if call.args or any(k.arg != "notes" for k in call.keywords):
+            raise EditError("this build's next_slide() has options (" + ast.unparse(call)[len("self.next_slide("):-1]
+                            + "); remove it in the source instead")
+        if src.enclosing(stmt, (ast.For, ast.AsyncFor, ast.While)) is not None:
+            raise EditError("this build's next_slide() is inside a loop; remove it in the source instead")
+        return self._keep_block(src, _body_of(src, stmt), [self._cut_stmt(src, stmt)])
 
     # animations that take the mobjects to show as their positional arguments, and the scene / group calls that do
     DISPLAY_CALLS = {
@@ -957,6 +1134,43 @@ class Planner:
             raise EditError("statement not found")
         return src, call, top, stmt
 
+    def names_of(self, obj: dict) -> set[str]:
+        """The variables the statement creating the object assigns (`img = ImageMobject(...)` -> {"img"})."""
+        try:
+            _, _, _, stmt = self._creation(obj)
+        except EditError:
+            return set()
+        if isinstance(stmt, ast.Assign):
+            targets = stmt.targets
+        elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+            targets = [stmt.target]
+        else:
+            return set()
+        return {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+
+    def reads(self, obj: dict, names: set) -> bool:
+        """Whether the statement creating the object, or one holding its own positioning call, reads one of
+        `names` (`Arrow(img.get_right(), ...)`, `line.put_start_and_end_on(img.get_bottom(), ...)`)."""
+        stmts = []
+        try:
+            src, _, _, stmt = self._creation(obj)
+            stmts.append(stmt)
+        except EditError:
+            return False
+        for e in obj.get("events", []):
+            if not e.get("own") or e["method"] not in ("put_start_and_end_on", "next_to", "move_to", "shift",
+                                                        "align_to", "set_x", "set_y"):
+                continue
+            fr = e["frames"][-1]
+            if fr["file"] != src.rel:
+                continue
+            node = src.find_call(fr["pos"])
+            while node is not None and not isinstance(node, ast.stmt):
+                node = src.parent.get(node)
+            if node is not None and node is not stmt:
+                stmts.append(node)
+        return any(isinstance(n, ast.Name) and n.id in names for s in stmts for n in ast.walk(s))
+
     def _ensure_var(self, obj: dict, src: Src, top, stmt) -> tuple[str, list[Edit]]:
         """A variable holding the object. A Manimble insert (`self.add(X)  # manimble`) is split into
         `name = X  # manimble` + `self.add(name)  # manimble`; other code must name the object itself."""
@@ -1075,28 +1289,31 @@ class Planner:
         return src, call
 
     def plan_align(self, obj: dict, value: str) -> list[Edit]:
-        """Paragraph alignment: a multi-line Text becomes a Paragraph(line, line, ..., alignment=...)."""
+        """Paragraph alignment: a multi-line Text becomes a Paragraph(line, line, ..., alignment=...). Text in a
+        frame also moves to that side of its frame (its move_to() anchor is rewritten when it has one)."""
         if value == "justify":
             raise EditError("Manim cannot justify text with manual line breaks; use left, centre or right")
         if value not in ("left", "center", "right"):
             raise EditError(f"unknown alignment {value}")
         src, call = self._text_call(obj, "alignment")
+        frame = self.frame_box(obj)
+        anchor = self.plan_anchor(obj, frame, value, frame["v"]) if frame else []
         if _func_name(call) == "Paragraph":
             kw = next((k for k in call.keywords if k.arg == "alignment"), None)
             if kw is not None:
                 if isinstance(kw.value, ast.Constant) and kw.value.value == value:
-                    return []
+                    return anchor
                 a, b = src.span(kw.value)
-                return [Edit(src.rel, a, b, py_str(value))]
-            return [insert_kwarg(src, call, "alignment", py_str(value))]
-        if value == "left":
+                return [Edit(src.rel, a, b, py_str(value))] + anchor
+            return [insert_kwarg(src, call, "alignment", py_str(value))] + anchor
+        if value == "left" and not frame:
             return []                      # a Text already aligns its lines to the left
         if not call.args:
             raise EditError("the text is passed by keyword; alignment needs Text(\"...\")")
         first = call.args[0]
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             lines = first.value.split("\n")
-            if len(lines) < 2:
+            if len(lines) < 2 and not frame:
                 raise EditError("alignment shows on text with several lines (press ↵ in the text box to add one)")
             new_first = ", ".join(py_str(line) for line in lines)
         elif isinstance(first, ast.Name):
@@ -1106,7 +1323,43 @@ class Planner:
         fa, fb = src.span(call.func)
         a, b = src.span(first)
         return [Edit(src.rel, fa, fb, "Paragraph"), Edit(src.rel, a, b, new_first),
-                insert_kwarg(src, call, "alignment", py_str(value))]
+                insert_kwarg(src, call, "alignment", py_str(value))] + anchor
+
+    @staticmethod
+    def frame_anchor(frame: dict, align: str, valign: str) -> tuple[tuple[float, float], str]:
+        """Where text sits in its frame: (point, aligned_edge name) for move_to(), BOX_PAD in from the edges."""
+        x0, y0, w, h = frame["x"], frame["y"], frame["w"], frame["h"]
+        xs = {"left": (x0 + BOX_PAD, "L"), "center": (x0 + w / 2, ""), "right": (x0 + w - BOX_PAD, "R")}
+        ys = {"top": (y0 - BOX_PAD, "U"), "mid": (y0 - h / 2, "")}
+        (x, ex), (y, ey) = xs.get(align, xs["left"]), ys.get(valign, ys["top"])
+        edge = ey + ex
+        names = {"UL": "UL", "U": "UP", "UR": "UR", "L": "LEFT", "": "ORIGIN", "R": "RIGHT"}
+        return (x, y), names[edge]
+
+    def plan_anchor(self, obj: dict, frame: dict, align: str, valign: str) -> list[Edit]:
+        """Rewrite the text's own move_to(point, aligned_edge=...) so it sits at `align`/`valign` in its frame.
+        Nothing when the text is positioned some other way (the caller then measures and moves it)."""
+        own = [e for e in obj["events"] if e["own"] and e["method"] in
+               ("shift", "move_to", "next_to", "to_edge", "to_corner", "align_to", "arrange", "set_x", "set_y")]
+        if len(own) != 1 or own[0]["method"] != "move_to":
+            return []
+        ev = own[0]
+        t = locate(self.p, ev["frames"], 0, "point_or_mobject", 0, resolve_globals=False)
+        if t.kind != "node" or t.frame_index != len(ev["frames"]) - 1:
+            return []
+        call = t.src.parent.get(t.node)
+        if not isinstance(call, ast.Call) or not call.args or call.args[0] is not t.node:
+            return []
+        (x, y), edge = self.frame_anchor(frame, align, valign)
+        a, b = t.src.span(t.node)
+        edits = [Edit(t.src.rel, a, b, f"({fmt(x)}, {fmt(y)}, 0)")]
+        kw = next((k for k in call.keywords if k.arg == "aligned_edge"), None)
+        if kw is not None:
+            ka, kb = t.src.span(kw.value)
+            edits.append(Edit(t.src.rel, ka, kb, edge))
+        elif edge != "ORIGIN":
+            edits.append(insert_kwarg(t.src, call, "aligned_edge", edge))
+        return edits
 
     def _columns_group(self, src: Src, call):
         """(VGroup call, arrange call) when `call` is one column of VGroup(Text, Text, ...).arrange(RIGHT, ...)."""
@@ -1193,6 +1446,10 @@ class Planner:
             t = locate(self.p, obj["frames"], 0, "line_spacing", None, resolve_globals=True)
             if t.kind == "node" and isinstance(t.node, ast.Constant) and isinstance(t.node.value, (int, float)):
                 info["lineSpacing"] = float(t.node.value)
+            frame = self.frame_box(obj)
+            if frame:
+                info["valign"] = frame["v"]
+                info["align"] = info["align"] or "left"
         return info
 
     def plan_clear_format(self, obj: dict) -> list[Edit]:
@@ -1498,6 +1755,21 @@ def _stmt_lines(src: Src, stmt) -> tuple[int, int]:
     a = src.line_starts[stmt.lineno - 1]
     b = src.line_starts[stmt.end_lineno] if stmt.end_lineno < len(src.line_starts) else len(src.data)
     return a, b
+
+
+def _shift_of(stmt) -> tuple[float, float] | None:
+    """(x, y) of a `var.shift((x, y, 0))` statement, or None."""
+    call = stmt.value if isinstance(stmt, ast.Expr) else None
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "shift"
+            and len(call.args) == 1 and not call.keywords):
+        return None
+    try:
+        v = ast.literal_eval(call.args[0])
+    except (ValueError, TypeError):
+        return None
+    if isinstance(v, tuple) and len(v) == 3 and all(isinstance(c, (int, float)) for c in v):
+        return float(v[0]), float(v[1])
+    return None
 
 
 def _after_stmt(src: Src, stmt, code: str) -> Edit:

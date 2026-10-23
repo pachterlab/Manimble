@@ -3,8 +3,17 @@ import AVFoundation
 import QuartzCore
 import ImageIO
 
+/// The show's content view. A click on a window that is not key normally only activates it (the mouse-down is
+/// dropped); with Presenter View on the other display that is the show's situation, so take the first click too.
+final class ShowView: NSView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// Borderless full-screen window that plays the deck build by build.
 final class PlayerWindow: NSWindow {
+    /// A native full-screen transition is under way (see `whenSettled`).
+    private var transitioning = false
+    private var settled: [() -> Void] = []
     var onKey: ((NSEvent) -> Void)?
     var onClick: ((Bool) -> Void)?          // true = forward
     var onMouse: ((NSEvent, Bool) -> Void)? // takes over from onClick when the position matters (true = left button)
@@ -13,6 +22,76 @@ final class PlayerWindow: NSWindow {
     override func keyDown(with event: NSEvent) { onKey?(event) }
     override func mouseDown(with event: NSEvent) { if let m = onMouse { m(event, true) } else { onClick?(true) } }
     override func rightMouseDown(with event: NSEvent) { if let m = onMouse { m(event, false) } else { onClick?(false) } }
+
+    /// Shows the window as the whole of `screen`. `ownSpace`: as a native full-screen window with a Space of its
+    /// own, so the display switches to the show whatever it was showing (another app's full-screen Space included),
+    /// the way PowerPoint and Keynote take a display. Otherwise a borderless window above the menu bar that joins
+    /// the Space on view (the single-display show, where Presenter View floats above it).
+    func present(on screen: NSScreen, ownSpace: Bool) {
+        if ownSpace {
+            collectionBehavior = [.fullScreenPrimary]
+            level = .normal
+            setFrame(screen.frame, display: true)
+            makeKeyAndOrderFront(nil)
+            if !styleMask.contains(.fullScreen) { enterFullScreen() }
+        } else {
+            setFrame(screen.frame, display: true)
+            makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Hides the window, leaving its full-screen Space first when it has one.
+    func dismiss() {
+        guard styleMask.contains(.fullScreen) else { orderOut(nil); return }
+        once(NSWindow.didExitFullScreenNotification) { [weak self] in self?.orderOut(nil) }
+        toggleFullScreen(nil)
+    }
+
+    /// Moves the show to another display (Presenter View's Swap Displays), through a full-screen round trip when
+    /// it has a Space of its own: leave, let the transition settle, move, enter again. `done` runs once the show
+    /// is up on the new display.
+    func move(to screen: NSScreen, done: (() -> Void)? = nil) {
+        guard styleMask.contains(.fullScreen) else { setFrame(screen.frame, display: true); done?(); return }
+        once(NSWindow.didExitFullScreenNotification) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard let self else { return }
+                self.setFrame(screen.frame, display: true)
+                self.once(NSWindow.didEnterFullScreenNotification) { done?() }
+                self.enterFullScreen()
+            }
+        }
+        toggleFullScreen(nil)
+    }
+
+    /// Enters native full screen, noting the transition so `whenSettled` can wait for it.
+    private func enterFullScreen() {
+        transitioning = true
+        once(NSWindow.didEnterFullScreenNotification) { [weak self] in
+            guard let self else { return }
+            self.transitioning = false
+            let work = self.settled; self.settled = []
+            work.forEach { $0() }
+        }
+        toggleFullScreen(nil)
+    }
+
+    /// Runs `work` once the window is up: now, or when the full-screen transition under way has finished (two
+    /// windows entering full screen on two displays at once leaves one of them where it was).
+    func whenSettled(_ work: @escaping () -> Void) {
+        if transitioning { settled.append(work) } else { work() }
+    }
+}
+
+extension NSWindow {
+    /// Runs `work` the next time this window posts `name`.
+    func once(_ name: Notification.Name, _ work: @escaping () -> Void) {
+        final class Token { var value: NSObjectProtocol? }
+        let token = Token()
+        token.value = NotificationCenter.default.addObserver(forName: name, object: self, queue: .main) { _ in
+            if let t = token.value { NotificationCenter.default.removeObserver(t); token.value = nil }
+            work()
+        }
+    }
 }
 
 final class SlidePlayer: NSObject {
@@ -24,8 +103,9 @@ final class SlidePlayer: NSObject {
     private let counter = CATextLayer()
     private(set) var pages: [Page] = []
     private(set) var index = 0
-    /// Speaker notes per slide, for Presenter View.
+    /// Speaker notes per slide, and each slide's notes per build, for Presenter View.
     var notes: [String] = []
+    var buildNotes: [[String]] = []
     /// Called after every page change (the presenter view mirrors the audience display).
     var onChange: (() -> Void)?
     private var cache: [String: CGImage] = [:]
@@ -42,7 +122,7 @@ final class SlidePlayer: NSObject {
         window.level = .mainMenu + 1
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces]
-        let root = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        let root = ShowView(frame: NSRect(origin: .zero, size: screen.frame.size))
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.black.cgColor
         window.contentView = root
@@ -65,7 +145,8 @@ final class SlidePlayer: NSObject {
 
     /// slides: for each slide the PNG of every build. `screen`: where the audience display goes; `visible: false`
     /// keeps the pages and navigation without showing a window.
-    func play(slides: [[String]], startSlide: Int, screen: NSScreen? = nil, visible: Bool = true) {
+    /// `ownSpace`: take the display with a full-screen Space of its own (see `PlayerWindow.present`).
+    func play(slides: [[String]], startSlide: Int, screen: NSScreen? = nil, visible: Bool = true, ownSpace: Bool = false) {
         pages = []
         for (si, builds) in slides.enumerated() {
             for (bi, p) in builds.enumerated() { pages.append(Page(slide: si, build: bi, builds: builds.count, path: p)) }
@@ -75,9 +156,8 @@ final class SlidePlayer: NSObject {
         shown = visible
         if visible {
             savedOptions = NSApp.presentationOptions
-            NSApp.presentationOptions = [.hideDock, .hideMenuBar]
-            window.setFrame(screen?.frame ?? NSScreen.main?.frame ?? window.frame, display: true)
-            window.makeKeyAndOrderFront(nil)
+            if !ownSpace { NSApp.presentationOptions = [.hideDock, .hideMenuBar] }
+            window.present(on: screen ?? NSScreen.main ?? NSScreen.screens[0], ownSpace: ownSpace)
         }
         show(animated: false)
         if visible { NSCursor.setHiddenUntilMouseMoves(true) }
@@ -148,7 +228,7 @@ final class SlidePlayer: NSObject {
 
     func exit() {
         if shown { NSApp.presentationOptions = savedOptions }
-        window.orderOut(nil)
+        window.dismiss()
         onExit?()
     }
 
@@ -173,7 +253,9 @@ extension SlidePlayer: PresenterSource {
     var playbackState: String? { nil }
     func presenterPage(_ i: Int) -> PresenterPage {
         let p = pages[i]
+        let builds = buildNotes.indices.contains(p.slide) ? buildNotes[p.slide] : []
         return PresenterPage(slide: p.slide, build: p.build, builds: p.builds,
-                             notes: notes.indices.contains(p.slide) ? notes[p.slide] : "", still: p.path, clip: nil)
+                             notes: notes.indices.contains(p.slide) ? notes[p.slide] : "",
+                             buildNotes: builds.indices.contains(p.build) ? builds[p.build] : "", still: p.path, clip: nil)
     }
 }

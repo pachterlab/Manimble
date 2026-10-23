@@ -139,6 +139,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Rulers (View menu, ⌥⌘U) along the top and left of the slide, graduated in manim units with 0 at the slide's
   centre (negative left and below), following the zoom. They show the slide's and the selection's extent, the
   pointer, and each guide's marker; drag from a ruler onto the slide to add a guide, or drag a marker to move one.
+- Tips (View ▸ Show Tips, off by default): a short confirmation or hint at the bottom of the slide after each
+  action ("Saved · shifted it in build 1 only · ⌘A applies it to every build"). Errors always show.
 - Drawing (Insert ▸ Draw, or the Shape menu in the toolbar): choose line, arrow, double arrow, rectangle or ellipse,
   then drag on the slide; ⇧ snaps the angle or makes a square/circle. The element is inserted with those endpoints or
   that box.

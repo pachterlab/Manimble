@@ -1,22 +1,28 @@
 import AppKit
 
-/// The drawer below the slide: the speaker notes and the terminals share it as tabs ("Notes | Terminal 1 | Terminal 2 …"),
-/// so there is only one divider between it and the slide.
+/// The drawer below the slide: the speaker notes and the terminals share it as tabs
+/// ("Slide Notes | Build Notes | Terminal 1 | Terminal 2 … | +"), so there is only one divider between it and the slide.
+/// Slide notes go with every build of the slide, build notes with the build on screen only.
 final class BottomDrawer: NSView {
-    enum Page { case notes, terminal }
+    enum Page { case notes, buildNotes, terminal }
     private(set) var page: Page = .notes
     private let notes: NSView
+    private let buildNotes: NSView
     let terminal: TerminalPanel
     private let strip = NSStackView()
-    private let notesHint = NSTextField(labelWithString: "shown in Presenter View and by Manim Slides  ·  ⌘↵ or click away to save")
+    private let notesHint = NSTextField(labelWithString: "")
+    /// The build on screen ("build 2 of 3"), for the Build Notes hint.
+    var buildLabel = "" { didSet { if page == .buildNotes { updateHint() } } }
     /// About to switch pages (the notes commit before they are hidden).
     var willChangePage: ((Page) -> Void)?
-    /// The + button: open a new terminal (the controller starts the first shell in the deck's folder).
+    /// The Terminal 1 tab before any shell runs: start the first shell (in the deck's folder).
+    var onShowTerminal: (() -> Void)?
+    /// The + button: open another terminal.
     var onNewTerminal: (() -> Void)?
     var onHide: (() -> Void)?
 
-    init(notes: NSView, terminal: TerminalPanel) {
-        self.notes = notes; self.terminal = terminal
+    init(notes: NSView, buildNotes: NSView, terminal: TerminalPanel) {
+        self.notes = notes; self.buildNotes = buildNotes; self.terminal = terminal
         super.init(frame: .zero)
         wantsLayer = true
         Theme.layerColors(self) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
@@ -28,7 +34,7 @@ final class BottomDrawer: NSView {
         notesHint.font = Theme.font(10); notesHint.textColor = Theme.ink(0.4)
         notesHint.lineBreakMode = .byTruncatingTail
         notesHint.setContentCompressionResistancePriority(.init(100), for: .horizontal)
-        let plus = barButton("plus", "New terminal (⇧⌥⌘T)", self, #selector(plusPressed))
+        let plus = barButton("plus", "Add a terminal (⇧⌥⌘T)", self, #selector(plusPressed))
         let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         let row = NSStackView(views: [strip, plus, spacer, notesHint, terminal.actions,
                                       barButton("chevron.down", "Hide (⌥⌘K notes, ⌥⌘T terminal)", self, #selector(hidePressed))])
@@ -38,7 +44,7 @@ final class BottomDrawer: NSView {
         bar.addSubview(row)
 
         let body = NSView()
-        for v in [notes, terminal] { v.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(v) }
+        for v in [notes, buildNotes, terminal] { v.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(v) }
         for v in [bar, body] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: leadingAnchor), bar.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -49,7 +55,7 @@ final class BottomDrawer: NSView {
             body.topAnchor.constraint(equalTo: bar.bottomAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
             heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
         ])
-        for v in [notes, terminal] {
+        for v in [notes, buildNotes, terminal] {
             NSLayoutConstraint.activate([
                 v.leadingAnchor.constraint(equalTo: body.leadingAnchor), v.trailingAnchor.constraint(equalTo: body.trailingAnchor),
                 v.topAnchor.constraint(equalTo: body.topAnchor), v.bottomAnchor.constraint(equalTo: body.bottomAnchor),
@@ -65,18 +71,33 @@ final class BottomDrawer: NSView {
         if p != page { willChangePage?(p) }
         page = p
         notes.isHidden = p != .notes
+        buildNotes.isHidden = p != .buildNotes
         terminal.isHidden = p != .terminal
-        notesHint.isHidden = p != .notes
+        notesHint.isHidden = p == .terminal
         terminal.actions.isHidden = p != .terminal
+        updateHint()
         rebuildStrip()
+    }
+
+    private func updateHint() {
+        notesHint.stringValue = page == .buildNotes
+            ? "only for this build" + (buildLabel.isEmpty ? "" : " (\(buildLabel))") + ", shown under the slide notes in Presenter View  ·  ⌘↵ or click away to save"
+            : "for every build of this slide, shown in Presenter View and by Manim Slides  ·  ⌘↵ or click away to save"
     }
 
     private func rebuildStrip() {
         strip.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        strip.addArrangedSubview(DrawerTab(title: "Notes", tip: "Speaker notes (⌥⌘K)", selected: page == .notes,
-                                           onSelect: { [weak self] in self?.show(.notes) }, onClose: nil))
+        strip.addArrangedSubview(DrawerTab(title: "Slide Notes", tip: "Speaker notes for every build of this slide (⌥⌘K)",
+                                           selected: page == .notes, onSelect: { [weak self] in self?.show(.notes) }, onClose: nil))
+        strip.addArrangedSubview(DrawerTab(title: "Build Notes", tip: "Speaker notes for the build on screen only",
+                                           selected: page == .buildNotes, onSelect: { [weak self] in self?.show(.buildNotes) }, onClose: nil))
         let active = page == .terminal ? terminal.activeTabIndex : nil
-        for (i, t) in terminal.tabTitles.enumerated() {
+        let titles = terminal.tabTitles
+        if titles.isEmpty {        // no shell yet: Terminal 1 starts one
+            strip.addArrangedSubview(DrawerTab(title: "Terminal 1", tip: "A shell in the deck's folder (⌥⌘T)", selected: false,
+                                               onSelect: { [weak self] in self?.onShowTerminal?() }, onClose: nil))
+        }
+        for (i, t) in titles.enumerated() {
             strip.addArrangedSubview(DrawerTab(title: t.title, tip: t.tip, selected: i == active,
                                                onSelect: { [weak self] in self?.terminal.selectTab(i); self?.show(.terminal) },
                                                onClose: { [weak self] in self?.terminal.closeTab(i) }))

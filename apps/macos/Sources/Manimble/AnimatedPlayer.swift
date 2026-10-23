@@ -18,6 +18,7 @@ struct PresentSlide: Decodable {
     var rate: Double
     var revRate: Double
     var notes: String
+    var buildNotes: String?
 }
 
 struct PresentDeck: Decodable {
@@ -89,7 +90,7 @@ final class AnimatedPlayer: NSObject {
 
     init(screen: NSScreen) {
         window = PlayerWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        root = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        root = ShowView(frame: NSRect(origin: .zero, size: screen.frame.size))
         super.init()
         window.backgroundColor = .black
         window.level = .mainMenu + 1
@@ -115,15 +116,15 @@ final class AnimatedPlayer: NSObject {
     }
 
     /// `screen`: where the audience display goes; `visible: false` plays without showing a window.
-    func play(_ d: PresentDeck, startScene: Int, screen: NSScreen? = nil, visible: Bool = true) {
+    /// `ownSpace`: take the display with a full-screen Space of its own (see `PlayerWindow.present`).
+    func play(_ d: PresentDeck, startScene: Int, screen: NSScreen? = nil, visible: Bool = true, ownSpace: Bool = false) {
         deck = d
         guard !slides.isEmpty else { return }
         shown = visible
         if visible {
             savedOptions = NSApp.presentationOptions
-            NSApp.presentationOptions = [.hideDock, .hideMenuBar]
-            window.setFrame(screen?.frame ?? window.screen?.frame ?? NSScreen.main?.frame ?? window.frame, display: true)
-            window.makeKeyAndOrderFront(nil)
+            if !ownSpace { NSApp.presentationOptions = [.hideDock, .hideMenuBar] }
+            window.present(on: screen ?? window.screen ?? NSScreen.main ?? NSScreen.screens[0], ownSpace: ownSpace)
             NSCursor.setHiddenUntilMouseMoves(true)
         }
         show(slides.firstIndex(where: { $0.sceneIndex >= startScene }) ?? 0, .play)
@@ -241,6 +242,8 @@ final class AnimatedPlayer: NSObject {
 
     func next() { if index == slides.count - 1 { if finished { exit() } } else { show(index + 1, .play) } }
     func previous() { if index > 0 { show(index - 1, .end) } }
+    /// Jump to a page (Presenter View's thumbnails) and play its build.
+    func go(_ i: Int) { show(i, .play) }
     private func replay() { show(index, .play) }
     private func reverse() { show(index, .reverse) }
 
@@ -267,7 +270,7 @@ final class AnimatedPlayer: NSObject {
 
     func presenterPage(_ i: Int) -> PresenterPage {
         let s = slides[i]
-        return PresenterPage(slide: s.number, build: s.index, builds: s.count, notes: s.notes,
+        return PresenterPage(slide: s.number, build: s.index, builds: s.count, notes: s.notes, buildNotes: s.buildNotes ?? "",
                              still: s.kind == "image" ? s.file : nil, clip: s.kind == "video" ? s.file : nil)
     }
 
@@ -374,7 +377,7 @@ final class AnimatedPlayer: NSObject {
         discard(pending); discard(current); pending = nil; current = nil
         hideWork?.cancel()
         if shown { NSApp.presentationOptions = savedOptions }
-        window.orderOut(nil)
+        window.dismiss()
         onExit?()
     }
 }

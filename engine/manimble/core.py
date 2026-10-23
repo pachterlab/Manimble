@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import difflib
 import hashlib
 import json
@@ -17,8 +18,8 @@ import time
 import traceback
 from pathlib import Path
 
-from .srcedit import (BLANK_CELLS, EditError, Planner, Project, Src, _stmt_lines, ensure_helpers, fmt, py_str, py_tex,
-                      remove_kwargs, unwrap_soft, wrap_soft)
+from .srcedit import (BLANK_CELLS, BOX_PAD, EditError, Planner, Project, Src, _stmt_lines, box_tag, ensure_helpers, fmt, py_str, py_tex,
+                      insert_kwarg, remove_kwargs, unwrap_soft, wrap_soft)
 
 HERE = Path(__file__).resolve().parent
 
@@ -43,6 +44,7 @@ class WorkerProc:
     def _start(self):
         env = os.environ.copy()
         env["MANIMBLE_MEDIA_DIR"] = self.media_dir
+        env["MANIMBLE_SHARED_MEDIA"] = str(Path(self.media_dir).parent / "shared")   # SVGs every worker may reuse
         self.proc = subprocess.Popen(
             [self.python, str(HERE / "worker.py"), self.deck],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
@@ -102,6 +104,8 @@ class Manimble:
         self.on_event = None
         self.lock = threading.RLock()           # guards the tables below
         self.edit_lock = threading.RLock()      # serialises edits
+        self.settle_cv = threading.Condition()  # an optimistic edit's verifying render is still running
+        self._settling = False
         self.scene_locks: dict = {}             # one render per scene at a time
         self.edit_worker = WorkerProc(python, self.deck, "interactive", media_root)   # edits never wait behind background renders
         self.scenes: list[dict] = []            # ordered scene descriptors (the slides of the talk)
@@ -332,6 +336,7 @@ class Manimble:
 
     def dependency_report(self) -> dict:
         """Render any unscanned scenes and report files opened by deck code."""
+        self._settle()
         failures = []
         current_workspace = Path(self.deck).absolute().parent.parent
         work_root = current_workspace.parent
@@ -443,6 +448,8 @@ class Manimble:
             self.render_now(name, interactive=True)
         deadline = time.time() + 120
         while wait and self.status(name) in ("pending", "stale", "queued", "rendering") and time.time() < deadline:
+            if (self.results.get(name) or {}).get("optimistic"):
+                break                        # an optimistic edit's verifying render: show the slide as edited meanwhile
             time.sleep(0.05)
         rec = self.results.get(name)
         if not rec:
@@ -467,6 +474,10 @@ class Manimble:
             }
             if o["kind"] in ("text", "tex"):
                 info["format"] = self.planner.format_info(o)
+                frame = self.planner.frame_box(o) if o["kind"] == "text" else None
+                if frame:
+                    info["frame"] = [(frame["x"] + fw / 2) * pw / fw, (fh / 2 - frame["y"]) * ph / fh,
+                                     (frame["x"] + frame["w"] + fw / 2) * pw / fw, (fh / 2 - frame["y"] + frame["h"]) * ph / fh]
                 t = self.planner.text_target(o)
                 info["textOk"] = t.kind == "node"
                 if t.kind == "node":
@@ -491,10 +502,13 @@ class Manimble:
                 "sprites": [dict(sp, file=base + sp["file"]) for sp in st["sprites"]],
                 "lines": st.get("lines", {}),
                 "cells": st.get("cells", {}),
+                "xforms": st.get("xforms", {}),
             } for st in data["stops"]],
             "objects": objects,
             "source": self.api_source(name),
             "notes": self._notes_of(name),
+            "buildNotes": self._build_notes_of(name, data["stops"]),
+            "optimistic": bool(rec.get("optimistic")),
             "placeholders": [{"line": p["line"], "role": p["role"], "size": p["size"],
                               "prompt": self.PLACEHOLDER_PROMPTS.get(p["role"], "Click to add text"),
                               "box": [(p["box"][0] + fw / 2) * pw / fw, (fh / 2 - p["box"][1]) * ph / fh,
@@ -520,6 +534,7 @@ class Manimble:
         """Replace one scene class, leaving the surrounding module untouched."""
         from .srcedit import Edit
         with self.edit_lock:
+            self._settle()
             self.refresh_scenes()
             name = req["scene"]
             source = self.api_source(name)
@@ -554,6 +569,7 @@ class Manimble:
         self.history.append(entry)
         self.redo.clear()
         self.last_changed = self._diff_lines(written)
+        return entry
 
     def _diff_lines(self, written: dict) -> dict:
         for rel, (before, after) in written.items():
@@ -582,6 +598,7 @@ class Manimble:
 
     def edit(self, req: dict) -> dict:
         with self.edit_lock:
+            self._settle()
             name, op = req["scene"], req["op"]
             rec = self.fresh_record(name)
             if "error" in rec:
@@ -604,7 +621,8 @@ class Manimble:
                     box = self.planner.box_width(obj) if obj["kind"] == "text" else None
                     if box and before_box:          # a text box: the new text flows to its width
                         value = self._wrapped(obj, req["value"], box, (before_box[3] - before_box[1]) * ux)
-                        attempts = [(label, self.planner.plan_wrap(obj, value, box))]
+                        stored = (self.planner.box_info(obj) or {}).get("w") or box
+                        attempts = [(label, self.planner.plan_wrap(obj, value, stored))]
                     else:
                         attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True)))]
                 elif op == "wrap":
@@ -612,8 +630,13 @@ class Manimble:
                     if obj["kind"] != "text" or not before_box:
                         return {"ok": False, "error": "only text can be given a box width"}
                     box = max(0.05, float(req["width"]) * ux)
-                    value = self._wrapped(obj, obj["value"], box, (before_box[3] - before_box[1]) * ux)
-                    attempts = [("re-wrapped the text", self.planner.plan_wrap(obj, value, box))]
+                    frame = self.planner.frame_box(obj)
+                    inner = max(0.05, box - 2 * BOX_PAD) if frame else box
+                    value = self._wrapped(obj, obj["value"], inner, (before_box[3] - before_box[1]) * ux)
+                    fields = {}
+                    if frame and req.get("side") == "left":      # the right edge stays: the frame grows leftwards
+                        fields["x"] = frame["x"] + frame["w"] - box
+                    attempts = [("re-wrapped the text", self.planner.plan_wrap(obj, value, box, **fields))]
                 elif op == "font":
                     label = "font size"
                     v = float(req["value"])
@@ -637,7 +660,23 @@ class Manimble:
                     dx, dy = float(req["dx"]) * ux, -float(req["dy"]) * uy
                     if abs(dx) < 1e-4 and abs(dy) < 1e-4:
                         return {"ok": True, "message": "no change"}
-                    attempts = self.planner.plan_move(obj, dx, dy)
+                    attempts = None
+                    if req.get("build") and len(data["stops"]) > 1:
+                        try:
+                            attempts = self.planner.plan_build_move(self.scene(name), obj, data["stops"], stop, dx, dy)
+                            label = f"move in build {stop + 1}"
+                            req = dict(req, one_build=True)
+                        except EditError:
+                            attempts = None      # not laid out for a one-build move: it moves in every build
+                    if attempts is None:
+                        attempts = self.planner.plan_move(obj, dx, dy)
+                    frame = self.planner.frame_box(obj) if obj["kind"] == "text" else None
+                    if frame:                        # the text frame moves with its text
+                        follow = self.planner.plan_box(obj, x=frame["x"] + dx, y=frame["y"] + dy)
+                        attempts = [(how, (e + follow) if e else e) for how, e in attempts]
+                elif op == "spread":
+                    label = "move in every build"
+                    attempts = self.planner.plan_spread_build_move(self.scene(name), obj, data["stops"], stop)
                 elif op == "table":
                     label = "edit table"
                     attempts = [(label, self.planner.plan_table(obj, req["rows"]))]
@@ -657,6 +696,12 @@ class Manimble:
                     if abs(ratio - 1) < 1e-3:
                         return {"ok": True, "message": "no change"}
                     attempts = self.planner.plan_resize(obj, ratio)
+                    frame = self.planner.frame_box(obj) if obj["kind"] == "text" else None
+                    if frame:                        # the text frame scales with its text, about its centre
+                        w, h = frame["w"] * ratio, frame["h"] * ratio
+                        follow = self.planner.plan_box(obj, w=w, h=h, x=frame["x"] + (frame["w"] - w) / 2,
+                                                       y=frame["y"] - (frame["h"] - h) / 2)
+                        attempts = [(how, (e + follow) if e else e) for how, e in attempts]
                 elif op == "decorate":
                     kind = req.get("kind", "underline")
                     label = ("underline" if kind == "underline" else "strikethrough") + (" on" if req.get("on", True) else " off")
@@ -701,60 +746,272 @@ class Manimble:
                 return {"ok": False, "error": "nothing to edit"}
             if all(not edits for _, edits in attempts):
                 return {"ok": True, "message": "no change"}
-            last_error = "edit had no visible effect"
-            for how, edits in attempts:
+            if op in ("move", "resize") and req.get("optimistic", True) and before_box:
+                fast = self._optimistic(name, op, req, oid, obj, rec, stop, before_box, data, attempts, ux, uy, label)
+                if fast is not None:
+                    return fast
+            return self._run_attempts(name, op, req, oid, obj, stop, before_box, data, attempts, ux, uy, label)
+
+    def _settle(self):
+        """Wait for the render that verifies an optimistic edit (see `_optimistic`)."""
+        with self.settle_cv:
+            while self._settling:
+                self.settle_cv.wait()
+
+    def _run_attempts(self, name, op, req, oid, obj, stop, before_box, data, attempts, ux, uy, label, applied=None):
+        """Try each plan in turn: patch the source, re-render, verify; the first that holds is committed.
+
+        `applied` = (written, entry) when the first plan is already on disk and in the undo history (an
+        optimistic edit): it is verified in place and rolled back only if it fails."""
+        last_error = "edit had no visible effect"
+        # decided before the source changes: the frame comment is found from the object's current text
+        framed = obj["kind"] == "text" and op in TEXT_OPS + ("wrap", "resize") and self.planner.frame_box(obj) is not None
+        for how, edits in attempts:
+            entry = None
+            if applied is not None:
+                written, entry = applied
+                applied = None
+            else:
                 try:
                     written = self.project.apply(edits)
                     self._sig_at = 0
                 except Exception as exc:
                     last_error = f"could not patch source: {exc}"
                     continue
-                new = self.render_now(name, interactive=True)
-                if "error" in new:
-                    self._restore(written, 0)
-                    self.results.pop(name, None)
-                    self.render_now(name, interactive=True)
-                    last_error = new["error"]
-                    if op in TEXT_OPS:
-                        hint = ""
-                        if "NoneType" in last_error or "get_part" in last_error:
-                            hint = " The slide's code picks out parts of this text/formula by name, so the new content must keep those parts."
-                        return {"ok": False, "error": "The slide no longer renders with this change, so it was undone: "
-                                + last_error[-300:] + hint}
-                    continue
-                ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy, before=data)
-                if ok and op == "wrap":
-                    written, new = self._keep_edge(name, oid, req, stop, before_box, new, ux, uy, written)
-                if ok:
-                    held, along = [], []
-                    if op in ("move", "resize", "endpoints", "size", "rotate", "wrap"):
-                        written, held, along = self._hold_others(name, oid, obj, data, new["data"], stop, ux, uy, written)
-                    self._commit(label if op in TEXT_OPS else f"{label} ({how})", written)
-                    msg = how
-                    if held:
-                        msg += f"; {len(held)} other object{'s' if len(held) > 1 else ''} kept in place"
-                    if along:
-                        msg += f"; {len(along)} other object{'s' if len(along) > 1 else ''} moved with it"
-                    sib = None
-                    if op in ("move", "resize", "endpoints", "size", "rotate"):
-                        cnt = sum(1 for o in data["objects"].values()
-                                  if o["frames"][-1]["pos"] == obj["frames"][-1]["pos"]
-                                  and o["frames"][-1]["file"] == obj["frames"][-1]["file"])
-                        if cnt > 1:
-                            sib = cnt
-                    return {"ok": True, "message": msg, "siblings": sib, "changed": self.last_changed,
-                            "pageNumber": self._touched_page_line(self.last_changed)}
-                last_error = why
+
+            def undo_this(written=written, entry=entry):
+                if entry is not None and self.history and self.history[-1] is entry:
+                    self.history.pop()
                 self._restore(written, 0)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
-            ctl = [e for e in obj["events"] if e["method"] in
-                   ("move_to", "next_to", "to_edge", "to_corner", "align_to", "arrange", "arrange_in_grid")]
-            if ctl and op in ("move", "resize", "endpoints", "size"):
-                e = ctl[-1]
-                fr = e["frames"][-1]
-                last_error += f" (position is set by .{e['method']}() at {fr['file']}:{fr['pos'][0]})"
-            return {"ok": False, "error": "Could not apply this change: " + last_error}
+
+            new = self.render_now(name, interactive=True, force=entry is not None)
+            if "error" in new:
+                undo_this()
+                last_error = new["error"]
+                if op in TEXT_OPS:
+                    hint = ""
+                    if "NoneType" in last_error or "get_part" in last_error:
+                        hint = " The slide's code picks out parts of this text/formula by name, so the new content must keep those parts."
+                    return {"ok": False, "error": "The slide no longer renders with this change, so it was undone: "
+                            + last_error[-300:] + hint}
+                continue
+            ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy, before=data)
+            if ok and op == "wrap" and not framed:
+                written, new = self._keep_edge(name, oid, req, stop, before_box, new, ux, uy, written)
+            if ok and framed:
+                written, new = self._fit_frame(name, oid, stop, new, ux, uy, written)
+            if ok:
+                held, along = [], []
+                if op in ("move", "resize", "endpoints", "size", "rotate", "wrap") and not req.get("one_build"):
+                    written, held, along = self._hold_others(name, oid, obj, data, new["data"], stop, ux, uy, written)
+                if entry is not None:            # already in the history: just pick up the compensating edits
+                    entry["files"] = {rel: (b, a) for rel, (b, a) in written.items()}
+                    self.last_changed = self._diff_lines(written)
+                else:
+                    self._commit(label if op in TEXT_OPS else f"{label} ({how})", written)
+                msg = how
+                if held:
+                    msg += f"; {len(held)} other object{'s' if len(held) > 1 else ''} kept in place"
+                if along:
+                    msg += f"; {len(along)} other object{'s' if len(along) > 1 else ''} moved with it"
+                return {"ok": True, "message": msg, "siblings": self._sibling_count(data, obj, op),
+                        "changed": self.last_changed, "pageNumber": self._touched_page_line(self.last_changed),
+                        "oneBuild": bool(req.get("one_build"))}
+            last_error = why
+            undo_this()
+        ctl = [e for e in obj["events"] if e["method"] in
+               ("move_to", "next_to", "to_edge", "to_corner", "align_to", "arrange", "arrange_in_grid")]
+        if ctl and op in ("move", "resize", "endpoints", "size"):
+            e = ctl[-1]
+            fr = e["frames"][-1]
+            last_error += f" (position is set by .{e['method']}() at {fr['file']}:{fr['pos'][0]})"
+        return {"ok": False, "error": "Could not apply this change: " + last_error}
+
+    @staticmethod
+    def _sibling_count(data, obj, op):
+        if op not in ("move", "resize", "endpoints", "size", "rotate"):
+            return None
+        cnt = sum(1 for o in data["objects"].values()
+                  if o["frames"][-1]["pos"] == obj["frames"][-1]["pos"]
+                  and o["frames"][-1]["file"] == obj["frames"][-1]["file"])
+        return cnt if cnt > 1 else None
+
+    def _optimistic(self, name, op, req, oid, obj, rec, stop, before_box, data, attempts, ux, uy, label):
+        """Commit the first plan at once and show the slide with the object moved or scaled by hand; the render
+        that verifies it (and rolls it back or tries the next plan) runs afterwards, on a thread, while every
+        other edit waits in `_settle()`. The verdict arrives as a `rendered` or `edit_failed` event. Returns
+        None when the plan cannot be applied, so the caller takes the synchronous path."""
+        how, edits = next(((h, e) for h, e in attempts if e), (None, None))
+        if not edits:
+            return None
+        # found before the patch lands: object positions in the record are those of the source as rendered. A
+        # one-build move shifts the object around its build only, after everything laid out from it was made.
+        attached = set() if req.get("one_build") else self._attached_lines(rec["data"], obj)
+        try:
+            written = self.project.apply(edits)
+            self._sig_at = 0
+        except Exception:
+            return None
+        if op == "move":
+            dx, dy, ratio = float(req["dx"]), float(req["dy"]), 1.0
+        else:
+            dx, dy, ratio = 0.0, 0.0, float(req["ratio"])
+        with self.lock:
+            self.results[name] = self._transformed_record(rec, name, obj, dx, dy, ratio,
+                                                          only_stop=stop if req.get("one_build") else None,
+                                                          attached=attached)
+        entry = self._commit(f"{label} ({how})", written)
+        result = {"ok": True, "message": how, "siblings": self._sibling_count(data, obj, op),
+                  "changed": self.last_changed, "pageNumber": self._touched_page_line(self.last_changed),
+                  "optimistic": True, "oneBuild": bool(req.get("one_build"))}
+        with self.settle_cv:
+            self._settling = True
+        threading.Thread(target=self._settle_later, daemon=True,
+                         args=(name, op, req, oid, obj, stop, before_box, data, attempts, ux, uy, label, written, entry)).start()
+        return result
+
+    def _settle_later(self, name, op, req, oid, obj, stop, before_box, data, attempts, ux, uy, label, written, entry):
+        try:
+            res = self._run_attempts(name, op, req, oid, obj, stop, before_box, data, attempts, ux, uy, label,
+                                     applied=(written, entry))
+        except Exception as exc:                      # noqa: BLE001
+            traceback.print_exc()
+            res = {"ok": False, "error": str(exc)}
+        finally:
+            with self.settle_cv:
+                self._settling = False
+                self.settle_cv.notify_all()
+        if self.on_event:
+            if res.get("ok"):
+                self.on_event({"event": "rendered", "name": name})
+            else:
+                self.on_event({"event": "edit_failed", "name": name, "oid": int(oid),
+                               "error": res.get("error") or "edit failed"})
+
+    def _attached_lines(self, data, obj) -> set:
+        """Lines and arrows whose source reads the object's variable (`Arrow(img.get_right(), ...)`): they
+        follow it in the real render. Uses source positions, so call it before the source is patched."""
+        site = (obj["frames"][-1]["file"], obj["frames"][-1]["pos"])
+        names = self.planner.names_of(obj)
+        if not names:
+            return set()
+        return {k for k, o in data["objects"].items()
+                if o.get("kind") == "line" and (o["frames"][-1]["file"], o["frames"][-1]["pos"]) != site
+                and self.planner.reads(o, names)}
+
+    def _transformed_record(self, rec, name, obj, dx, dy, ratio, only_stop=None, attached=None):
+        """`rec` with the object (and the objects its source line also creates) shifted by dx, dy frame pixels
+        and scaled by `ratio` about its centre in every build (only in build `only_stop` when given). The exact frames are stale, so the record is marked
+        `optimistic` and the client composites the backdrop and sprites instead."""
+        data = copy.deepcopy(rec["data"])
+        site = (obj["frames"][-1]["file"], obj["frames"][-1]["pos"])
+        ids = {k for k, o in data["objects"].items() if (o["frames"][-1]["file"], o["frames"][-1]["pos"]) == site}
+        # arrows and lines attached to the object (see `_attached_lines`) follow it: the end next to the object
+        # moves with it, and the client maps the sprite by the similarity taking the old ends to the new (`xforms`)
+        if attached is None:
+            attached = self._attached_lines(data, obj)
+        reach = 0.6 * data["size"][0] / data["frame"][0]          # how far from the object an end may sit (px)
+        for si, st in enumerate(data["stops"]):
+            if only_stop is not None and si != only_stop:
+                continue
+            boxes = {str(v[0]): v for v in st["visible"]}
+            # a frame drawn around the object (SurroundingRectangle and the like) follows it in the real render
+            frames = set()
+            for k in ids:
+                b = boxes.get(k)
+                if not b:
+                    continue
+                for j, f in boxes.items():
+                    if j not in ids and data["objects"].get(j, {}).get("kind") in ("shape", "line") \
+                            and f[1] <= b[1] + 1 and f[2] <= b[2] + 1 and f[3] >= b[3] - 1 and f[4] >= b[4] - 1 \
+                            and max(b[1] - f[1], b[2] - f[2], f[3] - b[3], f[4] - b[4]) <= 16:
+                        frames.add(j)
+            moving = ids | frames
+            centres = {str(v[0]): ((v[1] + v[3]) / 2, (v[2] + v[4]) / 2) for v in st["visible"] if str(v[0]) in moving}
+
+            for j in frames:                      # scaled about the framed object's centre, like the frame itself
+                inner = next((k for k in ids if k in centres), None)
+                if inner:
+                    centres[j] = centres[inner]
+
+            def tx(k, x):
+                return centres[k][0] + (x - centres[k][0]) * ratio + dx
+
+            def ty(k, y):
+                return centres[k][1] + (y - centres[k][1]) * ratio + dy
+
+            hosts = {k: list(boxes[k]) for k in ids if k in centres and k in boxes}   # the object's boxes, as they were
+            for v in st["visible"]:
+                k = str(v[0])
+                if k in centres:
+                    v[1], v[3] = tx(k, v[1]), tx(k, v[3])
+                    v[2], v[4] = ty(k, v[2]), ty(k, v[4])
+            for sp in st["sprites"]:
+                k = str(sp["oid"])
+                if k in centres:
+                    x1, y1 = tx(k, sp["x"] + sp["w"]), ty(k, sp["y"] + sp["h"])
+                    sp["x"], sp["y"] = tx(k, sp["x"]), ty(k, sp["y"])
+                    sp["w"], sp["h"] = x1 - sp["x"], y1 - sp["y"]
+            for k, ln in st.get("lines", {}).items():
+                if k in centres:
+                    ln[0], ln[2] = tx(k, ln[0]), tx(k, ln[2])
+                    ln[1], ln[3] = ty(k, ln[1]), ty(k, ln[3])
+                    ln[4] *= ratio
+            for k, cells in st.get("cells", {}).items():
+                if k in centres:
+                    for c in cells:
+                        for i in (2, 4, 6, 8):
+                            c[i] = tx(k, c[i])
+                        for i in (3, 5, 7, 9):
+                            c[i] = ty(k, c[i])
+            for k in attached:
+                ln = st.get("lines", {}).get(k)
+                if not ln or k in centres or not hosts:
+                    continue
+                ends = [(ln[0], ln[1]), (ln[2], ln[3])]
+                new = []
+                for x, y in ends:
+                    d, host = min(((self._box_distance(x, y, b), h) for h, b in hosts.items()), key=lambda t: t[0])
+                    new.append((tx(host, x), ty(host, y)) if d <= reach else (x, y))
+                if new == ends:
+                    continue
+                xf = self._similarity(ends, new)
+                st.setdefault("xforms", {})[k] = xf
+                ln[0], ln[1], ln[2], ln[3] = new[0][0], new[0][1], new[1][0], new[1][1]
+                b = boxes.get(k)
+                if b:
+                    xs, ys = [], []
+                    for x, y in ((b[1], b[2]), (b[3], b[2]), (b[1], b[4]), (b[3], b[4])):
+                        xs.append(xf[0] * x + xf[2] * y + xf[4])
+                        ys.append(xf[1] * x + xf[3] * y + xf[5])
+                    b[1], b[2], b[3], b[4] = min(xs), min(ys), max(xs), max(ys)
+        if ratio != 1.0:
+            for k in ids:
+                dims = data["objects"][k].get("dims")
+                if dims:
+                    data["objects"][k]["dims"] = [dims[0] * ratio, dims[1] * ratio]
+        return dict(rec, data=data, optimistic=True, key=self.scene_key(self.scene(name)))
+
+    @staticmethod
+    def _box_distance(x, y, b):
+        """Distance from a point to a visible box [oid, x0, y0, x1, y1] (0 inside)."""
+        return math.hypot(max(0.0, b[1] - x, x - b[3]), max(0.0, b[2] - y, y - b[4]))
+
+    @staticmethod
+    def _similarity(p, q):
+        """The rotation + uniform scale + translation taking the segment p to q, as [a, b, c, d, tx, ty] with
+        x' = a x + c y + tx and y' = b x + d y + ty (a translation when p has no length)."""
+        (ax, ay), (bx, by) = p
+        (cx, cy), (dx, dy) = q
+        vx, vy, wx, wy = bx - ax, by - ay, dx - cx, dy - cy
+        n2 = vx * vx + vy * vy
+        if n2 < 1e-9:
+            a, b = 1.0, 0.0
+        else:
+            a, b = (wx * vx + wy * vy) / n2, (wy * vx - wx * vy) / n2
+        return [a, b, -b, a, cx - (a * ax - b * ay), cy - (b * ax + a * ay)]
 
     def _wrapped(self, obj: dict, value: str, box: float, shown_w: float) -> str:
         """`value` word-wrapped to `box` manim units in the object's font. Widths come from the font file,
@@ -772,6 +1029,49 @@ class Manimble:
         if widest <= 0 or shown_w <= 0:
             return value
         return wrap_soft(value, box * widest / shown_w, ems)
+
+    def _fit_frame(self, name, oid, stop, new, ux, uy, written):
+        """Text in a frame sits at its alignment inside it (BOX_PAD in from the edges): after an edit that
+        changed its ink, move it back there."""
+        st = new["data"]["stops"][min(stop, len(new["data"]["stops"]) - 1)]
+        after = next((v for v in st["visible"] if str(v[0]) == oid), None)
+        o = new["data"]["objects"].get(oid)
+        frame = self.planner.frame_box(o) if o else None
+        if after is None or not frame:
+            return written, new
+        fw, fh = new["data"]["frame"]
+        x0, x1 = after[1] * ux - fw / 2, after[3] * ux - fw / 2
+        y0, y1 = fh / 2 - after[2] * uy, fh / 2 - after[4] * uy          # y0 the top
+        align = (self.planner.format_info(o).get("align") or "left")
+        if align == "center":
+            dx = frame["x"] + frame["w"] / 2 - (x0 + x1) / 2
+        elif align == "right":
+            dx = frame["x"] + frame["w"] - BOX_PAD - x1
+        else:
+            dx = frame["x"] + BOX_PAD - x0
+        dy = (frame["y"] - frame["h"] / 2 - (y0 + y1) / 2) if frame["v"] == "mid" else (frame["y"] - BOX_PAD - y0)
+        if abs(dx) < 0.4 * ux and abs(dy) < 0.4 * uy:
+            return written, new
+        try:
+            plan = next((e for _, e in self.planner.plan_move(o, dx, dy) if e), None)
+        except EditError:
+            plan = None
+        if not plan:
+            return written, new
+        try:
+            extra = self.project.apply(plan)
+            self._sig_at = 0
+        except Exception:                                  # noqa: BLE001
+            return written, new
+        moved = self.render_now(name, interactive=True)
+        if "error" in moved:
+            self._restore(extra, 0)
+            self.results.pop(name, None)
+            return written, self.render_now(name, interactive=True)
+        merged = dict(written)
+        for rel, (b, a) in extra.items():
+            merged[rel] = (written[rel][0], a) if rel in written else (b, a)
+        return merged, moved
 
     def _keep_edge(self, name, oid, req, stop, before_box, new, ux, uy, written):
         """A re-wrapped text box keeps its top edge and the edge opposite the dragged handle where they were."""
@@ -967,6 +1267,7 @@ class Manimble:
         """Edit a scene class or its membership in the show's order.txt."""
         from .srcedit import Edit
         with self.edit_lock:
+            self._settle()
             self.refresh_scenes()
             op = req["op"]
             name = req.get("scene")
@@ -1161,6 +1462,7 @@ class Manimble:
         from .srcedit import Edit
         name = req["scene"]
         with self.edit_lock:
+            self._settle()
             self.refresh_scenes()
             try:
                 src, fn = self._construct(self.scene(name))
@@ -1180,7 +1482,7 @@ class Manimble:
             else:
                 indent, role = m.group(1), m.group(2)
                 x0, y0, x1, y1 = (float(m.group(i)) for i in range(3, 7))
-                pad = 0.1
+                pad = BOX_PAD
                 font = ", font=FONT" if self._font_const() else ""
                 color = req.get("color")
                 c = f", color={py_str(color)}" if isinstance(color, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", color) else ""
@@ -1190,7 +1492,9 @@ class Manimble:
                     at, edge = (x0 + pad, y0 - pad), "UL"
                 code = (f"Text({py_str(text)}, font_size={int(m.group(7))}{font}{c})"
                         f".move_to(({fmt(at[0])}, {fmt(at[1])}, 0), aligned_edge={edge})")
-                edits = [Edit(src.rel, a, b, f"{indent}self.add({code})  # manimble\n")]
+                # the box stays a text frame of the layout's size: the text wraps inside it and keeps its alignment
+                tag = box_tag({"w": x1 - x0, "h": y0 - y1, "x": x0, "y": y0, "v": "mid" if role == "title" else "top"})
+                edits = [Edit(src.rel, a, b, f"{indent}self.add({code})  {tag}\n")]
                 label = "add text"
             # the layout's `pass` stays last while placeholders remain (comments after a class's last statement
             # fall outside its span, so moving or duplicating the slide would leave them behind); then it goes
@@ -1306,6 +1610,7 @@ class Manimble:
         Folded into the last undo step when that step wrote this file, so undo/redo keep the two together."""
         from .srcedit import Edit
         with self.edit_lock:
+            self._settle()
             try:
                 s = self.scene(name)
                 if self.results.get(name, {}).get("key") != self.scene_key(s):
@@ -1422,6 +1727,7 @@ class Manimble:
             st = self._page_settings()
             return {"on": st is not None, **(st or self.PAGE_DEFAULTS)}
         with self.edit_lock:
+            self._settle()
             names = self._order_names()
             edits = []
             if op == "remove":
@@ -1514,6 +1820,7 @@ class Manimble:
     def export_python(self, req: dict) -> dict:
         """Write the whole deck as one Python file: helper modules inlined, then the slides in show order.
         Deck-local imports are dropped (their code is in the file); everything else is kept as written."""
+        self._settle()
         path = req.get("path")
         if not path:
             return {"ok": False, "error": "no destination"}
@@ -1630,12 +1937,15 @@ class Manimble:
         """Speaker notes of a slide: op=get -> {text}; op=set writes `self.next_slide(notes="...")` at the top of
         construct() (what manim-slides' presenter shows for the first build), or removes it for empty text."""
         from .srcedit import Edit
+        if req.get("stop") is not None:
+            return self.build_notes(req)
         op = req.get("op", "get")
         name = req["scene"]
         self.refresh_scenes()
         if op == "get":
             return {"text": self._notes_of(name)}
         with self.edit_lock:
+            self._settle()
             text = str(req.get("text") or "")
             try:
                 src, fn = self._construct(self.scene(name))
@@ -1687,15 +1997,151 @@ class Manimble:
             self.enqueue_all()
             return {"ok": True, "message": "speaker notes", "changed": self.last_changed}
 
+    # -------------------------------------------------------- build notes
+    BUILD_NOTES_MARK = "# manimble build notes"
+
+    def _first_build_notes_stmt(self, src, fn):
+        """The `"..."  # manimble build notes` string statement at the top of construct() that holds the first
+        build's notes (the leading next_slide(notes=...) already holds the slide's)."""
+        for st in fn.body:
+            if not self._is_preamble(src, st):
+                return None
+            if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str):
+                a, b = _stmt_lines(src, st)
+                if self.BUILD_NOTES_MARK in src.data[a:b].decode("utf-8"):
+                    return st
+        return None
+
+    def _build_notes_call(self, src, fn, stops: list, k: int):
+        """(call, notes keyword or None) of the plain `self.next_slide(...)` in construct() that starts build `k`
+        (k >= 1), whose notes= Manim Slides shows for that build; EditError when there is no such call."""
+        site = stops[k - 1].get("site")
+        if not site or site.get("file") != src.rel:
+            raise EditError("this build's pause is not in the slide's own code")
+        key = lambda st: st.get("site") and (st["site"].get("file"), tuple(st["site"].get("pos") or ()))
+        if sum(1 for st in stops if key(st) == key(stops[k - 1])) > 1:
+            raise EditError("this build's next_slide() runs more than once")
+        call = src.find_call(site["pos"])
+        stmt = src.parent.get(call) if call is not None else None
+        if not isinstance(stmt, ast.Expr) or ast.unparse(call.func) != "self.next_slide" \
+                or src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) is not fn \
+                or src.enclosing(stmt, (ast.For, ast.AsyncFor, ast.While)) is not None:
+            raise EditError("this build does not start with a plain self.next_slide() in construct()")
+        kw = next((k for k in call.keywords if k.arg == "notes"), None)
+        if kw is not None and not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)):
+            raise EditError("this build's notes are computed in the source")
+        return call, kw
+
+    def _first_build_notes(self, name: str) -> str:
+        try:
+            src, fn = self._construct(self.scene(name))
+            st = self._first_build_notes_stmt(src, fn)
+            return st.value.value if st is not None else ""
+        except Exception:                           # noqa: BLE001
+            return ""
+
+    def _build_notes_of(self, name: str, stops: list) -> list[str]:
+        """The notes of each build alone (Presenter View shows them under the slide's notes)."""
+        out = [""] * len(stops)
+        try:
+            src, fn = self._construct(self.scene(name))
+        except Exception:                           # noqa: BLE001
+            return out
+        st = self._first_build_notes_stmt(src, fn)
+        if st is not None and out:
+            out[0] = st.value.value
+        for k in range(1, len(stops)):
+            try:
+                _, kw = self._build_notes_call(src, fn, stops, k)
+                out[k] = kw.value.value if kw is not None else ""
+            except Exception:                       # noqa: BLE001
+                pass
+        return out
+
+    def build_notes(self, req: dict) -> dict:
+        """Notes of one build of a slide (`notes` with a `stop`): op=get -> {text}; op=set writes them on the
+        next_slide() that starts the build, or for the first build in `"..."  # manimble build notes` at the top
+        of construct(); empty text removes them."""
+        from .srcedit import Edit
+        name = req["scene"]
+        with self.edit_lock:
+            self._settle()
+            rec = self.fresh_record(name)
+            if "error" in rec:
+                return {"ok": False, "error": rec["error"]}
+            stops = rec["data"]["stops"]
+            k = int(req["stop"])
+            if not 0 <= k < len(stops):
+                return {"ok": False, "error": "no such build"}
+            if req.get("op", "get") == "get":
+                return {"text": self._build_notes_of(name, stops)[k]}
+            text = str(req.get("text") or "")
+            try:
+                src, fn = self._construct(self.scene(name))
+                if k == 0:
+                    st = self._first_build_notes_stmt(src, fn)
+                    if st is not None:
+                        if st.value.value == text:
+                            return {"ok": True, "message": "no change"}
+                        a, b = _stmt_lines(src, st)
+                        edit = Edit(src.rel, a, b, " " * st.col_offset + f"{py_str(text)}  {self.BUILD_NOTES_MARK}\n"
+                                    if text else "")
+                    elif not text.strip():
+                        return {"ok": True, "message": "no change"}
+                    else:
+                        hit = self._notes_stmt(src, fn)
+                        if hit:             # right after the slide's notes
+                            a, b = _stmt_lines(src, hit[0])
+                            at, indent = b, " " * hit[0].col_offset
+                        else:
+                            at, indent = self._preamble_end(src, fn)
+                        lead = "\n" if at == len(src.data) and not src.data.endswith(b"\n") else ""
+                        edit = Edit(src.rel, at, at, lead + indent + f"{py_str(text)}  {self.BUILD_NOTES_MARK}\n")
+                else:
+                    call, kw = self._build_notes_call(src, fn, stops, k)
+                    if kw is not None and kw.value.value == text:
+                        return {"ok": True, "message": "no change"}
+                    if kw is not None and text:
+                        edit = Edit(src.rel, *src.span(kw.value), py_str(text))
+                    elif kw is not None and len(call.args) + len(call.keywords) == 1:
+                        a, b = src.span(kw)
+                        edit = Edit(src.rel, a, b, "")
+                    elif kw is not None:
+                        edit = remove_kwargs(src, call, {kw})
+                    elif not text.strip():
+                        return {"ok": True, "message": "no change"}
+                    else:
+                        edit = insert_kwarg(src, call, "notes", py_str(text))
+            except (EditError, KeyError) as exc:
+                return {"ok": False, "error": f"Build notes cannot be written here: {exc}"}
+            try:
+                written = self.project.apply([edit])
+                self._sig_at = 0
+            except Exception as exc:                # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": "The slide no longer renders with these notes, so they were undone: "
+                        + new["error"][-300:]}
+            self._commit(f"build {k + 1} notes", written)
+            self.refresh_scenes()
+            self.enqueue_all()
+            return {"ok": True, "message": f"build {k + 1} notes", "changed": self.last_changed}
+
     def deck_pages(self, req: dict) -> dict:
         """Every build of every slide, in order, for the slideshow (hidden slides left out)."""
+        self._settle()
         slides = []
         for s in self.visible_scenes():
             sc = self.api_scene(s["name"])
             if sc.get("status") != "ready":
                 slides.append({"scene": s["name"], "error": sc.get("error", "not rendered"), "pages": []})
             else:
-                slides.append({"scene": s["name"], "pages": [st["png"] for st in sc["stops"]], "notes": self._notes_of(s["name"])})
+                slides.append({"scene": s["name"], "pages": [st["png"] for st in sc["stops"]], "notes": sc["notes"],
+                               "buildNotes": sc["buildNotes"]})
         return {"slides": slides}
 
     # ------------------------------------------------------------ insert
@@ -1784,6 +2230,7 @@ class Manimble:
 
     def insert(self, req: dict) -> dict:
         with self.edit_lock:
+            self._settle()
             name, kind = req["scene"], req["kind"]
             rec = self.fresh_record(name)
             if "error" in rec:
@@ -1820,6 +2267,7 @@ class Manimble:
         """Insert several elements (`items`: one dict per element, as for `insert`) at the same build as one undo step.
         `replace_image` ({oid, file}) also points that picture at another file in the deck folder, in the same step."""
         with self.edit_lock:
+            self._settle()
             name = req["scene"]
             items = [it for it in (req.get("items") or []) if isinstance(it, dict) and it.get("kind")]
             if not items:
@@ -1861,6 +2309,42 @@ class Manimble:
             what = f"{len(items)} {next(iter(kinds))}s" if len(kinds) == 1 else f"{len(items)} elements"
             self._commit(f"insert {what}", written)
             return {"ok": True, "message": f"inserted {what}", "file": edits[0].rel, "changed": self.last_changed}
+
+    def delete_build(self, req: dict) -> dict:
+        """Remove one build of a slide: the next_slide() that ends it goes, so its frame is no longer a stop and
+        what it showed carries on into the next build. The last build has no next_slide() of its own, so the one
+        before it goes instead (the last two builds become one). Nothing on the slide is deleted."""
+        with self.edit_lock:
+            self._settle()
+            name = req["scene"]
+            rec = self.fresh_record(name)
+            if "error" in rec:
+                return {"ok": False, "error": rec["error"]}
+            stops = rec["data"]["stops"]
+            nstops = len(stops)
+            if nstops < 2:
+                return {"ok": False, "error": "this slide has only one build"}
+            si = max(0, min(int(req.get("stop", 0)), nstops - 1))
+            ender = min(si, nstops - 2)
+            site = stops[ender].get("site")
+            key = lambda st: st.get("site") and (st["site"].get("file"), tuple(st["site"].get("pos") or ()))
+            if site and sum(1 for st in stops if key(st) == key(stops[ender])) > 1:
+                return {"ok": False, "error": "this build's next_slide() runs more than once; remove it in the source instead"}
+            try:
+                written = self.project.apply(self.planner.plan_delete_stop(self.scene(name), site))
+                self._sig_at = 0
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": new["error"]}
+            self._commit(f"delete build {si + 1}", written)
+            left = len(new["data"]["stops"])
+            return {"ok": True, "message": f"deleted build {si + 1}", "stop": min(ender, left - 1),
+                    "changed": self.last_changed}
 
     # -------------------------------------------------------- background
     BG_MARK = "# manimble background"
@@ -1949,6 +2433,7 @@ class Manimble:
             info["default"] = base
             return info
         with self.edit_lock:
+            self._settle()
             name = req["scene"]
             targets = self.scenes if req.get("all") else [self.scene(name)]
             edits = []
@@ -2008,6 +2493,7 @@ class Manimble:
         if mode == "invert":
             named = self.aux_worker.request({"cmd": "colors"}).get("colors") or {}
         with self.edit_lock:
+            self._settle()
             self.refresh_scenes()
             names = [s["name"] for s in self.scenes]
             total = 2 * len(names)
@@ -2117,6 +2603,7 @@ class Manimble:
 
     def pages(self, req: dict) -> dict:
         """Frame images for exporting: every build or just the last build of each slide (hidden slides left out)."""
+        self._settle()
         out = []
         for s in self.visible_scenes():
             sc = self.api_scene(s["name"])
@@ -2130,6 +2617,7 @@ class Manimble:
     # ---------------------------------------------------- undo / redo
     def undo(self) -> dict:
         with self.edit_lock:
+            self._settle()
             if not self.history:
                 return {"ok": False, "error": "nothing to undo"}
             e = self.history.pop()
@@ -2140,6 +2628,7 @@ class Manimble:
 
     def redo_(self) -> dict:
         with self.edit_lock:
+            self._settle()
             if not self.redo:
                 return {"ok": False, "error": "nothing to redo"}
             e = self.redo.pop()
@@ -2163,6 +2652,7 @@ class Manimble:
         return {"ok": True}
 
     def _export_job(self, req: dict):
+        self._settle()
         from . import export as ex
         emit = self.on_event or (lambda e: None)
         try:
@@ -2227,6 +2717,7 @@ class Manimble:
         return h if h in self.CLIP_SIZES else 720
 
     def _animation_preview_job(self, name: str, height: int = 720):
+        self._settle()
         emit = self.on_event or (lambda e: None)
         try:
             selected = [self.scene(name)]
@@ -2298,6 +2789,7 @@ class Manimble:
         return True
 
     def _present_job(self, only_scene: str | None = None, height: int = 720):
+        self._settle()
         emit = self.on_event or (lambda e: None)
         try:
             selected = [self.scene(only_scene)] if only_scene else list(self.visible_scenes())
@@ -2310,6 +2802,80 @@ class Manimble:
         finally:
             self._presenting = False
 
+    # ------------------------------------------------------- movie (.mp4) export
+    def export_movie(self, req: dict) -> dict:
+        """Write the animated show as one MP4 at `path`: every build of every visible slide (or of the slides named in
+        `scenes`, in the order given) plays once, then holds its last frame `hold` seconds (default 2) at `fps`
+        (default 30). Slides not yet built at `height` (720, 1080, 1440 or 2160; default 720) are built first, as for
+        `present`. Runs in the background; progress by `export_movie` events, the last one `done` or `error`."""
+        if getattr(self, "_presenting", False):
+            return {"ok": False, "error": "already building the presentation"}
+        path = req.get("path")
+        if not isinstance(path, str) or not path:
+            return {"ok": False, "error": "choose where to save the movie"}
+        names = req.get("scenes")
+        if names is None:
+            selected = self.visible_scenes()
+        else:
+            try:
+                selected = [self.scene(n) for n in names]
+            except KeyError as exc:
+                return {"ok": False, "error": f"unknown slide: {exc.args[0]}"}
+        if not selected:
+            return {"ok": False, "error": "there are no slides to export"}
+        try:
+            hold = float(req.get("hold", 2.0))
+            fps = int(req.get("fps", 30))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "the hold must be a number of seconds and the frame rate a whole number"}
+        if not math.isfinite(hold) or hold < 0:
+            return {"ok": False, "error": "the hold must be a nonnegative number of seconds"}
+        if not 1 <= fps <= 120:
+            return {"ok": False, "error": "the frame rate must be between 1 and 120"}
+        from . import movie
+        if movie.find_ffmpeg() is None:
+            return {"ok": False, "error": "ffmpeg is needed to write movies; install it (brew install ffmpeg) and try again"}
+        self._presenting = True
+        threading.Thread(target=self._export_movie_job, args=(selected, path, self._clip_height(req), hold, fps),
+                         daemon=True).start()
+        return {"ok": True}
+
+    def _export_movie_job(self, selected: list[dict], path: str, height: int, hold: float, fps: int):
+        self._settle()
+        emit = self.on_event or (lambda e: None)
+        from . import movie
+        try:
+            if not self._build_animation_slides(selected, "export_movie", height):
+                return
+            deck = Path(self.deck).resolve()
+            clips = []
+            for s in selected:
+                data = json.loads((deck / "slides" / f"{s['name']}.json").read_text())
+                builds = data.get("slides", [])
+                if not builds:
+                    raise ValueError(f"{s['name']} has no animation clips")
+                for k, slide in enumerate(builds, 1):
+                    kind = slide.get("type", "video")
+                    if kind not in ("video", "image"):
+                        raise ValueError(f"unsupported animation clip type: {kind}")
+                    rel = slide.get("file") if kind == "video" else (slide.get("src") or slide.get("file"))
+                    if not isinstance(rel, str):
+                        raise ValueError(f"{s['name']} has a build without a clip file")
+                    p = (deck / rel).resolve()           # Manim Slides writes paths relative to the deck folder
+                    if not p.is_file() or not p.is_relative_to(deck):
+                        raise ValueError(f"animation clip is missing: {rel}")
+                    clips.append({"path": str(p), "kind": kind, "rate": float(slide.get("playback_rate") or 1.0),
+                                  "label": f"{s['name']}" + (f" (build {k})" if len(builds) > 1 else "")})
+
+            def prog(i, n, label):
+                emit({"event": "export_movie", "phase": "encoding", "done": i, "total": n, "scene": label})
+            movie.write_movie(clips, movie.SIZES[height], path, hold=hold, fps=fps, progress=prog)
+            emit({"event": "export_movie", "phase": "done", "path": path, "builds": len(clips), "slides": len(selected)})
+        except Exception as exc:                          # noqa: BLE001
+            emit({"event": "export_movie", "phase": "error", "error": str(exc)})
+        finally:
+            self._presenting = False
+
     def _present_slides(self, selected: list[dict]) -> list[dict]:
         """The built clips of the selected scenes, in show order, for the native player. `sceneIndex` is the
         scene's place in order.txt (what chapters and link regions refer to), `number` its place in this show."""
@@ -2319,6 +2885,7 @@ class Manimble:
         for number, s in enumerate(selected):
             data = json.loads((deck / "slides" / f"{s['name']}.json").read_text())
             scene_notes = self._notes_of(s["name"])
+            first_notes = self._first_build_notes(s["name"])
             for k, slide in enumerate(data.get("slides", [])):
                 kind = slide.get("type", "video")
                 if kind not in ("video", "image"):
@@ -2338,7 +2905,9 @@ class Manimble:
                     "loop": bool(slide.get("loop")), "autoNext": bool(slide.get("auto_next")),
                     "rate": float(slide.get("playback_rate") or 1.0),
                     "revRate": float(slide.get("reversed_playback_rate") or 1.0),
-                    "notes": slide.get("notes") or scene_notes,
+                    # Manim Slides gives each build the notes= of the next_slide() before it: the slide's for the
+                    # first build, which has its own in a `# manimble build notes` line
+                    "notes": scene_notes, "buildNotes": first_notes if k == 0 else slide.get("notes") or "",
                 })
         return out
 

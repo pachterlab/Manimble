@@ -259,24 +259,28 @@ extension MainController {
 
     // MARK: speaker notes pane
 
+    /// The Slide Notes and Build Notes tabs of the drawer.
     func buildNotesPane() {
-        notesPane.wantsLayer = true
-        Theme.layerColors(notesPane) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
-        notesBox.font = Theme.font(13)
-        notesBox.textColor = Theme.ink(0.92)
-        notesBox.editorBackground = Theme.dynamic(light: .white, dark: NSColor(white: 1, alpha: 0.07))
-        notesBox.borderType = .noBorder
-        notesBox.wantsLayer = true; notesBox.layer?.cornerRadius = 6; notesBox.layer?.masksToBounds = true
+        for (pane, box) in [(notesPane, notesBox), (buildNotesView, buildNotesBox)] {
+            pane.wantsLayer = true
+            Theme.layerColors(pane) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
+            box.font = Theme.font(13)
+            box.textColor = Theme.ink(0.92)
+            box.editorBackground = Theme.dynamic(light: .white, dark: NSColor(white: 1, alpha: 0.07))
+            box.borderType = .noBorder
+            box.wantsLayer = true; box.layer?.cornerRadius = 6; box.layer?.masksToBounds = true
+            box.fillsContainer = true                 // the pane's height comes from the drawer's divider
+            box.translatesAutoresizingMaskIntoConstraints = false
+            pane.addSubview(box)
+            NSLayoutConstraint.activate([
+                box.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 12),
+                box.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -12),
+                box.topAnchor.constraint(equalTo: pane.topAnchor, constant: 8),
+                box.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -8),
+            ])
+        }
         notesBox.onCommit = { [weak self] text in self?.commitNotes(text) }
-        notesBox.fillsContainer = true                 // the pane's height comes from the drawer's divider
-        notesBox.translatesAutoresizingMaskIntoConstraints = false
-        notesPane.addSubview(notesBox)
-        NSLayoutConstraint.activate([
-            notesBox.leadingAnchor.constraint(equalTo: notesPane.leadingAnchor, constant: 12),
-            notesBox.trailingAnchor.constraint(equalTo: notesPane.trailingAnchor, constant: -12),
-            notesBox.topAnchor.constraint(equalTo: notesPane.topAnchor, constant: 8),
-            notesBox.bottomAnchor.constraint(equalTo: notesPane.bottomAnchor, constant: -8),
-        ])
+        buildNotesBox.onCommit = { [weak self] text in self?.commitBuildNotes(text) }
     }
 
     @objc func hideNotesPane() { setDrawerOpen(false) }
@@ -300,6 +304,27 @@ extension MainController {
             self.lastChanged = res.changed
             self.toast(res.message == "no change" ? "No change" : "Speaker notes saved")
             if self.sceneName == name { await self.loadScene(name, keepStop: true) }
+            await self.reloadState()
+        }
+    }
+
+    /// Save the Build Notes tab's text for the build it was showing (on that build's next_slide()).
+    func commitBuildNotes(_ text: String) {
+        guard let target = buildNotesFor else { return }
+        submit { [weak self] in
+            guard let self = self else { return }
+            self.busy += 1
+            let r = try? await self.engine.call("notes", ["op": "set", "scene": target.scene, "stop": target.stop, "text": text],
+                                                as: NotesResult.self)
+            self.busy -= 1
+            guard let res = r, res.ok == true else {
+                self.toast(r?.error ?? "could not save the build notes", error: true)
+                if self.sceneName == target.scene { await self.loadScene(target.scene, keepStop: true) }     // back to what is saved
+                return
+            }
+            self.lastChanged = res.changed
+            self.toast(res.message == "no change" ? "No change" : "Notes saved for build \(target.stop + 1)")
+            if self.sceneName == target.scene { await self.loadScene(target.scene, keepStop: true) }
             await self.reloadState()
         }
     }
@@ -652,8 +677,16 @@ extension MainController {
             let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
             let other = NSScreen.screens.first { $0 != here }
             let p = PresenterController(slides: playable.map { $0.pages }, notes: playable.map { $0.notes ?? "" },
+                                        buildNotes: playable.map { $0.buildNotes ?? [] },
                                         startSlide: start, presenterScreen: here, audienceScreen: other)
             p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            // "Use Slide Show": the presenter window closes and the show carries on as the plain slideshow
+            p.onDetach = { [weak self] src in
+                self?.presenter = nil
+                guard let s = src as? SlidePlayer else { return }
+                s.onExit = { [weak self] in self?.player = nil; self?.window.makeKeyAndOrderFront(nil) }
+                self?.player = s
+            }
             presenter = p
             if other == nil { toast("One display: the show is full screen behind the presenter window. With a second display it goes there.") }
         }

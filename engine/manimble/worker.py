@@ -29,6 +29,7 @@ import sys
 import traceback
 import types
 import functools
+import shutil
 
 DECK = os.path.realpath(sys.argv[1])
 os.chdir(DECK)
@@ -49,7 +50,7 @@ import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Camera, ORIGIN  # noqa: E402
-from manim import Paragraph, BackgroundRectangle, VMobject  # noqa: E402
+from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor  # noqa: E402
 from manim import (FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,  # noqa: E402
                    GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform,
                    TransformFromCopy, AnimationGroup, LaggedStart, Transform, MoveToTarget,
@@ -59,6 +60,96 @@ from manim.animation.transform_matching_parts import TransformMatchingAbstractBa
 from manim.utils.family import extract_mobject_family_members  # noqa: E402
 from manim.utils.iterables import list_update  # noqa: E402
 from manim.mobject.mobject import _AnimationBuilder  # noqa: E402
+
+
+# ------------------------------------------------------------- shared SVG pool
+# Every worker process has its own manim media dir: LaTeX's cleanup step deletes all non-SVG files in the tex
+# dir, so two workers compiling at once would delete each other's .dvi files. The finished SVGs are the
+# expensive part (a LaTeX run per formula, Pango per text), so each worker publishes the SVGs it makes to a pool
+# next to the per-worker dirs (atomic rename, never a half-written file) and looks there before compiling: a
+# formula the background worker built is not built again by the first edit on its slide.
+_POOL = os.environ.get("MANIMBLE_SHARED_MEDIA") or os.path.join(os.path.dirname(MEDIA_DIR_REAL), "shared")
+
+
+def _pool_fetch(target, sub: str):
+    """Put the pooled copy of `target` (a Path) in place when this worker has none yet."""
+    try:
+        if target.exists():
+            return
+        src = os.path.join(_POOL, sub, target.name)
+        if os.path.exists(src):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f"{target}.{os.getpid()}.tmp"
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, target)
+    except OSError:
+        pass
+
+
+def _pool_publish(path, sub: str):
+    try:
+        path = str(path)
+        dst = os.path.join(_POOL, sub, os.path.basename(path))
+        if not path.endswith(".svg") or os.path.exists(dst) or not os.path.exists(path):
+            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = f"{dst}.{os.getpid()}.tmp"
+        try:
+            os.link(path, tmp)
+        except OSError:
+            shutil.copyfile(path, tmp)
+        os.replace(tmp, dst)
+    except OSError:
+        pass
+
+
+def _pool_seed():
+    """SVGs this worker made before there was a pool."""
+    for sub in ("texts", "Tex"):
+        d = os.path.join(MEDIA_DIR, sub)
+        if os.path.isdir(d):
+            for fn in os.listdir(d):
+                if fn.endswith(".svg"):
+                    _pool_publish(os.path.join(d, fn), sub)
+
+
+def _share_text_svgs(cls, colour_of):
+    orig = cls._text2svg
+
+    @functools.wraps(orig)
+    def wrapper(self, color):
+        try:
+            _pool_fetch(config.get_dir("text_dir") / (self._text2hash(colour_of(color)) + ".svg"), "texts")
+        except Exception:                      # noqa: BLE001 - the pool is only a shortcut
+            pass
+        out = orig(self, color)
+        _pool_publish(out, "texts")
+        return out
+    cls._text2svg = wrapper
+
+
+def _share_tex_svgs():
+    import manim.utils.tex_file_writing as tfw
+    import manim.mobject.text.tex_mobject as tm
+    orig = tfw.tex_to_svg_file
+
+    @functools.wraps(orig)
+    def wrapper(expression, environment=None, tex_template=None):
+        try:
+            _pool_fetch(tfw.generate_tex_file(expression, environment, tex_template).with_suffix(".svg"), "Tex")
+        except Exception:                      # noqa: BLE001
+            pass
+        out = orig(expression, environment, tex_template)
+        _pool_publish(out, "Tex")
+        return out
+    tfw.tex_to_svg_file = wrapper
+    tm.tex_to_svg_file = wrapper
+
+
+_share_text_svgs(Text, lambda c: c)
+_share_text_svgs(MarkupText, ManimColor)
+_share_tex_svgs()
+_pool_seed()
 
 
 def _track_project_reads(event, args):
@@ -369,10 +460,13 @@ class Slide(Scene):
     """Stand-in for manim_slides.Slide: each next_slide() is a recorded stop."""
 
     _sl_dirty = False
+    _sl_animated = False      # a play() or wait() has run (what manim-slides counts before its first slide)
 
     def next_slide(self, *a, **k):
-        if not self._sl_dirty and not _STATE["stops"]:
-            return            # options for the first build (e.g. notes=...) before anything is drawn: not a stop
+        if not self._sl_animated and not _STATE["stops"]:
+            # options for the first build (e.g. notes=...) before anything is animated: not a stop, as in
+            # manim-slides, even when setup() or the preamble has already added something (a footer, a page number)
+            return
         stack = project_stack(sys._getframe(1))
         self._sl_stop(stack[-1] if stack else None)
 
@@ -383,7 +477,7 @@ class Slide(Scene):
         pass
 
     def play(self, *a, **k):
-        self._sl_dirty = True
+        self._sl_dirty = self._sl_animated = True
         if not REAL_PLAY and self._fast_play(a):
             return None
         return super().play(*a, **k)
@@ -454,7 +548,7 @@ class Slide(Scene):
         return True
 
     def wait(self, *a, **k):
-        self._sl_dirty = True          # a wait() counts as an animation for manim-slides
+        self._sl_dirty = self._sl_animated = True          # a wait() counts as an animation for manim-slides
         return super().wait(*a, **k)
 
     def add(self, *a, **k):

@@ -235,6 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Clear Guides", #selector(MainController.clearGuides), "", []),
             item("Show Unused Slides", #selector(MainController.toggleUnusedSlides), "", []),
             item("Speaker Notes", #selector(MainController.toggleNotesPane), "k", [.command, .option]),
+            item("Show Tips", #selector(MainController.toggleTips), "", []),
             .separator(),
             item("Dark Mode", #selector(MainController.toggleDarkMode), "d", [.command, .control, .shift]),
             item("Invert Colors", #selector(MainController.toggleInvertColors), "i", [.command, .control, .shift]),
