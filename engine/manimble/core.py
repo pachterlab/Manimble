@@ -1413,9 +1413,13 @@ class Manimble:
     PLACEHOLDER_RE = re.compile(r"^([ \t]*)# manimble placeholder (\w+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (\d+)[ \t]*$")
     PLACEHOLDER_PROMPTS = {"title": "Click to add title", "subtitle": "Click to add subtitle", "body": "Click to add text"}
 
+    NEW_SLIDE_MARK = "# manimble new slide"
+
     def _layout_body(self, layout: str, scene: str | None = None) -> list[str]:
         """construct() statements (unindented) of a new slide with a PowerPoint-style layout: its empty text boxes
-        are `# manimble placeholder` comments, which only the editor shows (nothing renders until one is typed into)."""
+        are `# manimble placeholder` comments, which only the editor shows (nothing renders until one is typed into).
+        It ends with a short `self.wait(0.1)`: manim-slides refuses to build a slide with no animation in it, and
+        the statement keeps the placeholder comments inside the class."""
         boxes = self.LAYOUT_BOXES.get(layout, [] if layout == "blank" else self.LAYOUT_BOXES["title_content"])
         ux, uy, pw, ph = self._units(scene)
         fw, fh = ux * pw, uy * ph
@@ -1424,7 +1428,7 @@ class Manimble:
         for role, (l, t, w, h), pt in boxes:
             x0, y0 = l * kx - fw / 2, fh / 2 - t * ky
             out.append(f"{self.PLACEHOLDER_MARK} {role} {fmt(x0)} {fmt(y0)} {fmt(x0 + w * kx)} {fmt(y0 - h * ky)} {round(pt * ky)}")
-        return out + ["pass"]
+        return out + [f"self.wait(0.1)  {self.NEW_SLIDE_MARK}"]
 
     def _placeholders(self, name: str) -> list[dict]:
         """The slide's empty layout boxes: {line, role, box: [x0, y0, x1, y1] (manim units, y up), size}."""
@@ -1496,8 +1500,9 @@ class Manimble:
                 tag = box_tag({"w": x1 - x0, "h": y0 - y1, "x": x0, "y": y0, "v": "mid" if role == "title" else "top"})
                 edits = [Edit(src.rel, a, b, f"{indent}self.add({code})  {tag}\n")]
                 label = "add text"
-            # the layout's `pass` stays last while placeholders remain (comments after a class's last statement
-            # fall outside its span, so moving or duplicating the slide would leave them behind); then it goes
+            # a slide made before new slides ended in `self.wait(0.1)` has a `pass` that stays last while
+            # placeholders remain (comments after a class's last statement fall outside its span, so moving or
+            # duplicating the slide would leave them behind); then it goes
             if not any(p["line"] != ln for p in self._placeholders(name)):
                 body = [st for st in fn.body if not self._is_preamble(src, st)]
                 passes = [st for st in body if isinstance(st, ast.Pass)]
