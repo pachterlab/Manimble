@@ -5,6 +5,7 @@ import AVFoundation
 /// own) and what to picture it by.
 struct PresenterPage {
     var slide: Int, build: Int, builds: Int
+    var scene: String?                       // where notes typed in Presenter View are saved
     var notes: String
     var buildNotes: String
     var still: String?                       // PNG of the build (stills slideshow, image slides)
@@ -31,6 +32,8 @@ protocol PresenterSource: AnyObject {
     func go(_ i: Int)
     func exit()
     @discardableResult func handleKey(_ e: NSEvent) -> Bool
+    /// Notes typed in Presenter View, once saved: the slide's (`build` false) or page `i`'s own.
+    func setNotes(_ text: String, forPage i: Int, build: Bool)
 }
 
 extension AnimatedPlayer: PresenterSource {}
@@ -63,16 +66,49 @@ final class SlideView: NSImageView {
     override func rightMouseDown(with event: NSEvent) { onClick?(false) }
 }
 
+/// A notes panel of Presenter View: read-only until clicked, then it takes typing (see `PresenterWindow`); losing
+/// focus saves it.
+final class NotesTextView: NSTextView {
+    var onFocus: (() -> Void)?
+    var onBlur: (() -> Void)?
+    /// The panel shows the dimmed "no notes" hint rather than notes.
+    var showsHint = false
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    /// Only a click starts typing: AppKit must not hand the keys to a panel on its own (as the window's initial
+    /// first responder), or the arrow keys would stop driving the show.
+    override func becomeFirstResponder() -> Bool {
+        guard NSApp.currentEvent?.type == .leftMouseDown, super.becomeFirstResponder() else { return false }
+        onFocus?()
+        return true
+    }
+    override func resignFirstResponder() -> Bool {
+        guard super.resignFirstResponder() else { return false }
+        onBlur?()
+        return true
+    }
+}
+
 /// The presenter's window: current slide, next slide, speaker notes, clock, elapsed time and the slide counter.
 final class PresenterWindow: NSWindow {
     var onKey: ((NSEvent) -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func keyDown(with event: NSEvent) { onKey?(event) }
-    /// Every plain key press drives the show, whatever view is first responder: nothing in this window takes
-    /// typing, and the notes text views and the sidebar's scroll view would otherwise keep the arrow keys.
+    /// Every plain key press drives the show, whatever view is first responder (the sidebar's scroll view would
+    /// otherwise keep the arrow keys), except while a notes panel or a feedback note is being typed in: then keys
+    /// type, and esc or ⌘↵ saves the text and gives the keys back to the show. A click anywhere outside a feedback
+    /// note being typed ends that too (nothing else in the window would take the focus from it).
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, event.modifierFlags.intersection([.command, .control, .option]).isEmpty, let k = onKey {
+        if event.type == .keyDown, firstResponder is NotesTextView || firstResponder is FeedbackTextView {
+            let mods = event.modifierFlags.intersection([.command, .control, .option])
+            if event.keyCode == 53 || ((event.keyCode == 36 || event.keyCode == 76) && mods == .command) {
+                makeFirstResponder(nil)
+                return
+            }
+        } else if event.type == .leftMouseDown || event.type == .rightMouseDown, let fr = firstResponder as? FeedbackTextView,
+                  let hit = contentView?.hitTest(event.locationInWindow), !hit.isDescendant(of: fr) {
+            makeFirstResponder(nil)
+        } else if event.type == .keyDown, event.modifierFlags.intersection([.command, .control, .option]).isEmpty, let k = onKey {
             k(event)
             return
         }
@@ -141,6 +177,9 @@ final class SlideThumb: NSView {
     let image = thumbImageView()
     let number = NSTextField(labelWithString: "")
     let builds: [BuildThumb]
+    /// A red dot on the picture: the slide has feedback notes.
+    private let flag = NSView()
+    var hasFeedback = false { didSet { flag.isHidden = !hasFeedback } }
     var onClick: (() -> Void)?
     var selected = false {
         didSet {
@@ -166,7 +205,11 @@ final class SlideThumb: NSView {
         let stack = NSStackView(views: builds)
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(number); addSubview(image); addSubview(stack)
+        flag.wantsLayer = true; flag.layer?.backgroundColor = FeedbackBox.red.cgColor; flag.layer?.cornerRadius = 5
+        flag.layer?.borderWidth = 1.5; flag.layer?.borderColor = NSColor.white.cgColor
+        flag.isHidden = true; flag.toolTip = "Has feedback"
+        flag.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(number); addSubview(image); addSubview(stack); addSubview(flag)
         NSLayoutConstraint.activate([
             number.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2), number.widthAnchor.constraint(equalToConstant: 20),
             number.topAnchor.constraint(equalTo: topAnchor, constant: 8),
@@ -174,6 +217,8 @@ final class SlideThumb: NSView {
             image.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             image.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             image.heightAnchor.constraint(equalTo: image.widthAnchor, multiplier: 9.0 / 16.0),
+            flag.widthAnchor.constraint(equalToConstant: 10), flag.heightAnchor.constraint(equalToConstant: 10),
+            flag.trailingAnchor.constraint(equalTo: image.trailingAnchor, constant: -4), flag.topAnchor.constraint(equalTo: image.topAnchor, constant: 4),
             stack.leadingAnchor.constraint(equalTo: image.leadingAnchor, constant: Self.buildIndent),
             stack.trailingAnchor.constraint(equalTo: image.trailingAnchor),
             stack.topAnchor.constraint(equalTo: image.bottomAnchor, constant: 6),
@@ -188,6 +233,7 @@ final class SlideThumb: NSView {
     /// stays with the panel.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let v = super.hitTest(point) else { return nil }
+        if v === flag { return self }
         return v.isDescendant(of: self) && builds.contains(where: { v.isDescendant(of: $0) }) ? v : self
     }
     override func mouseDown(with event: NSEvent) { onClick?() }
@@ -207,12 +253,26 @@ final class PresenterController: NSObject, NSWindowDelegate {
     var onExit: (() -> Void)?
     /// "Use Slide Show": the presenter window is gone but the show goes on; the caller takes the source back.
     var onDetach: ((PresenterSource) -> Void)?
+    /// Saves notes typed here: the scene, the build (nil for the slide's notes) and the text. `done` says whether
+    /// they were saved.
+    var onSaveNotes: ((_ scene: String, _ build: Int?, _ text: String, _ done: @escaping (Bool) -> Void) -> Void)?
+    /// The deck's feedback notes (set by the controller that opened the show): shown over the current slide, and
+    /// in Feedback Mode new ones are typed there. The audience display never shows them.
+    var feedback: FeedbackStore? {
+        didSet { feedbackLayer.store = feedback; feedbackButton.isEnabled = feedback != nil; if !finished { refresh() } }
+    }
+    /// Feedback Mode: clicks on the current slide add notes instead of advancing.
+    private(set) var feedbackMode = false
 
     private let current = SlideView()
     private let live = LiveVideoView()
+    private let feedbackLayer = FeedbackLayer()
+    private var feedbackButton = NSButton()
     private let badge = NSTextField(labelWithString: "")
-    private let notes = NSTextView()
-    private let buildNotes = NSTextView()
+    private let notes = NotesTextView()
+    private let buildNotes = NotesTextView()
+    /// The page whose notes are being typed in (set when a notes panel takes focus).
+    private var editingPage: Int?
     private let counter = NSTextField(labelWithString: "")
     private let clock = NSTextField(labelWithString: "")
     private let elapsed = NSTextField(labelWithString: "")
@@ -241,9 +301,10 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private var closing = false
 
     /// The stills slideshow: one PNG per build.
-    convenience init(slides: [[String]], notes: [String], buildNotes: [[String]], startSlide: Int, presenterScreen: NSScreen, audienceScreen: NSScreen?) {
+    convenience init(slides: [[String]], scenes: [String], notes: [String], buildNotes: [[String]], startSlide: Int,
+                     presenterScreen: NSScreen, audienceScreen: NSScreen?) {
         let p = SlidePlayer(screen: audienceScreen ?? presenterScreen)
-        p.notes = notes; p.buildNotes = buildNotes
+        p.notes = notes; p.buildNotes = buildNotes; p.scenes = scenes
         self.init(source: p, animated: false, presenterScreen: presenterScreen, sharedScreen: audienceScreen == nil)
         p.play(slides: slides, startSlide: startSlide, screen: audienceScreen ?? presenterScreen, ownSpace: audienceScreen != nil)
         begin()
@@ -387,7 +448,10 @@ final class PresenterController: NSObject, NSWindowDelegate {
         swap.toolTip = sharedScreen ? "Needs a second display" : "Show the slides on this display and the notes on the other"
         let useShow = toolButton("Use Slide Show", symbol: "play.rectangle", action: #selector(useSlideShow))
         useShow.toolTip = "Close Presenter View and keep the show running"
-        let toolbar = NSStackView(views: [endShow, swap, useShow])
+        feedbackButton = toolButton("Feedback Mode", symbol: "text.bubble", action: #selector(toggleFeedbackMode))
+        feedbackButton.toolTip = "Click the slide here to type red feedback notes on it (F). The audience never sees them; the editor shows them afterwards."
+        feedbackButton.isEnabled = false
+        let toolbar = NSStackView(views: [endShow, swap, useShow, feedbackButton])
         toolbar.orientation = .horizontal; toolbar.alignment = .top; toolbar.spacing = 22
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         // timer row: elapsed, pause, reset … clock
@@ -416,6 +480,28 @@ final class PresenterController: NSObject, NSWindowDelegate {
         current.onClick = { [weak self] forward in forward ? self?.advance() : self?.goBack() }
         live.translatesAutoresizingMaskIntoConstraints = false
         live.isHidden = true
+        // feedback notes over the slide (above the live clip); the slide's place within the panel follows the
+        // picture's fit, or the clip's
+        feedbackLayer.translatesAutoresizingMaskIntoConstraints = false
+        feedbackLayer.slideRect = { [weak self] in
+            guard let self else { return .zero }
+            let b = self.feedbackLayer.bounds
+            if !self.live.isHidden, self.live.playerLayer.isReadyForDisplay {
+                let v = self.live.playerLayer.videoRect
+                if v.width > 0, v.height > 0 { return v }
+            }
+            let aspect: CGFloat = {
+                if let s = self.current.image?.size, s.width > 0, s.height > 0 { return s.width / s.height }
+                return 16.0 / 9.0
+            }()
+            let w = min(b.width, b.height * aspect), h = w / aspect
+            return CGRect(x: b.midX - w / 2, y: b.midY - h / 2, width: w, height: h)
+        }
+        feedbackLayer.onAdd = { [weak self] in self?.markFeedback() }
+        current.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: current, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.feedbackLayer.relayout() }
+        }
         badge.font = Theme.font(11, .semibold); badge.textColor = .white
         badge.wantsLayer = true; badge.drawsBackground = true; badge.backgroundColor = NSColor(white: 0, alpha: 0.55)
         badge.layer?.cornerRadius = 4; badge.layer?.masksToBounds = true
@@ -423,10 +509,15 @@ final class PresenterController: NSObject, NSWindowDelegate {
         blank.font = Theme.font(20, .bold); blank.textColor = NSColor(white: 1, alpha: 0.6); blank.isHidden = true
         blank.translatesAutoresizingMaskIntoConstraints = false
         // speaker notes under the slide: the slide's (every build) at the left, this build's own at the right
-        func notesBox(_ tv: NSTextView) -> NSScrollView {
-            tv.isEditable = false; tv.isSelectable = true
+        func notesBox(_ tv: NotesTextView) -> NSScrollView {
+            tv.isEditable = true; tv.isSelectable = true; tv.isRichText = false
+            tv.allowsUndo = true
             tv.font = Theme.font(20)
             tv.textColor = NSColor(white: 0.95, alpha: 1)
+            tv.insertionPointColor = .white
+            tv.typingAttributes = [.font: Theme.font(20), .foregroundColor: NSColor(white: 0.95, alpha: 1)]
+            tv.onFocus = { [weak self, weak tv] in if let tv { self?.beginNotes(tv) } }
+            tv.onBlur = { [weak self, weak tv] in if let tv { self?.endNotes(tv) } }
             tv.backgroundColor = NSColor(white: 1, alpha: 0.05)
             tv.textContainerInset = NSSize(width: 12, height: 12)
             tv.isVerticallyResizable = true; tv.isHorizontallyResizable = false
@@ -464,8 +555,8 @@ final class PresenterController: NSObject, NSWindowDelegate {
         progress.translatesAutoresizingMaskIntoConstraints = false
         track.addSubview(progress)
         let hint = NSTextField(labelWithString: animated
-            ? "→ next · ← back · space pause · V reverse · 1–9 chapter · B blank · N next slide · esc end"
-            : "→ / space next · ← back · B blank · N next slide · esc end")
+            ? "→ next · ← back · space pause · V reverse · 1–9 chapter · B blank · N next slide · F feedback · esc end · click notes to edit"
+            : "→ / space next · ← back · B blank · N next slide · F feedback · esc end · click notes to edit")
         hint.font = Theme.font(11); hint.textColor = NSColor(white: 1, alpha: 0.4)
         hint.lineBreakMode = .byTruncatingTail
         hint.setContentCompressionResistancePriority(.init(1), for: .horizontal)   // never widens the window
@@ -480,7 +571,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
         main.translatesAutoresizingMaskIntoConstraints = false
 
         for v in [toolbar, timerRow, clock, sidebar, main] { root.addSubview(v) }
-        for v in [current, live, badge, blank, notesRow, counterRow, track, hint] { main.addSubview(v) }
+        for v in [current, live, feedbackLayer, badge, blank, notesRow, counterRow, track, hint] { main.addSubview(v) }
         let pw = progress.widthAnchor.constraint(equalToConstant: 0)
         progressWidth = pw
         // the slide: as wide as the main area, unless that leaves too little height for the notes under it; then
@@ -510,6 +601,8 @@ final class PresenterController: NSObject, NSWindowDelegate {
             current.heightAnchor.constraint(lessThanOrEqualTo: root.heightAnchor, multiplier: 0.6),
             live.leadingAnchor.constraint(equalTo: current.leadingAnchor), live.trailingAnchor.constraint(equalTo: current.trailingAnchor),
             live.topAnchor.constraint(equalTo: current.topAnchor), live.bottomAnchor.constraint(equalTo: current.bottomAnchor),
+            feedbackLayer.leadingAnchor.constraint(equalTo: current.leadingAnchor), feedbackLayer.trailingAnchor.constraint(equalTo: current.trailingAnchor),
+            feedbackLayer.topAnchor.constraint(equalTo: current.topAnchor), feedbackLayer.bottomAnchor.constraint(equalTo: current.bottomAnchor),
             badge.leadingAnchor.constraint(equalTo: current.leadingAnchor, constant: 10),
             badge.topAnchor.constraint(equalTo: current.topAnchor, constant: 10),
             blank.centerXAnchor.constraint(equalTo: current.centerXAnchor), blank.centerYAnchor.constraint(equalTo: current.centerYAnchor),
@@ -654,6 +747,8 @@ final class PresenterController: NSObject, NSWindowDelegate {
 
     func refresh() {
         guard (0..<source.pageCount).contains(source.pageIndex) else { return }
+        // the show moved on while notes were being typed: save them for the page they belong to
+        if let e = editingPage, e != source.pageIndex { window.makeFirstResponder(nil) }
         let page = source.presenterPage(source.pageIndex)
         let player = source.livePlayer
         if live.playerLayer.player !== player { live.playerLayer.player = player }
@@ -668,8 +763,15 @@ final class PresenterController: NSObject, NSWindowDelegate {
         } else { badge.isHidden = true }
         counter.stringValue = "Slide \(page.slide + 1) of \(source.slideCount)" + (page.builds > 1 ? "  ·  build \(page.build + 1)/\(page.builds)" : "")
         progressWidth?.constant = 220 * CGFloat(source.pageIndex + 1) / CGFloat(max(1, source.pageCount))
-        Self.show(page.notes, in: notes, empty: Self.noNotes)
-        Self.show(page.buildNotes, in: buildNotes, empty: Self.noBuildNotes)
+        // a panel being typed in keeps its text; the other one shows this page's
+        if window.firstResponder !== notes { Self.show(page.notes, in: notes, empty: Self.noNotes) }
+        if window.firstResponder !== buildNotes { Self.show(page.buildNotes, in: buildNotes, empty: Self.noBuildNotes) }
+        // feedback notes of this slide over its picture (a note being typed is saved when the show moves on)
+        if feedbackLayer.scene != page.scene { feedbackLayer.endEditing() }
+        feedbackLayer.build = page.build
+        feedbackLayer.scene = page.scene
+        feedbackLayer.relayout()
+        markFeedback()
         // the sidebar: outline the current slide and its current build, and keep them in view
         if let k = slideRange.firstIndex(where: { $0.first <= source.pageIndex && source.pageIndex <= $0.last }) {
             for (i, t) in thumbs.enumerated() where t.selected != (i == k) { t.selected = i == k }
@@ -687,15 +789,82 @@ final class PresenterController: NSObject, NSWindowDelegate {
     /// For the headless test: whether the live panel has a frame of the current clip to draw.
     var liveFrameReady: Bool { !live.isHidden && live.playerLayer.isReadyForDisplay }
 
-    private static let noNotes = "No notes for this slide. Type them on the Slide Notes tab under the slide in the editor."
-    private static let noBuildNotes = "No notes for this build. Type them on the Build Notes tab under the slide in the editor."
+    // MARK: Feedback Mode
+
+    /// Flag the slides with feedback in the sidebar.
+    private func markFeedback() {
+        guard let store = feedback else { return }
+        for (k, r) in slideRange.enumerated() {
+            let has = source.presenterPage(r.first).scene.map { !store.notes(for: $0).isEmpty } ?? false
+            if let t = thumbs[safe: k], t.hasFeedback != has { t.hasFeedback = has }
+        }
+    }
+
+    /// The store changed (a note added, edited or removed, here or in the editor): show what is.
+    func feedbackChanged() {
+        guard !finished else { return }
+        feedbackLayer.rebuild()
+        markFeedback()
+    }
+
+    /// For the headless test: where the slide is drawn in the presenter's panel, in window coordinates.
+    var feedbackSlideRectInWindow: CGRect { feedbackLayer.convert(feedbackLayer.slideRect(), to: nil) }
+    func setFeedbackMode(_ on: Bool) { if on != feedbackMode { toggleFeedbackMode() } }
+
+    @objc private func toggleFeedbackMode() {
+        guard feedback != nil else { NSSound.beep(); return }
+        feedbackMode.toggle()
+        feedbackLayer.placing = feedbackMode
+        if !feedbackMode { feedbackLayer.endEditing() }
+        feedbackButton.contentTintColor = feedbackMode ? Theme.accent : NSColor(white: 1, alpha: 0.85)
+        feedbackButton.title = feedbackMode ? "Feedback On" : "Feedback Mode"
+        current.toolTip = feedbackMode ? "Click to add a feedback note" : nil
+    }
+
+    private static let noNotes = "No notes for this slide. Click here to type them."
+    private static let noBuildNotes = "No notes for this build. Click here to type them."
 
     /// Notes in a panel, or a dimmed hint when there are none.
-    private static func show(_ text: String, in tv: NSTextView, empty: String) {
+    private static func show(_ text: String, in tv: NotesTextView, empty: String) {
         let shown = text.isEmpty ? empty : text
+        tv.showsHint = text.isEmpty
         guard tv.string != shown else { return }
         tv.string = shown
         tv.textColor = text.isEmpty ? NSColor(white: 1, alpha: 0.35) : NSColor(white: 0.95, alpha: 1)
+    }
+
+    // MARK: Typing notes
+
+    /// A notes panel took focus: note the page it is for and clear the hint.
+    private func beginNotes(_ tv: NotesTextView) {
+        guard !finished else { return }
+        editingPage = source.pageIndex
+        if tv.showsHint { tv.string = ""; tv.showsHint = false }
+        tv.textColor = NSColor(white: 0.95, alpha: 1)
+    }
+
+    /// A notes panel lost focus (esc, ⌘↵, a click elsewhere, the show moving on): save what changed.
+    private func endNotes(_ tv: NotesTextView) {
+        guard let i = editingPage else { return }
+        editingPage = nil
+        let isBuild = tv === buildNotes
+        let page = source.presenterPage(i)
+        let text = tv.string
+        let old = isBuild ? page.buildNotes : page.notes
+        if text != old, let scene = page.scene, let save = onSaveNotes {
+            source.setNotes(text, forPage: i, build: isBuild)
+            save(scene, isBuild ? page.build : nil, text) { [weak self] ok in
+                guard let self, !ok else { return }
+                self.source.setNotes(old, forPage: i, build: isBuild)      // not saved: back to what is
+                if !self.finished { self.refresh() }
+            }
+        }
+        // after the focus has moved: changing the text of a panel that is still resigning first responder (a
+        // click from one panel into the other) restarts its insertion point, which then blinks beside the new one
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.finished else { return }
+            self.refresh()
+        }
     }
 
     private static func pauseImage(paused: Bool) -> NSImage? {
@@ -745,6 +914,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
     /// Close the presenter window and carry on with the plain show.
     @objc private func useSlideShow() {
         guard !finished else { return }
+        window.makeFirstResponder(nil)      // saves notes being typed
         finished = true
         timer?.invalidate(); timer = nil
         window.delegate = nil
@@ -755,14 +925,43 @@ final class PresenterController: NSObject, NSWindowDelegate {
         onDetach?(source)
     }
 
-    /// Hides the presenter window, leaving its full-screen Space first when it has one (ordering out a
-    /// full-screen window leaves an empty Space behind).
+    /// Hides the presenter window for good, leaving its full-screen Space first when it has one (ordering out a
+    /// full-screen window leaves an empty Space behind). Holds the window, not the controller: the caller lets go of
+    /// the controller as soon as the show ends, long before the window is out of full screen, and a `[weak self]`
+    /// here left the window on screen at its floating size. Looks again a moment later, should the exit transition
+    /// have been dropped (the show leaving full screen on the other display at the same moment).
     private func hideWindow() {
-        leaveFullScreen { [weak self] in self?.window.orderOut(nil) }
+        let w = window
+        let userClosing = closing
+        func gone() {
+            w.orderOut(nil)
+            if !userClosing { w.close() }
+        }
+        func leave(_ tries: Int) {
+            guard w.styleMask.contains(.fullScreen), !userClosing, tries > 0 else { gone(); return }
+            final class Once { var done = false }
+            let once = Once()
+            w.once(NSWindow.didExitFullScreenNotification) {
+                guard !once.done else { return }
+                once.done = true
+                // let the exit transition settle (ordering out at its very end can be undone by AppKit)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { Task { @MainActor in gone() } }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                Task { @MainActor in
+                    guard !once.done else { return }
+                    once.done = true
+                    leave(tries - 1)
+                }
+            }
+            w.toggleFullScreen(nil)
+        }
+        leave(3)
     }
 
     private func key(_ e: NSEvent) {
         if e.keyCode == 15, e.charactersIgnoringModifiers?.lowercased() == "r" { resetTimer(); return }
+        if e.keyCode == 3, e.charactersIgnoringModifiers?.lowercased() == "f" { toggleFeedbackMode(); return }
         if !source.handleKey(e) { NSSound.beep() }
     }
 
@@ -773,6 +972,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
 
     private func finish() {
         guard !finished else { return }
+        window.makeFirstResponder(nil)      // saves notes being typed
         finished = true
         timer?.invalidate(); timer = nil
         window.delegate = nil

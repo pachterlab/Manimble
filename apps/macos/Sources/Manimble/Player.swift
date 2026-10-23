@@ -106,6 +106,8 @@ final class SlidePlayer: NSObject {
     /// Speaker notes per slide, and each slide's notes per build, for Presenter View.
     var notes: [String] = []
     var buildNotes: [[String]] = []
+    /// Each slide's scene, where notes typed in Presenter View are saved.
+    var scenes: [String] = []
     /// Called after every page change (the presenter view mirrors the audience display).
     var onChange: (() -> Void)?
     private var cache: [String: CGImage] = [:]
@@ -254,8 +256,19 @@ extension SlidePlayer: PresenterSource {
     func presenterPage(_ i: Int) -> PresenterPage {
         let p = pages[i]
         let builds = buildNotes.indices.contains(p.slide) ? buildNotes[p.slide] : []
-        return PresenterPage(slide: p.slide, build: p.build, builds: p.builds,
+        return PresenterPage(slide: p.slide, build: p.build, builds: p.builds, scene: scenes.indices.contains(p.slide) ? scenes[p.slide] : nil,
                              notes: notes.indices.contains(p.slide) ? notes[p.slide] : "",
                              buildNotes: builds.indices.contains(p.build) ? builds[p.build] : "", still: p.path, clip: nil)
+    }
+    func setNotes(_ text: String, forPage i: Int, build: Bool) {
+        guard pages.indices.contains(i) else { return }
+        let p = pages[i]
+        if !build {
+            if notes.indices.contains(p.slide) { notes[p.slide] = text }
+            return
+        }
+        while buildNotes.count <= p.slide { buildNotes.append([]) }
+        while buildNotes[p.slide].count <= p.build { buildNotes[p.slide].append("") }
+        buildNotes[p.slide][p.build] = text
     }
 }

@@ -270,8 +270,15 @@ final class AnimatedPlayer: NSObject {
 
     func presenterPage(_ i: Int) -> PresenterPage {
         let s = slides[i]
-        return PresenterPage(slide: s.number, build: s.index, builds: s.count, notes: s.notes, buildNotes: s.buildNotes ?? "",
+        return PresenterPage(slide: s.number, build: s.index, builds: s.count, scene: s.scene, notes: s.notes, buildNotes: s.buildNotes ?? "",
                              still: s.kind == "image" ? s.file : nil, clip: s.kind == "video" ? s.file : nil)
+    }
+
+    /// Notes typed in Presenter View, once saved: the slide's go to every build of its scene, a build's to that page.
+    func setNotes(_ text: String, forPage i: Int, build: Bool) {
+        guard slides.indices.contains(i) else { return }
+        if build { deck.slides[i].buildNotes = text; return }
+        for k in deck.slides.indices where deck.slides[k].scene == slides[i].scene { deck.slides[k].notes = text }
     }
 
     /// Handle a key from another window (Presenter View). Returns false for keys it does not know.

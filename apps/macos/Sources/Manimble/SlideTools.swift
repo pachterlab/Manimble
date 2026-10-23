@@ -407,6 +407,25 @@ extension MainController {
         }
     }
 
+    /// Save notes typed in Presenter View: the slide's (`build` nil) or one build's.
+    func savePresenterNotes(scene: String, build: Int?, text: String, done: @escaping (Bool) -> Void) {
+        submit { [weak self] in
+            guard let self = self else { return }
+            var args: [String: Any] = ["op": "set", "scene": scene, "text": text]
+            if let b = build { args["stop"] = b }
+            let r = try? await self.engine.call("notes", args, as: NotesResult.self)
+            guard let res = r, res.ok == true else {
+                self.toast(r?.error ?? "could not save the notes", error: true)
+                done(false)
+                return
+            }
+            self.lastChanged = res.changed
+            done(true)
+            if self.sceneName == scene { await self.loadScene(scene, keepStop: true) }
+            await self.reloadState()
+        }
+    }
+
     // MARK: extract elements from a picture
 
     @objc func extractElementsPressed() { Task { @MainActor in await extractElements(interactive: true) } }
@@ -755,10 +774,13 @@ extension MainController {
             if let n = sceneName, let i = playable.firstIndex(where: { $0.scene == n }) { start = i }
             let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
             let other = NSScreen.screens.first { $0 != here }
-            let p = PresenterController(slides: playable.map { $0.pages }, notes: playable.map { $0.notes ?? "" },
+            let p = PresenterController(slides: playable.map { $0.pages }, scenes: playable.map { $0.scene },
+                                        notes: playable.map { $0.notes ?? "" },
                                         buildNotes: playable.map { $0.buildNotes ?? [] },
                                         startSlide: start, presenterScreen: here, audienceScreen: other)
             p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            p.onSaveNotes = { [weak self] scene, build, text, done in self?.savePresenterNotes(scene: scene, build: build, text: text, done: done) }
+            p.feedback = feedback
             // "Use Slide Show": the presenter window closes and the show carries on as the plain slideshow
             p.onDetach = { [weak self] src in
                 self?.presenter = nil
@@ -768,6 +790,179 @@ extension MainController {
             }
             presenter = p
             if other == nil { toast("One display: the show is full screen behind the presenter window. With a second display it goes there.") }
+        }
+    }
+}
+
+// MARK: - feedback notes (Presenter View's Feedback Mode)
+
+extension MainController {
+    /// Open the deck's feedback notes alongside its working copy and lay them over the canvas.
+    func openFeedback(_ ws: Workspace) {
+        let original = ws.original.appendingPathComponent("feedback.json")
+        let store = FeedbackStore(url: ws.work.appendingPathComponent("feedback.json"),
+                                  originalHasFile: FileManager.default.fileExists(atPath: original.path))
+        store.onChange = { [weak self] in self?.feedbackChanged() }
+        feedback = store
+        let layer = canvas.attachFeedbackLayer()
+        layer.store = store
+        layer.scene = sceneName
+        syncFeedbackButton()
+    }
+
+    /// A note was added, edited or removed (in the editor or in Presenter View).
+    func feedbackChanged() {
+        updateDocumentState()
+        syncFeedbackButton()
+        canvas.feedbackLayer?.rebuild()
+        presenter?.feedbackChanged()
+        (feedbackPopover?.contentViewController?.view as? FeedbackListView)?.reload()
+    }
+
+    func syncFeedbackButton() {
+        let n = feedback?.notes.count ?? 0
+        formatBar?.feedback.isEnabled = n > 0
+        formatBar?.feedback.title = n > 0 ? "View Feedback (\(n))" : "View Feedback"
+    }
+
+    /// How the feedback list names a slide: its number in the navigator (and name), or "missing" for a slide that
+    /// was renamed or deleted since.
+    func feedbackSlideLabel(_ scene: String) -> String {
+        if let i = state?.scenes.firstIndex(where: { $0.name == scene }) {
+            return "Slide \(i + 1) · \(scene)" + (state?.scenes[i].hidden == true ? " (hidden)" : "")
+        }
+        if state?.unusedScenes.contains(where: { $0.name == scene }) == true { return "Unused slide · \(scene)" }
+        return "Missing slide · \(scene)"
+    }
+
+    /// "View Feedback": the notes grouped by slide in a popover; a click (or Previous / Next) shows that slide
+    /// with the note outlined, ready to edit.
+    @objc func viewFeedback(_ sender: NSButton) {
+        if let p = feedbackPopover, p.isShown { p.close(); return }
+        guard let store = feedback, !store.isEmpty else { return }
+        let list = FeedbackListView(store: store)
+        list.slideLabel = { [weak self] in self?.feedbackSlideLabel($0) ?? $0 }
+        list.onGo = { [weak self] n in
+            guard let self else { return }
+            Task { @MainActor in
+                if self.sceneName != n.scene {
+                    guard self.state?.scenes.contains(where: { $0.name == n.scene }) == true
+                            || self.state?.unusedScenes.contains(where: { $0.name == n.scene }) == true
+                    else { self.toast("That slide no longer exists", error: true); return }
+                    await self.selectScene(n.scene)
+                }
+                if let stops = self.scene?.stops, stops.indices.contains(n.build), self.stopIndex != n.build {
+                    self.stopIndex = n.build
+                    self.applyStop()
+                }
+                self.canvas.feedbackLayer?.focus(n.id)
+            }
+        }
+        let vc = NSViewController(); vc.view = list
+        let p = NSPopover(); p.contentViewController = vc; p.behavior = .transient
+        feedbackPopover = p
+        p.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+    }
+}
+
+extension MainController {
+    /// MANIMBLE_TEST_FEEDBACK=<deck>: Presenter View (stills) in Feedback Mode, notes typed through real window
+    /// events, then the editor's overlay and the View Feedback list; feedback.log and feedback-*.png in
+    /// MANIMBLE_TEST_OUT.
+    func feedbackTest() {
+        let env = ProcessInfo.processInfo.environment
+        let dir = (env["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "feedback.log") }
+        func shot(_ w: NSWindow, _ name: String) {
+            guard let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+            v.cacheDisplay(in: v.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + name))
+        }
+        func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1_000_000_000)) }
+        func click(_ w: NSWindow, _ p: CGPoint, right: Bool = false) {
+            for (t, n) in [(right ? NSEvent.EventType.rightMouseDown : .leftMouseDown, 1), (right ? .rightMouseUp : .leftMouseUp, 1)] {
+                if let e = NSEvent.mouseEvent(with: t, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: w.windowNumber, context: nil, eventNumber: n, clickCount: 1, pressure: 1) { w.sendEvent(e) }
+            }
+        }
+        func key(_ w: NSWindow, code: UInt16, chars: String, mods: NSEvent.ModifierFlags = []) {
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
+                                        windowNumber: w.windowNumber, context: nil, characters: chars, charactersIgnoringModifiers: chars,
+                                        isARepeat: false, keyCode: code) { w.sendEvent(e) }
+        }
+        Task { @MainActor in
+            try? "".write(toFile: dir + "feedback.log", atomically: true, encoding: .utf8)
+            await selectScene("Welcome")
+            await queueTail?.value
+            log("store=\(feedback != nil) notes=\(feedback?.notes.count ?? -1) button=\(formatBar.feedback.isEnabled)")
+            presenterView()
+            for _ in 0..<600 { await wait(0.5); if presenter != nil { break } }
+            guard let pc = presenter else { log("no presenter"); return }
+            await wait(1.5)
+            let w = pc.window
+            log("presenter page=\(pc.source.pageIndex)/\(pc.source.pageCount) mode=\(pc.feedbackMode)")
+            // a click on the slide with Feedback Mode off advances the show
+            var r = pc.feedbackSlideRectInWindow
+            click(w, CGPoint(x: r.midX, y: r.midY)); await wait(0.4)
+            log("click off-mode: page=\(pc.source.pageIndex) (expected 1)")
+            pc.source.go(0); await wait(0.4)
+            // Feedback Mode: a click adds a note and typing goes into it
+            pc.setFeedbackMode(true)
+            r = pc.feedbackSlideRectInWindow
+            click(w, CGPoint(x: r.minX + r.width * 0.2, y: r.minY + r.height * 0.7)); await wait(0.3)
+            log("after click: first responder=\(type(of: w.firstResponder as Any)) notes=\(feedback?.notes.count ?? -1)")
+            (w.firstResponder as? NSTextView)?.insertText("Fix this title", replacementRange: NSRange(location: 0, length: 0))
+            await wait(0.2)
+            shot(w, "feedback-1-typing.png")
+            key(w, code: 53, chars: "\u{1B}")                   // esc ends typing and saves
+            await wait(0.3)
+            let n1 = feedback?.notes.first
+            log("note 1: scene=\(n1?.scene ?? "-") build=\(n1?.build ?? -1) x=\(n1?.x ?? -1) y=\(n1?.y ?? -1) text='\(n1?.text ?? "")' fr=\(type(of: w.firstResponder as Any))")
+            log("file exists=\(FileManager.default.fileExists(atPath: feedback?.url.path ?? "")) modified=\(workspace?.isModified ?? false)")
+            // the arrow keys still drive the show after esc
+            key(w, code: 124, chars: "\u{F703}"); await wait(0.4)
+            log("after → : page=\(pc.source.pageIndex) (expected 1)")
+            // a note on the last slide, ended by moving on (the show's keys) rather than esc
+            pc.source.go(pc.source.pageCount - 1); await wait(0.5)
+            r = pc.feedbackSlideRectInWindow
+            click(w, CGPoint(x: r.minX + r.width * 0.6, y: r.minY + r.height * 0.3)); await wait(0.3)
+            (w.firstResponder as? NSTextView)?.insertText("Too much maths here", replacementRange: NSRange(location: 0, length: 0))
+            await wait(0.2)
+            key(w, code: 36, chars: "\r", mods: .command)      // ⌘↵
+            await wait(0.3)
+            shot(w, "feedback-2-last-slide.png")
+            log("notes=\(feedback?.notes.map { "\($0.scene):\($0.text)" } ?? [])")
+            // an empty note is dropped
+            click(w, CGPoint(x: r.minX + r.width * 0.5, y: r.minY + r.height * 0.5)); await wait(0.2)
+            key(w, code: 53, chars: "\u{1B}"); await wait(0.4)
+            log("after empty note: notes=\(feedback?.notes.count ?? -1) (expected 2)")
+            pc.setFeedbackMode(false)
+            w.close(); await wait(0.6)
+            log("closed presenter=\(presenter == nil) player=\(player == nil)")
+            // the editor shows the notes of the slide on screen; the audience never did (nothing is rendered)
+            await selectScene("Welcome"); await queueTail?.value; await wait(0.8)
+            let boxes = canvas.feedbackLayer?.subviews.compactMap { $0 as? FeedbackBox } ?? []
+            log("editor Welcome: boxes=\(boxes.count) frames=\(boxes.map { "\($0.frame.integral)" }) slide=\(canvas.slideRect.integral)")
+            log("editor Welcome: box text=\(boxes.map { "'\($0.text.string)' storage=\($0.text.textStorage?.string ?? "nil") tf=\($0.text.frame)" }) store=\(feedback?.notes.map(\.text) ?? [])")
+            shot(window, "feedback-3-editor.png")
+            log("button=\(formatBar.feedback.isEnabled) title='\(formatBar.feedback.title)'")
+            // View Feedback: Next goes to the first note, then the second (another slide), focused for editing
+            viewFeedback(formatBar.feedback); await wait(0.5)
+            guard let list = feedbackPopover?.contentViewController?.view as? FeedbackListView else { log("no popover"); return }
+            log("popover shown=\(feedbackPopover?.isShown ?? false)")
+            list.goNext(); await wait(1.2)
+            log("after next 1: scene=\(sceneName ?? "-") fr=\(type(of: window.firstResponder as Any))")
+            list.goNext(); await wait(1.5)
+            log("after next 2: scene=\(sceneName ?? "-") fr=\(type(of: window.firstResponder as Any)) boxes=\(canvas.feedbackLayer?.subviews.compactMap { $0 as? FeedbackBox }.count ?? -1)")
+            shot(window, "feedback-4-editor-formula.png")
+            feedbackPopover?.close()
+            // deleting: one, then all
+            if let id = feedback?.notes.first?.id { feedback?.remove(id) }
+            await wait(0.2)
+            log("after remove one: notes=\(feedback?.notes.count ?? -1) button=\(formatBar.feedback.isEnabled)")
+            feedback?.removeAll(); await wait(0.2)
+            log("after remove all: notes=\(feedback?.notes.count ?? -1) button=\(formatBar.feedback.isEnabled) file=\(FileManager.default.fileExists(atPath: feedback?.url.path ?? "")) boxes=\(canvas.feedbackLayer?.subviews.compactMap { $0 as? FeedbackBox }.count ?? -1)")
+            log("done")
         }
     }
 }

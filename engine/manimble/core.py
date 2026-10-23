@@ -310,9 +310,12 @@ class Manimble:
                 sub = key[:12]
                 out = self.cache_dir / name / sub
                 out.mkdir(parents=True, exist_ok=True)
+                anchors = self._anchors()
                 res = (self.edit_worker if interactive else self.render_worker).request(
                     {"cmd": "render", "scene": name, "module": s["module"], "out": str(out)}
                 )
+                if "error" not in res:
+                    res["anchors"] = anchors
                 dependencies = sorted(set(res.get("dependencies", [])))
                 if "error" in res:
                     rec = {"key": key, "error": res["error"], "dir": sub,
@@ -378,6 +381,64 @@ class Manimble:
             scanned = sum(bool(self.results.get(s["name"], {}).get("dependencies_scanned")) for s in self.scenes)
         return {"dependencies": paths, "scannedScenes": scanned,
                 "totalScenes": len(self.scenes), "failures": failures}
+
+    def _anchors(self) -> dict:
+        """{file: {name: [first line, last line]}} of every top-level def and class, to rebase a render's
+        source positions after lines move above or between them."""
+        out = {}
+        for rel in self.project.py_files():
+            try:
+                tree = self.project.src(rel).tree
+            except SyntaxError:
+                continue
+            out[rel] = {n.name: [n.lineno, n.end_lineno] for n in tree.body
+                        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))}
+        return out
+
+    def _rebased(self, data: dict) -> dict:
+        """data with its objects' source positions moved to where those lines are now. Editing another
+        slide in the same file leaves this one's render valid (same key) but shifts its lines, and the
+        stale positions would no longer find the calls that made its objects."""
+        old = data.get("anchors")
+        if not old:
+            return data
+        moved = [f for f, h in data.get("files", {}).items()
+                 if f in old and os.path.exists(os.path.join(self.deck, f)) and self.project.file_hash(f) != h]
+        if not moved:
+            return data
+        new = self._anchors()
+        shift = {}
+        for f in moved:
+            spans = sorted(old[f].items(), key=lambda kv: kv[1][0])
+            cur = new.get(f, {})
+
+            def delta(line, spans=spans, cur=cur):
+                d = 0
+                for name, (a, b) in spans:
+                    if a > line:
+                        break
+                    if name not in cur:
+                        return None
+                    if line <= b:
+                        return cur[name][0] - a
+                    d = cur[name][1] - b          # module-level code after this def moves with its end
+                return d
+            shift[f] = delta
+        data = dict(data)
+        objects = copy.deepcopy(data["objects"])
+
+        def fix(frames):
+            for fr in frames:
+                f = shift.get(fr["file"])
+                d = f(fr["pos"][0]) if f else 0
+                if d:
+                    fr["pos"] = [fr["pos"][0] + d, fr["pos"][1], fr["pos"][2] + d, fr["pos"][3]]
+        for o in objects.values():
+            fix(o["frames"])
+            for ev in o.get("events", []):
+                fix(ev.get("frames", []))
+        data["objects"] = objects
+        return data
 
     def fresh_record(self, name: str) -> dict:
         """A record whose positional metadata matches the files on disk."""
@@ -456,7 +517,11 @@ class Manimble:
             return {"name": name, "status": self.status(name)}
         if "error" in rec:
             return {"name": name, "status": "error", "error": rec["error"], "source": self.api_source(name)}
-        data = rec["data"]
+        if "anchors" not in rec["data"] and not rec.get("optimistic"):
+            rec = self.fresh_record(name)        # cached before renders kept anchors: re-render if lines moved
+            if "error" in rec:
+                return {"name": name, "status": "error", "error": rec["error"], "source": self.api_source(name)}
+        data = self._rebased(rec["data"])
         fw, fh = data["frame"]
         pw, ph = data["size"]
         counts: dict = {}

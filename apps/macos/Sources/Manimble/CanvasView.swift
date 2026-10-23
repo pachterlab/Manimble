@@ -286,7 +286,21 @@ final class CanvasView: MTKView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         layoutTextEditor()
+        feedbackLayer?.relayout()
         onGeometryChange?()
+    }
+
+    /// Feedback notes laid over the slide (never part of the render); the host adds it and sets its store.
+    private(set) var feedbackLayer: FeedbackLayer?
+    func attachFeedbackLayer() -> FeedbackLayer {
+        if let l = feedbackLayer { return l }
+        let l = FeedbackLayer(frame: bounds)
+        l.autoresizingMask = [.width, .height]
+        l.slideRect = { [weak self] in self?.slideRect ?? .zero }
+        l.fallbackResponder = self
+        addSubview(l)
+        feedbackLayer = l
+        return l
     }
 
     // drag state
@@ -377,7 +391,7 @@ final class CanvasView: MTKView {
     }
     required init(coder: NSCoder) { fatalError() }
 
-    private func needsDisplay2() { layoutTextEditor(); setNeedsDisplay(bounds) }
+    private func needsDisplay2() { layoutTextEditor(); feedbackLayer?.relayout(); setNeedsDisplay(bounds) }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay2() }
 
     private func buildPipelines(_ dev: MTLDevice) {

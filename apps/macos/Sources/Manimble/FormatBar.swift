@@ -34,6 +34,20 @@ final class FormatBar: NSView {
     let snap = FormatBar.button("square.on.square.dashed", "⌗", "Snap to other objects, guides and the slide while dragging (⌥⌘S; hold ⌥ to drag freely)", toggle: true)
     let guideV = FormatBar.button("rectangle.split.2x1", "│", "Add a vertical guide (drag it into place, drag it off the slide to remove)")
     let guideH = FormatBar.button("rectangle.split.1x2", "─", "Add a horizontal guide (drag it into place, drag it off the slide to remove)")
+    /// Far right: the feedback notes typed in Presenter View's Feedback Mode, listed by slide (greyed out until
+    /// there are any).
+    let feedback: NSButton = {
+        let b = NSButton(title: "View Feedback", target: nil, action: nil)
+        b.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: "View feedback")
+        b.imagePosition = .imageLeading
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        b.bezelStyle = .texturedRounded
+        b.font = Theme.font(12)
+        b.toolTip = "Feedback notes typed in Presenter View (Feedback Mode): walk through them and delete them"
+        b.isEnabled = false
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
     var alignButtons: [(String, NSButton)] {
         [("left", alignLeft), ("center", alignCenter), ("right", alignRight), ("justify", alignJustify)]
     }
@@ -114,11 +128,14 @@ final class FormatBar: NSView {
         stack.setCustomSpacing(2, after: sizeField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        addSubview(feedback)
         let line = hairline(); line.translatesAutoresizingMaskIntoConstraints = false
         addSubview(line)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(lessThanOrEqualTo: feedback.leadingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            feedback.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            feedback.centerYAnchor.constraint(equalTo: centerYAnchor),
             heightAnchor.constraint(equalToConstant: 36),
             line.leadingAnchor.constraint(equalTo: leadingAnchor), line.trailingAnchor.constraint(equalTo: trailingAnchor),
             line.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -274,6 +291,7 @@ extension MainController {
         bar.snap.target = self; bar.snap.action = #selector(toggleSnap)
         bar.guideV.target = self; bar.guideV.action = #selector(addVerticalGuide)
         bar.guideH.target = self; bar.guideH.action = #selector(addHorizontalGuide)
+        bar.feedback.target = self; bar.feedback.action = #selector(viewFeedback(_:))
         return bar
     }
 

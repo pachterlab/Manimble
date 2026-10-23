@@ -69,6 +69,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var player: SlidePlayer?
     var presenter: PresenterController?
     var animatedPlayer: AnimatedPlayer?
+    /// The deck's feedback notes (Presenter View's Feedback Mode), in `feedback.json` of the working copy.
+    var feedback: FeedbackStore?
+    var feedbackPopover: NSPopover?
     private var presentFrom = 0              // scene (order.txt index) the animated show starts at
     private var presentWithPresenter = false // the animated show opens in Presenter View
     var animationPreview: AnimationPreviewView?
@@ -438,7 +441,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let pending = pendingDeck {
             pendingDeck = nil
             open(deck: pending)
-        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE", "MOVE", "NOTES", "FRAME"].lazy
+        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE", "MOVE", "NOTES", "FRAME", "FEEDBACK"].lazy
                     .compactMap({ ProcessInfo.processInfo.environment["MANIMBLE_TEST_" + $0] }).first
                     ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"].flatMap({ $0.hasPrefix("/") ? $0 : nil }) {
             open(deck: d)
@@ -572,6 +575,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 let ws = try Workspace(deck: deck)
                 workspace?.discard()
                 workspace = ws
+                openFeedback(ws)
                 if terminal.hasStarted { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
                 _ = try await engine.raw("open", ["deck": ws.work.path, "cache": Workspace.cacheDir(for: ws.original)])
                 UserDefaults.standard.set(deck, forKey: "lastDeck")
@@ -675,7 +679,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    func finish() { closeAnimationPreview(); engine.stop(); workspace?.discard(); workspace = nil }
+    func finish() { closeAnimationPreview(); engine.stop(); workspace?.discard(); workspace = nil; feedback = nil; canvas.feedbackLayer?.store = nil }
 
     func closeAnimationPreview() {
         previewScene = nil
@@ -874,8 +878,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 return
             }
         }
-        if name != sceneName { closeAnimationPreview(); table.buildFocused = false }
+        if name != sceneName { closeAnimationPreview(); table.buildFocused = false; canvas.feedbackLayer?.endEditing() }
         sceneName = name; stopIndex = 0; selection = nil
+        canvas.feedbackLayer?.scene = name
         refreshRings()
         refreshBuildRows()
         canvas.overrides = [:]; canvas.lineOverrides = [:]; canvas.selection = nil
@@ -926,6 +931,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FEEDBACK"] != nil, !testRan { testRan = true; feedbackTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OFFSLIDE"] != nil, !testRan { testRan = true; offSlideTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_MOVE"] != nil, !testRan { testRan = true; moveTest() }
         rebuildSteps()
@@ -940,6 +946,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.sceneObjects = sc.objects ?? [:]
         canvas.placeholders = sc.placeholders ?? []
         canvas.optimistic = sc.optimistic ?? false
+        canvas.feedbackLayer?.build = stopIndex
+        canvas.feedbackLayer?.scene = sc.name
         canvas.stop = stops[stopIndex]
         canvas.selection = selection
         if !buildNotesBox.isEditing {
@@ -1727,6 +1735,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// move to every build of the slide instead. (Every menu item the controller answers to is targeted at it,
     /// so the text box never sees the key on its own.)
     @objc func selectAll(_ sender: Any?) {
+        if let t = otherWindowText { t.selectAll(sender); return }
         if let t = window.firstResponder as? NSText { t.selectAll(sender); return }
         submit { [weak self] in                 // after the move itself, when it is still queued
             guard let self = self, let m = self.lastBuildMove, m.scene == self.sceneName, m.stop == self.stopIndex else { return }
@@ -2135,7 +2144,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     @objc func undo() { doUndo(redo: false) }
     @objc func redo() { doUndo(redo: true) }
+    /// Text being typed in another window (Presenter View's notes): the Edit menu, targeted at this controller,
+    /// must act on that text rather than on the deck.
+    private var otherWindowText: NSText? {
+        guard let w = NSApp.keyWindow, w !== window else { return nil }
+        return w.firstResponder as? NSText
+    }
+
     func doUndo(redo: Bool) {
+        if let t = otherWindowText {
+            if redo { t.undoManager?.redo() } else { t.undoManager?.undo() }
+            return
+        }
         if window.firstResponder === sourceView || sourceDraft != nil {
             window.makeFirstResponder(sourceView)
             if redo { sourceView.undoManager?.redo() } else { sourceView.undoManager?.undo() }
@@ -2204,6 +2224,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let other = NSScreen.screens.first { $0 != here }
             let p = PresenterController(deck: d, startScene: presentFrom, presenterScreen: here, audienceScreen: other)
             p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            p.onSaveNotes = { [weak self] scene, build, text, done in self?.savePresenterNotes(scene: scene, build: build, text: text, done: done) }
+            p.feedback = feedback
             // "Use Slide Show": the presenter window closes and the show carries on as the plain animated show
             p.onDetach = { [weak self] src in
                 self?.presenter = nil
@@ -2537,8 +2559,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(presentFromBeginning):
             return state?.scenes.isEmpty == false && player == nil && presenter == nil && animatedPlayer == nil
         case #selector(deleteSlide): return sceneName != nil && ((state?.scenes.count ?? 0) > 1 || selectedSlideIsUnused) && player == nil
-        case #selector(undo): return state?.canUndo ?? true
-        case #selector(redo): return state?.canRedo ?? true
+        case #selector(undo): if let t = otherWindowText { return t.undoManager?.canUndo ?? false }; return state?.canUndo ?? true
+        case #selector(redo): if let t = otherWindowText { return t.undoManager?.canRedo ?? false }; return state?.canRedo ?? true
         default: return true
         }
     }
