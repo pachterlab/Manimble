@@ -13,8 +13,8 @@ final class FormatBar: NSView {
     let italic = FormatBar.button("italic", "I", "Italic (⌘I)", toggle: true)
     let underline = FormatBar.button("underline", "U", "Underline (⌘U): a line attached to the text", toggle: true)
     let strike = FormatBar.button("strikethrough", "S", "Strikethrough: a line attached to the text", toggle: true)
-    let superscript = FormatBar.button("textformat.superscript", "x²", "Superscript the characters selected in the text box (⇧⌘+)")
-    let subscriptButton = FormatBar.button("textformat.subscript", "x₂", "Subscript the characters selected in the text box (⇧⌘_)")
+    let superscript = FormatBar.button("textformat.superscript", "x²", "Superscript (⇧⌘+): the selected characters, or what you type next", toggle: true)
+    let subscriptButton = FormatBar.button("textformat.subscript", "x₂", "Subscript (⇧⌘_): the selected characters, or what you type next", toggle: true)
     let highlight = FormatBar.button("highlighter", "H", "Text highlight colour (a background rectangle behind the text)")
     let colorButton = FormatBar.button("textformat", "A", "Text colour")
     let clearFormat = FormatBar.button("eraser", "Tx", "Clear all formatting: bold, italic, colour, highlight, underline, strikethrough, line spacing")
@@ -217,6 +217,12 @@ enum TextTransform {
         Array("0123456789+-=()aehijklmnoprstuvx"),
         Array("₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ")))
 
+    /// Each character in its super/subscript form where one exists (typing in script mode).
+    static func raise(_ s: String, superscript: Bool) -> String {
+        let map = superscript ? sup : sub
+        return String(s.map { map[$0] ?? $0 })
+    }
+
     /// Convert to (or, when everything already is, back from) super/subscript. nil when nothing can be converted.
     static func script(_ s: String, superscript: Bool) -> String? {
         let map = superscript ? sup : sub
@@ -239,6 +245,7 @@ extension MainController {
     func makeFormatBar() -> FormatBar {
         let bar = FormatBar()
         bar.fontPopup.addItems(withTitles: NSFontManager.shared.availableFontFamilies)
+        bar.fontPopup.menu?.delegate = fontMenuStyler          // each family's name set in that family, like PowerPoint
         bar.fontPopup.target = self; bar.fontPopup.action = #selector(familyChanged(_:))
         bar.sizeField.target = self; bar.sizeField.action = #selector(sizeCommitted(_:))
         bar.sizeStepper.target = self; bar.sizeStepper.action = #selector(sizeStepped(_:))
@@ -289,6 +296,9 @@ extension MainController {
                   bar.alignRight, bar.alignJustify, bar.spacing, bar.columns] as [NSControl] { c.isEnabled = isText }
         bar.superscript.isEnabled = isText && o?.textOk == true
         bar.subscriptButton.isEnabled = bar.superscript.isEnabled
+        let mode = canvas.editingText != nil ? canvas.textScriptMode : (textField?.isEditing == true ? textField?.scriptMode : nil)
+        bar.superscript.state = mode == true ? .on : .off
+        bar.subscriptButton.state = mode == false ? .on : .off
         bar.bullets.isEnabled = isText && o?.textOk == true; bar.numbers.isEnabled = bar.bullets.isEnabled
         bar.outdent.isEnabled = bar.bullets.isEnabled; bar.indent.isEnabled = bar.bullets.isEnabled
         bar.colorButton.isEnabled = o != nil && o?.kind != "image"
@@ -309,7 +319,24 @@ extension MainController {
 
     // MARK: text colour (the colour panel, driven from the bar's "A" control)
 
+    /// The swatch grid under the "A" control: a row of greys and one of tints and shades per hue, plus the panel.
     @objc func colorButtonPressed(_ b: NSButton) {
+        guard let o = objInfo, o.kind != "image" else { return }
+        let m = NSMenu()
+        let grid = ColorGridView(current: o.color) { [weak self] hex in
+            guard let self = self else { return }
+            self.formatBar.setColor(NSColor(hex: hex))
+            self.commitColor(hex)
+        }
+        let holder = NSMenuItem(); holder.view = grid
+        m.addItem(holder)
+        m.addItem(.separator())
+        let more = NSMenuItem(title: "More Colours…", action: #selector(openColorPanel), keyEquivalent: ""); more.target = self
+        m.addItem(more)
+        m.popUp(positioning: nil, at: NSPoint(x: 0, y: b.bounds.height + 4), in: b)
+    }
+
+    @objc func openColorPanel() {
         guard let o = objInfo, o.kind != "image" else { return }
         let panel = NSColorPanel.shared
         panel.setTarget(self); panel.setAction(#selector(colorPanelChanged(_:)))
@@ -415,23 +442,37 @@ extension MainController {
     @objc func formatSuperscript() { applyScript(superscript: true) }
     @objc func formatSubscript() { applyScript(superscript: false) }
 
-    /// Unicode super/subscript of the characters selected in the inspector's text box (Manim's Text has no
-    /// per-character rise, so the characters themselves are swapped).
+    /// Unicode super/subscript (Manim's Text has no per-character rise, so the characters themselves are
+    /// swapped). While typing: the selected characters are converted, or with nothing selected the characters
+    /// typed next are, until pressed again. With the text object merely selected: its whole text.
     func applyScript(superscript: Bool) {
-        guard let s = selection, let o = objInfo, o.kind == "text", o.textOk == true, let box = textField else {
-            toast("Select a text object; superscript and subscript apply to its text box selection", error: true); return
+        let kind = superscript ? "superscript" : "subscript"
+        guard let s = selection, let o = objInfo, o.kind == "text", o.textOk == true else {
+            syncFormatBar(); toast("Select a text object first; \(kind) applies to its text", error: true); return
         }
-        let r = box.selectedRange
-        let current = box.stringValue as NSString
-        guard r.length > 0, r.location + r.length <= current.length else {
-            toast("Select the characters to raise or lower in the text box first", error: true); return
+        if canvas.editingText == s {
+            if canvas.scriptSelection(superscript: superscript) { syncFormatBar(); return }
+            let on = canvas.textScriptMode != superscript
+            canvas.textScriptMode = on ? superscript : nil
+            syncFormatBar()
+            toast(on ? "Characters you type now are \(kind) · press again to stop" : "Back to normal characters")
+            return
         }
-        guard let converted = TextTransform.script(current.substring(with: r), superscript: superscript) else {
-            toast("No \(superscript ? "superscript" : "subscript") form exists for these characters", error: true); return
+        if let box = textField, box.isEditing {
+            if box.scriptSelection(superscript: superscript) { syncFormatBar(); return }
+            let on = box.scriptMode != superscript
+            box.scriptMode = on ? superscript : nil
+            syncFormatBar()
+            toast(on ? "Characters you type now are \(kind) · press again to stop" : "Back to normal characters")
+            return
         }
-        let new = current.replacingCharacters(in: r, with: converted)
-        box.setText(new)
-        commitText(s, new, shared: sharedChoice)
+        let current = textField?.stringValue ?? o.value
+        guard let converted = TextTransform.script(current, superscript: superscript) else {
+            syncFormatBar(); toast("No \(kind) form exists for these characters", error: true); return
+        }
+        syncFormatBar()
+        textField?.setText(converted)
+        commitText(s, converted, shared: sharedChoice)
     }
 
     // MARK: paragraph formatting
@@ -464,7 +505,9 @@ extension MainController {
 
     func commitAlign(_ value: String) {
         guard let s = selection, let o = objInfo, o.kind == "text" else { return }
-        if !o.value.contains("\n") { syncFormatBar(); toast("Alignment shows on text with several lines (↵ in the text box adds one)", error: true); return }
+        if !o.value.contains("\n") && o.frame == nil {
+            syncFormatBar(); toast("Alignment shows on text with several lines (↵ in the text box adds one), or in a text box of a slide layout", error: true); return
+        }
         submit { [weak self] in await self?.runEdit(["op": "align", "oid": s, "value": value]) }
     }
 
@@ -584,4 +627,89 @@ extension MainController {
 
 extension Double {
     func rounded(toPlaces n: Int) -> Double { let k = pow(10.0, Double(n)); return (self * k).rounded() / k }
+}
+
+/// Each font family's menu item titled in that family (symbol fonts, which cannot spell their name, stay plain).
+final class FontMenuStyler: NSObject, NSMenuDelegate {
+    private var styled = false
+    func menuWillOpen(_ menu: NSMenu) {
+        guard !styled else { return }
+        styled = true
+        style(menu)
+    }
+    func style(_ menu: NSMenu) {
+        for it in menu.items where it.attributedTitle == nil && !it.title.isEmpty {
+            guard let f = NSFontManager.shared.font(withFamily: it.title, traits: [], weight: 5, size: 13) else { continue }
+            let cs = f.coveredCharacterSet
+            guard it.title.unicodeScalars.allSatisfy({ cs.contains($0) }) else { continue }
+            it.attributedTitle = NSAttributedString(string: it.title, attributes: [.font: f])
+        }
+    }
+}
+
+/// A PowerPoint-style colour picker: a row of greys, then a row per hue running from its tints to its shades.
+final class ColorGridView: NSView {
+    static let rows: [[String]] = {
+        func hsb(_ h: Double, _ s: Double, _ b: Double) -> String {
+            NSColor(hue: CGFloat(h / 360), saturation: CGFloat(s), brightness: CGFloat(b), alpha: 1).hexString
+        }
+        func hueRow(_ h: Double) -> [String] {
+            [0.12, 0.25, 0.4, 0.6, 0.8].map { hsb(h, $0, 1) } + [hsb(h, 1, 1)] + [0.85, 0.7, 0.55, 0.4].map { hsb(h, 1, $0) }
+        }
+        let greys = (0..<10).map { i -> String in let v = CGFloat(9 - i) / 9; return NSColor(white: v, alpha: 1).hexString }
+        let browns = [(0.3, 0.95), (0.45, 0.86), (0.55, 0.77), (0.65, 0.68), (0.75, 0.6), (0.8, 0.5), (0.85, 0.42), (0.9, 0.34), (0.9, 0.27), (0.9, 0.2)]
+            .map { hsb(28, $0.0, $0.1) }
+        return [greys, hueRow(0), hueRow(30), hueRow(54), hueRow(120), hueRow(185), hueRow(220), hueRow(275), browns]
+    }()
+    private let cell: CGFloat = 20, gap: CGFloat = 3, inset: CGFloat = 8
+    private let current: String?
+    private let chosen: (String) -> Void
+    private var hover: (Int, Int)?
+
+    init(current: String?, chosen: @escaping (String) -> Void) {
+        self.current = current?.uppercased(); self.chosen = chosen
+        let cols = CGFloat(ColorGridView.rows[0].count), rows = CGFloat(ColorGridView.rows.count)
+        super.init(frame: NSRect(x: 0, y: 0, width: inset * 2 + cols * cell + (cols - 1) * gap, height: inset * 2 + rows * cell + (rows - 1) * gap))
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func rect(_ r: Int, _ c: Int) -> NSRect {
+        NSRect(x: inset + CGFloat(c) * (cell + gap), y: bounds.height - inset - CGFloat(r + 1) * cell - CGFloat(r) * gap, width: cell, height: cell)
+    }
+    private func cellAt(_ p: NSPoint) -> (Int, Int)? {
+        for (r, row) in ColorGridView.rows.enumerated() {
+            for c in row.indices where rect(r, c).insetBy(dx: -gap / 2, dy: -gap / 2).contains(p) { return (r, c) }
+        }
+        return nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (r, row) in ColorGridView.rows.enumerated() {
+            for (c, hex) in row.enumerated() {
+                let rc = rect(r, c)
+                let path = NSBezierPath(roundedRect: rc, xRadius: 3, yRadius: 3)
+                NSColor(hex: hex).setFill(); path.fill()
+                NSColor.separatorColor.setStroke(); path.lineWidth = 0.5; path.stroke()
+                if hover.map({ $0 == (r, c) }) == true || hex.uppercased() == current {
+                    let ring = NSBezierPath(roundedRect: rc.insetBy(dx: -2, dy: -2), xRadius: 5, yRadius: 5)
+                    (hex.uppercased() == current ? NSColor.labelColor : NSColor.controlAccentColor).setStroke()
+                    ring.lineWidth = 2; ring.stroke()
+                }
+            }
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let h = cellAt(convert(event.locationInWindow, from: nil))
+        if h?.0 != hover?.0 || h?.1 != hover?.1 { hover = h; needsDisplay = true }
+        toolTip = h.map { ColorGridView.rows[$0.0][$0.1] }
+    }
+    override func mouseExited(with event: NSEvent) { hover = nil; needsDisplay = true }
+    override func mouseUp(with event: NSEvent) {
+        guard let (r, c) = cellAt(convert(event.locationInWindow, from: nil)) else { return }
+        let hex = ColorGridView.rows[r][c]
+        enclosingMenuItem?.menu?.cancelTracking()
+        chosen(hex)
+    }
 }

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 private extension NSToolbarItem.Identifier {
     static let newSlide = NSToolbarItem.Identifier("newSlide")
+    static let newBuild = NSToolbarItem.Identifier("newBuild")
     static let insText = NSToolbarItem.Identifier("insText")
     static let insFormula = NSToolbarItem.Identifier("insFormula")
     static let insShape = NSToolbarItem.Identifier("insShape")
@@ -30,7 +31,7 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newSlide, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
+        [.newSlide, .newBuild, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(t) }
 
@@ -67,6 +68,12 @@ extension MainController: NSToolbarDelegate {
                 m.addItem(mi)
             }
             i.menu = m
+            return i
+        case .newBuild:
+            let i = NSToolbarItem(itemIdentifier: id)
+            i.label = "New Build"; i.paletteLabel = "New Build"; i.toolTip = "Add a build after this one, starting from what it shows"
+            i.image = symbol("square.stack.3d.up.badge.automatic", "New Build") ?? symbol("square.stack.3d.up", "New Build")
+            i.target = self; i.action = #selector(newBuild)
             return i
         case .insTable:
             let i = NSMenuToolbarItem(itemIdentifier: id)
@@ -485,7 +492,9 @@ extension MainController: NSToolbarDelegate {
         let options = MovieExportOptions(scenes: scenes, currentSlide: sceneName, height: animationHeight)
         panel.accessoryView = options.view
         panel.delegate = options
-        guard panel.runModal() == .OK, var url = panel.url, let names = try? options.selectedScenes() else { return }
+        guard panel.runModal() == .OK, var url = panel.url else { return }
+        let names: [String]?                                 // nil: the whole show
+        do { names = try options.selectedScenes() } catch { toast(error.localizedDescription, error: true); return }
         if url.pathExtension.lowercased() != "mp4" { url.appendPathExtension("mp4") }
         var req: [String: Any] = ["path": url.path, "height": options.height, "hold": options.holdSeconds, "fps": options.frameRate]
         if let names { req["scenes"] = names }
@@ -548,4 +557,116 @@ extension MainController: NSToolbarDelegate {
         return out
     }
 
+}
+
+// MARK: - Movie export options
+
+/// The Save panel's accessory view for File ▸ Export To ▸ Movie: which slides (all, the current one, or a list typed
+/// as navigator numbers and slide names), the frame height the clips are built at, how long each build's last frame
+/// is held, and the frame rate. As the panel's delegate it keeps the panel open while a typed slide list is wrong.
+final class MovieExportOptions: NSObject, NSOpenSavePanelDelegate {
+    static let heights = [720, 1080, 1440, 2160]
+    static let rates = [24, 30, 60]
+
+    let view: NSStackView
+    private let scenes: [SceneSummary]
+    private let currentSlide: String?
+    private let which = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let list = NSTextField(string: "")
+    private let resolution = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let hold = NSTextField(string: "2")
+    private let fps = NSPopUpButton(frame: .zero, pullsDown: false)
+
+    init(scenes: [SceneSummary], currentSlide: String?, height: Int) {
+        self.scenes = scenes
+        self.currentSlide = currentSlide
+        which.addItems(withTitles: ["All slides", "Current slide" + (currentSlide.map { " (\($0))" } ?? ""), "Some slides…"])
+        which.autoenablesItems = false
+        if currentSlide == nil { which.item(at: 1)?.isEnabled = false }
+        list.placeholderString = "numbers or names, e.g. 1-3, 7, Summary"
+        list.isEnabled = false
+        list.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        resolution.addItems(withTitles: ["720p (1280 × 720)", "1080p (1920 × 1080)", "1440p (2560 × 1440)", "4K (3840 × 2160)"])
+        resolution.selectItem(at: Self.heights.firstIndex(of: height) ?? 0)
+        let f = NumberFormatter(); f.minimum = 0; f.maximum = 600; f.maximumFractionDigits = 2
+        hold.formatter = f
+        hold.alignment = .right
+        hold.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        fps.addItems(withTitles: Self.rates.map { "\($0) fps" }); fps.selectItem(at: 1)
+        let holdRow = NSStackView(views: [hold, NSTextField(labelWithString: "seconds on each build’s last frame")]); holdRow.spacing = 6
+        func label(_ s: String) -> NSTextField { NSTextField(labelWithString: s) }
+        let grid = NSGridView(views: [[label("Slides:"), which], [NSView(), list], [label("Resolution:"), resolution],
+                                      [label("Hold:"), holdRow], [label("Frame rate:"), fps]])
+        grid.rowSpacing = 8; grid.columnSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        let note = NSTextField(wrappingLabelWithString: "Every build plays once at its playback rate, hidden slides are left out, and there is no audio. Slides not yet built at this resolution are built first.")
+        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize); note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = 380
+        view = NSStackView(views: [grid, note]); view.orientation = .vertical; view.alignment = .leading; view.spacing = 10
+        view.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
+        super.init()
+        which.target = self; which.action = #selector(whichChanged)
+    }
+
+    @objc private func whichChanged() {
+        list.isEnabled = which.indexOfSelectedItem == 2
+        if list.isEnabled { list.window?.makeFirstResponder(list) }
+    }
+
+    var height: Int { Self.heights[max(0, resolution.indexOfSelectedItem)] }
+    var frameRate: Int { Self.rates[max(0, fps.indexOfSelectedItem)] }
+    /// Seconds each build's last frame is held; an emptied field means the default of two seconds.
+    var holdSeconds: Double {
+        let s = hold.stringValue.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        return s.isEmpty ? 2 : max(0, Double(s) ?? 2)
+    }
+
+    /// The slide names to export, or nil for the whole show (every slide that is not hidden). Throws, with a message
+    /// the Save panel shows, when the typed list names slides the deck does not have or only hidden ones.
+    func selectedScenes() throws -> [String]? {
+        switch which.indexOfSelectedItem {
+        case 1:
+            guard let name = currentSlide else { throw Self.problem("There is no current slide.", "Choose another option.") }
+            return [name]
+        case 2:
+            var picked = Set<Int>(), unknown: [String] = []
+            for raw in list.stringValue.split(whereSeparator: { $0 == "," || $0 == ";" || $0 == " " }) {
+                let tok = String(raw).trimmingCharacters(in: .whitespaces)
+                if tok.isEmpty { continue }
+                let ends = tok.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).map { Int($0) }
+                if ends.count == 2, let a = ends[0], let b = ends[1] {
+                    let lo = max(1, min(a, b)), hi = min(scenes.count, max(a, b))
+                    if lo > hi { unknown.append(tok) } else { picked.formUnion((lo - 1)...(hi - 1)) }
+                } else if let n = Int(tok) {
+                    if 1...max(1, scenes.count) ~= n, n <= scenes.count { picked.insert(n - 1) } else { unknown.append(tok) }
+                } else if let i = scenes.firstIndex(where: { $0.name == tok })
+                            ?? scenes.firstIndex(where: { $0.name.caseInsensitiveCompare(tok) == .orderedSame }) {
+                    picked.insert(i)
+                } else {
+                    unknown.append(tok)
+                }
+            }
+            if !unknown.isEmpty {
+                throw Self.problem("No such slides: " + unknown.joined(separator: ", "),
+                                   "Type the navigator’s numbers (1–\(scenes.count)), ranges like 2-5, or slide names, separated by commas.")
+            }
+            let names = picked.sorted().map { scenes[$0] }.filter { $0.hidden != true }.map(\.name)
+            if names.isEmpty {
+                throw Self.problem(picked.isEmpty ? "Type which slides to export." : "Only hidden slides were chosen.",
+                                   picked.isEmpty ? "For example 1-3, 7 or Summary." : "Hidden slides are left out of exports; unhide them or choose others.")
+            }
+            return names
+        default:
+            return nil
+        }
+    }
+
+    func panel(_ sender: Any, validate url: URL) throws {
+        _ = try selectedScenes()
+    }
+
+    private static func problem(_ message: String, _ suggestion: String) -> NSError {
+        NSError(domain: "Manimble", code: 1, userInfo: [NSLocalizedDescriptionKey: message, NSLocalizedRecoverySuggestionErrorKey: suggestion])
+    }
 }

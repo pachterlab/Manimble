@@ -341,6 +341,21 @@ final class CanvasView: MTKView {
     private var promptCache: [String: MTLTexture] = [:]
     /// The object whose text is being edited on the slide, if any.
     var editingText: Int? { inline?.placeholder == nil ? inline?.oid : nil }
+    /// While typing on the slide: characters typed become superscript (true) / subscript (false) ones.
+    var textScriptMode: Bool? {
+        get { inline?.view.scriptMode }
+        set { inline?.view.scriptMode = newValue }
+    }
+    /// Convert the characters selected in the slide's text editor; false when nothing is selected.
+    func scriptSelection(superscript: Bool) -> Bool {
+        guard let tv = inline?.view, tv.isEditable else { return false }
+        let r = tv.selectedRange()
+        guard r.length > 0, let out = TextTransform.script((tv.string as NSString).substring(with: r), superscript: superscript) else { return false }
+        tv.scriptMode = nil
+        tv.insertText(out, replacementRange: r)
+        tv.setSelectedRange(NSRange(location: r.location, length: (out as NSString).length))
+        return true
+    }
     /// The table cell being typed into, if any.
     var editingCell: (oid: Int, row: Int, col: Int)? { inline.flatMap { e in e.cell.map { (e.oid, $0.row, $0.col) } } }
     fileprivate var textEditorChanged: ((String) -> Void)?
@@ -1282,6 +1297,14 @@ fileprivate final class InlineTextView: NSTextView {
     var bullets = false
     /// Backspace / Delete with nothing typed (an empty layout box): remove the box instead.
     var onDeleteEmpty: (() -> Void)?
+    /// Typed characters become superscript (true) or subscript (false) ones.
+    var scriptMode: Bool?
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        if let mode = scriptMode, let str = (string as? String) ?? (string as? NSAttributedString)?.string {
+            super.insertText(TextTransform.raise(str, superscript: mode), replacementRange: replacementRange); return
+        }
+        super.insertText(string, replacementRange: replacementRange)
+    }
     override func insertNewline(_ sender: Any?) {
         super.insertNewline(sender)
         if bullets { insertText(CanvasView.bullet, replacementRange: selectedRange()) }

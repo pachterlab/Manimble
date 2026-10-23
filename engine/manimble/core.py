@@ -2346,6 +2346,48 @@ class Manimble:
             return {"ok": True, "message": f"deleted build {si + 1}", "stop": min(ender, left - 1),
                     "changed": self.last_changed}
 
+    NEW_BUILD_MARK = "# manimble new build"
+
+    def new_build(self, req: dict) -> dict:
+        """Add an empty build right after build `stop`: a `self.next_slide()` ends that build and a short
+        `self.wait(0.1)` fills the new one (manim-slides skips a build with no animation in it). It shows what the
+        build before it shows; the notes of the builds around it stay where they are."""
+        from .srcedit import Edit, _after_stmt
+        with self.edit_lock:
+            self._settle()
+            name = req["scene"]
+            rec = self.fresh_record(name)
+            if "error" in rec:
+                return {"ok": False, "error": rec["error"]}
+            stops = rec["data"]["stops"]
+            k = max(0, min(int(req.get("stop", 0)), len(stops) - 1))
+            try:
+                src, fn = self._construct(self.scene(name))
+                if k < len(stops) - 1:              # before the next_slide() that ends build k
+                    call, _ = self._build_notes_call(src, fn, stops, k + 1)
+                    stmt = src.parent[call]
+                    indent = " " * stmt.col_offset
+                    at = src.line_starts[stmt.lineno - 1]
+                    edit = Edit(src.rel, at, at, f"{indent}self.next_slide()\n{indent}self.wait(0.1)  {self.NEW_BUILD_MARK}\n")
+                else:                               # after the last build: at the end of construct()
+                    last = fn.body[-1]
+                    edit = _after_stmt(src, last, f"self.next_slide()\n{' ' * last.col_offset}self.wait(0.1)  {self.NEW_BUILD_MARK}")
+            except (EditError, KeyError) as exc:
+                return {"ok": False, "error": f"A build cannot be added here: {exc}"}
+            try:
+                written = self.project.apply([edit])
+                self._sig_at = 0
+            except Exception as exc:                # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+            new = self.render_now(name, interactive=True)
+            if "error" in new:
+                self._restore(written, 0)
+                self.results.pop(name, None)
+                self.render_now(name, interactive=True)
+                return {"ok": False, "error": new["error"]}
+            self._commit(f"new build {k + 2}", written)
+            return {"ok": True, "message": f"added build {k + 2}", "stop": k + 1, "changed": self.last_changed}
+
     # -------------------------------------------------------- background
     BG_MARK = "# manimble background"
 

@@ -51,6 +51,84 @@ extension MainController {
 
     /// Headless check of new-slide layouts and typing into their placeholders: MANIMBLE_TEST_LAYOUTS=deck,
     /// output (layouts.log, layout-*.png, the menu icons) in MANIMBLE_TEST_OUT.
+    /// Headless check of text frames, ⌘A, super/subscript and the editor's spacing: MANIMBLE_TEST_FRAME=deck,
+    /// frame.log and shots in MANIMBLE_TEST_OUT.
+    func frameTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "frame.log") }
+        func shot(_ name: String) {
+            guard let img = canvas.snapshotView() else { return }
+            let out = NSImage(size: canvas.bounds.size)
+            out.lockFocus()
+            NSImage(cgImage: img, size: canvas.bounds.size).draw(in: canvas.bounds)
+            for v in canvas.subviews where v is NSTextView {
+                if let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                    v.cacheDisplay(in: v.bounds, to: rep)
+                    NSImage(cgImage: rep.cgImage!, size: v.bounds.size).draw(in: v.frame)
+                }
+            }
+            out.unlockFocus()
+            if let t = out.tiffRepresentation, let png = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: dir + name + ".png"))
+            }
+        }
+        func box(_ b: Box?) -> String { b.map { "\(Int($0.x0)),\(Int($0.y0)) \(Int($0.w))x\(Int($0.h))" } ?? "-" }
+        func settle() async { await queueTail?.value; try? await Task.sleep(nanoseconds: 800_000_000) }
+        Task { @MainActor in
+            slideOp("new", layout: "title_content")
+            await settle()
+            guard let ph = canvas.placeholders.first(where: { $0.role == "body" }) else { log("no body placeholder"); return }
+            canvas.onPlaceholder?(ph)
+            guard let tv = window.firstResponder as? NSTextView else { log("placeholder editor not focused"); return }
+            tv.insertText("Hello world", replacementRange: tv.selectedRange())
+            window.makeFirstResponder(canvas)
+            await settle()
+            guard let (oid, o) = scene?.objects?.first(where: { $0.value.kind == "text" }).map({ (Int($0.key)!, $0.value) }) else { log("no text"); return }
+            log("text \(oid) '\(o.value)' frame=\(box(o.frameBox)) align=\(o.format?.align ?? "-") valign=\(o.format?.valign ?? "-") ink=\(box(canvas.stop?.box(of: oid)))")
+            selection = oid
+            log("selected box=\(box(canvas.selectedBox))")
+            shot("frame-selected")
+            alignCenter()
+            await settle()
+            selection = oid
+            log("after center: align=\(objInfo?.format?.align ?? "-") frame=\(box(objInfo?.frameBox)) ink=\(box(canvas.stop?.box(of: oid)))")
+            submit { [weak self] in await self?.runEdit(["op": "spacing", "oid": oid, "value": 1.0]) }
+            await settle()
+            selection = oid
+            log("after spacing: lineSpacing=\(objInfo?.format?.lineSpacing ?? -1)")
+            beginEdit(oid, at: nil)
+            guard let ed = window.firstResponder as? NSTextView else { log("inline editor not focused"); return }
+            let ps = ed.defaultParagraphStyle
+            log("editor: frame=\(ed.frame) font=\(ed.font?.pointSize ?? 0) align=\(ps?.alignment.rawValue ?? -1) lineSpacing=\(ps?.lineSpacing ?? -1) editingText=\(canvas.editingText ?? -1)")
+            ed.setSelectedRange(NSRange(location: 0, length: 0))
+            // ⌘A through the menu, the way the key reaches it
+            if let ev = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber,
+                                         context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0) {
+                let handled = NSApp.mainMenu?.performKeyEquivalent(with: ev) ?? false
+                log("cmd-A handled=\(handled) selection=\(ed.selectedRange())")
+            }
+            ed.setSelectedRange(NSRange(location: 6, length: 5))          // "world"
+            formatSuperscript()
+            log("superscript selection: '\(ed.string)' selection=\(ed.selectedRange()) toast=\(toastPill.label.stringValue)")
+            ed.setSelectedRange(NSRange(location: (ed.string as NSString).length, length: 0))
+            formatSubscript()
+            log("subscript mode: \(canvas.textScriptMode.map(String.init) ?? "nil") button=\(formatBar.subscriptButton.state == .on) toast=\(toastPill.label.stringValue)")
+            ed.insertText("2", replacementRange: ed.selectedRange())
+            formatSubscript()
+            ed.insertText("x", replacementRange: ed.selectedRange())
+            log("typed in modes: '\(ed.string)' mode=\(canvas.textScriptMode.map(String.init) ?? "nil")")
+            ed.insertNewline(nil); ed.insertText("Second line", replacementRange: ed.selectedRange())
+            log("editor two lines: frame=\(ed.frame)")
+            shot("frame-editing")
+            window.makeFirstResponder(canvas)
+            await settle()
+            selection = oid
+            log("after commit: '\(objInfo?.value ?? "-")' frame=\(box(objInfo?.frameBox)) ink=\(box(canvas.stop?.box(of: oid)))")
+            shot("frame-after")
+            log("done")
+        }
+    }
+
     func layoutsTest() {
         let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
         func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "layouts.log") }
@@ -523,8 +601,9 @@ extension MainController {
             mi.image = MainController.layoutIcon(layout)
             layouts.addItem(mi)
         }
-        let newItem = NSMenuItem(title: "New Slide After This", action: nil, keyEquivalent: ""); newItem.submenu = layouts
+        let newItem = NSMenuItem(title: "New Slide", action: nil, keyEquivalent: ""); newItem.submenu = layouts
         m.addItem(newItem)
+        add("New Build", #selector(newBuild))
         add("Duplicate Slide", #selector(duplicateSlide))
         m.addItem(.separator())
         if selectedSlideIsUnused { add("Restore Slide to Show", #selector(restoreSlide)) }

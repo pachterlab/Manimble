@@ -40,6 +40,7 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 | `animation_preview` | `scene`, `height?` (as for `present`) | `{ok}`; builds one scene and sends native playback clips in an event |
 | `export` | `kind` (`pptx` or `key`), `path`, `builds?`, `editable?` | `{ok}`; progress by events |
 | `export_python` | `path`, `hidden?` (include hidden slides) | `{ok, message, path}`; writes the whole deck as one Python file: helper modules inlined (deck-local imports dropped), then the slides in show order and a `SLIDES` list |
+| `export_movie` | `path` (`.mp4`), `scenes?` (slide names in playing order; default every slide that is not hidden), `height?` (as for `present`), `hold?` (seconds each build's last frame is held; default 2), `fps?` (default 30) | `{ok}` or `{ok: false, error}`; builds slides that are out of date at `height` (as `present` does), then encodes every build's clip with ffmpeg into one movie without audio; progress by `export_movie` events |
 | `import` | `src` (`.pptx` or `.key`), `dest` (new folder); needs no open deck | `{ok}`; progress by events |
 | `pages` | `builds?` | `{pages: [png, ...]}` (the exact frame of every slide or build, for PDF export) |
 | `background` | `op` (`get`, `set`, `reset`), `scene`, `all?` (every slide), and for `set`: `mode` (`color` or `image`), `color?` (`#RRGGBB`), `file?` (picture in the deck folder), `transparency` (0–1) | `get`: `{mode, color, image, transparency, default}`; otherwise `{ok, message, changed}` or `{ok: false, error}` |
@@ -64,7 +65,8 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
            cells:   {oid: [[row, col, cell x0, y0, x1, y1, ink x0, y0, x1, y1], ...]} } ],   // tables
  objects: { oid: {kind, value, fontSize, color, font, weight, slant, siblings, loc, rotation, dims,
                   textOk, textLoc?, textNote?, shared?: {name, uses, rel}, image?, imagePath?, shape?,
-                  format?: {underline, strike, highlight, align, columns, lineSpacing}} },
+                  format?: {underline, strike, highlight, align, columns, lineSpacing, valign?},
+                  frame?: [x0, y0, x1, y1]} },
  source: {file, start, end, text, changed?: {file, ranges}} }
 ```
 `kind` is `text`, `tex`, `image`, `line`, `shape` or `table` (a pen stroke is a `shape` whose `shape` is `Pen`). `loc` is
@@ -72,6 +74,11 @@ The engine edits the deck folder it was opened on. Front ends should open a *wor
 `rotation` is the total of the object's own `rotate()` calls in degrees, `dims` its manim width and height in frame pixels.
 `format` (text and formulas) says what the formatting controls should show: `highlight` is `#RRGGBB`, `"on"` (a named
 colour) or null; `align` is `left`, `center` or `right`; `lineSpacing` is the `line_spacing=` literal when there is one.
+`frame` (frame px) is a text's *text frame*: text typed into a layout placeholder keeps the placeholder's box, written
+as `# manimble box w= h= x= y= v=` on its line. The box keeps its size whatever is typed (the text wraps 0.1 units
+inside it) and the text sits in it by `align` and `valign` (`top` or `mid`). A client selects, hits and handles such a
+text by its frame; `move` and `resize` carry the frame along, `wrap` sets its width, and after any text edit the engine
+puts the text back at its place in the frame.
 Compositing `bg` then the sprites in `z` order reproduces `png`; a client shows `png` when idle and the composite while it
 previews an edit.
 
@@ -98,5 +105,6 @@ Every edit is verified by re-rendering and rolled back if later code overrides i
 | `present` | `phase`: `building` (`done`, `total`, `scene`), `ready` (`slides`: `[{scene, sceneIndex, number, index, count, kind, file, revFile, loop, autoNext, rate, revRate, notes, buildNotes}]`, `sections`: scene indices, `links`: `{sceneIndex: [[x0, x1, y0, y1, url]]}`), or `error` (`error`); single-scene requests also send `onlyScene` |
 | `animation_preview` | `phase`: `building` (`done`, `total`, `scene`), `ready` (`scene`, `clips: [{path, kind, playbackRate}]`), or `error` (`error`) |
 | `export` | `phase`: `building` (`done`, `total`, `scene`), `keynote`, `done` (`path`), or `error` (`error`) |
+| `export_movie` | `phase`: `building` (`done`, `total`, `scene`: manim builds), `encoding` (`done`, `total`, `scene`: ffmpeg, one step per build), `done` (`path`, `slides`, `builds`), or `error` (`error`) |
 | `darkmode` | `phase`: `building` (`done`, `total`, `scene`, `mode`) |
 | `import` | `phase`: `building` (`done`, `total`, `scene`), `done` (`deck`, `slides`, `warnings`), or `error` (`error`) |

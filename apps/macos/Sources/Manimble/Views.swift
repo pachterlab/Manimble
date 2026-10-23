@@ -46,6 +46,14 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
         var onCommit: (() -> Void)?
         var onCancel: (() -> Void)?
         var onBlur: (() -> Void)?
+        /// Typed characters become superscript (true) or subscript (false) ones.
+        var scriptMode: Bool?
+        override func insertText(_ string: Any, replacementRange: NSRange) {
+            if let mode = scriptMode, let str = (string as? String) ?? (string as? NSAttributedString)?.string {
+                super.insertText(TextTransform.raise(str, superscript: mode), replacementRange: replacementRange); return
+            }
+            super.insertText(string, replacementRange: replacementRange)
+        }
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
                event.charactersIgnoringModifiers == "\r" { onCommit?(); return true }
@@ -72,6 +80,17 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
     var selectedRange: NSRange { editor.selectedRange() }
     /// Whether the box has the keyboard focus (unsaved typing is committed when it loses it).
     var isEditing: Bool { window?.firstResponder === editor }
+    /// Characters typed become superscript (true) / subscript (false) ones; cleared when the box loses focus.
+    var scriptMode: Bool? { get { editor.scriptMode } set { editor.scriptMode = newValue } }
+    /// Convert the selected characters; false when nothing is selected or nothing converts.
+    func scriptSelection(superscript: Bool) -> Bool {
+        let r = editor.selectedRange()
+        guard r.length > 0, let out = TextTransform.script((editor.string as NSString).substring(with: r), superscript: superscript) else { return false }
+        editor.scriptMode = nil
+        editor.insertText(out, replacementRange: r)
+        editor.setSelectedRange(NSRange(location: r.location, length: (out as NSString).length))
+        return true
+    }
     var font: NSFont? { get { editor.font } set { editor.font = newValue; fit() } }
     var textColor: NSColor? { get { editor.textColor } set { editor.textColor = newValue } }
     var editorBackground: NSColor { get { editor.backgroundColor } set { editor.backgroundColor = newValue; backgroundColor = newValue } }
@@ -91,7 +110,7 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
         editor.autoresizingMask = [.width]; editor.textContainer?.widthTracksTextView = true
         editor.string = string; editor.delegate = self
         editor.onCommit = { [weak self] in self?.commit() }
-        editor.onBlur = { [weak self] in self?.commit() }
+        editor.onBlur = { [weak self] in self?.editor.scriptMode = nil; self?.commit() }
         editor.onCancel = { [weak self] in
             guard let self = self else { return }
             self.editor.string = self.original; self.fit()
@@ -464,11 +483,17 @@ extension String {
 final class GrabSplitView: NSSplitView, NSSplitViewDelegate {
     /// Let the first and last panes collapse when their divider is dragged past half their minimum
     /// width; dragging the divider back out from the window edge brings them back.
-    var collapsesEdgePanes = false { didSet { delegate = collapsesEdgePanes ? self : nil } }
+    var collapsesEdgePanes = false { didSet { delegate = collapsesEdgePanes || collapsesLastPane ? self : nil } }
+    /// Only the last pane collapses (the drawer under the slide; the slide itself never does).
+    var collapsesLastPane = false { didSet { delegate = collapsesEdgePanes || collapsesLastPane ? self : nil } }
+    /// After the panes were resized, e.g. one collapsed or brought back by a drag.
+    var onResize: (() -> Void)?
     override var dividerThickness: CGFloat { 9 }
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
-        collapsesEdgePanes && (subview === arrangedSubviews.first || subview === arrangedSubviews.last)
+        (collapsesEdgePanes && (subview === arrangedSubviews.first || subview === arrangedSubviews.last))
+            || (collapsesLastPane && subview === arrangedSubviews.last)
     }
+    func splitViewDidResizeSubviews(_ notification: Notification) { onResize?() }
     override func drawDivider(in rect: NSRect) {
         NSColor.separatorColor.setFill()
         if isVertical { NSRect(x: rect.midX - 0.5, y: rect.minY, width: 1, height: rect.height).fill() }

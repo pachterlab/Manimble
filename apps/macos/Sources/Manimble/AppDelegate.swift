@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exportMenu.addItem(item("PowerPoint (.pptx)…", #selector(MainController.exportPowerPoint), "", []))
         exportMenu.addItem(item("Keynote (.key)…", #selector(MainController.exportKeynote), "", []))
         exportMenu.addItem(item("PDF…", #selector(MainController.exportPDFPressed), "", []))
+        exportMenu.addItem(item("Movie (.mp4, with animations)…", #selector(MainController.exportMovie), "", []))
         exportMenu.addItem(.separator())
         exportMenu.addItem(item("Python (whole deck in one file)…", #selector(MainController.exportPythonPressed), "", []))
         let exportItem = NSMenuItem(title: "Export To", action: nil, keyEquivalent: ""); exportItem.submenu = exportMenu
@@ -161,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let newSlideItem = NSMenuItem(title: "New Slide", action: nil, keyEquivalent: ""); newSlideItem.submenu = layouts
         add("Slide", [
             newSlideItem,
+            item("New Build", #selector(MainController.newBuild), "", []),
             item("Duplicate Slide", #selector(MainController.duplicateSlide), "d"),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
             item("Hide Slide", #selector(MainController.toggleHideSlide), "h", [.command, .shift]),

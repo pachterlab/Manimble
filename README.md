@@ -248,6 +248,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
   per slide. *Editable* mode keeps text as real text boxes (font, size, colour, bold/italic) over a picture of
   everything else; *Pictures only* gives the exact rendered frames. Keynote export builds the .pptx and has Keynote
   convert it through AppleScript.
+- **Export to a movie (.mp4)** (File ▸ Export To ▸ Movie, and the Share menu): the animated show as one video, every
+  build playing once at its playback rate and then holding its last frame. The Save panel asks which slides (all, the
+  current one, or a typed list of navigator numbers, ranges and slide names), the resolution (720p to 4K; slides not
+  yet built at it are built first, as for Play), how long each build is held (two seconds unless changed) and the
+  frame rate. Hidden slides are left out and there is no audio. Needs ffmpeg, which the installer sets up. The same
+  conversion is available for `.manimble` packages from the command line (`manimbler --convert`, above).
 
 **Import** (File ▸ Import ▸ PowerPoint / Keynote)
 - Turns a `.pptx` (or a Keynote `.key`, read through Keynote) into a new Manim Slides deck in a folder you choose,
@@ -290,8 +296,12 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 
 **Export**
 - PowerPoint/Keynote files contain pictures for formulas, shapes, lines, tables, images and plots; only plain text is
-  editable. Animations are not exported (builds become separate slides). Text positions are approximate where a font
-  is missing on the target machine. A Keynote export can stall if Keynote shows a dialog (for example a missing font).
+  editable. Animations are not exported (builds become separate slides; the movie export keeps them). Text positions
+  are approximate where a font is missing on the target machine. A Keynote export can stall if Keynote shows a dialog
+  (for example a missing font).
+- Movies have no audio, loops play once, and auto-next builds pause for the hold like any other. Exporting at a
+  resolution other than the Play ▸ Animation Resolution setting rebuilds the slides; the next show at the old setting
+  rebuilds them again.
 
 **Editing**
 - An object positioned by a loop plus `arrange()` (for example a list built in a comprehension) can be retyped but

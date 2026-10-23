@@ -14,5 +14,6 @@ PYTHONPATH=engine MANIMBLE_PYTHON=$(which python3) python3 -m manimble.rpc
 | `srcedit.py` | AST analysis: turns an on-screen edit into a minimal source patch |
 | `worker.py` | runs scenes inside manim with animations skipped; records objects, call sites and layout calls; writes frames and sprites |
 | `export.py` / `importer.py` | PowerPoint / Keynote export and import |
+| `movie.py` | the animated show as one MP4 through ffmpeg (the `export_movie` request; same recipe as `manimbler --convert`) |
 
 Requirements: `manim`, `manim-slides` (only for the presenter build), `pillow`, and `python-pptx` for PowerPoint.

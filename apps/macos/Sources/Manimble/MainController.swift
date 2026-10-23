@@ -93,6 +93,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var paneOverlayMonitor: Any?
     var centerSplit: NSSplitView?
     var formatBar: FormatBar!
+    let fontMenuStyler = FontMenuStyler()
     /// Width and height fields change an object proportionally (true) or stretch it (false).
     var aspectLocked = true
     var colorPanelWork: DispatchWorkItem?
@@ -238,6 +239,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         cs.setHoldingPriority(.init(240), forSubviewAt: 0)
         cs.setHoldingPriority(.init(260), forSubviewAt: 1)
         cs.autosaveName = "manimble.drawer"
+        cs.collapsesLastPane = true                        // drag the drawer all the way down to hide it, back up to show it
         centerSplit = cs
         installDrawer()
         cs.translatesAutoresizingMaskIntoConstraints = false
@@ -436,7 +438,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let pending = pendingDeck {
             pendingDeck = nil
             open(deck: pending)
-        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE", "MOVE", "NOTES"].lazy
+        } else if let d = ["BG", "DARK", "FORMAT", "TOOLS", "EXTRACT", "TABLE", "BIOCARTOON", "INLINE", "OFFSLIDE", "MOVE", "NOTES", "FRAME"].lazy
                     .compactMap({ ProcessInfo.processInfo.environment["MANIMBLE_TEST_" + $0] }).first
                     ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"].flatMap({ $0.hasPrefix("/") ? $0 : nil }) {
             open(deck: d)
@@ -764,6 +766,25 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
             return
         }
+        if ev["event"] as? String == "export_movie" {
+            let done = (ev["done"] as? Int ?? 0) + 1, total = ev["total"] as? Int ?? 0
+            switch ev["phase"] as? String {
+            case "building":
+                busyPill.show("Building animations \(done)/\(total): \(ev["scene"] as? String ?? "")", symbol: nil, tint: nil, spinning: true)
+            case "encoding":
+                busyPill.show("Encoding movie \(done)/\(total): \(ev["scene"] as? String ?? "")", symbol: nil, tint: nil, spinning: true)
+            case "done":
+                busyPill.hide()
+                if let p = ev["path"] as? String {
+                    let n = ev["slides"] as? Int ?? 0
+                    toast("Exported \((p as NSString).lastPathComponent)" + (n > 0 ? " (\(n) slide\(n == 1 ? "" : "s"))" : ""))
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+                }
+            default:
+                busyPill.hide(); toast(ev["error"] as? String ?? "movie export failed", error: true)
+            }
+            return
+        }
         if ev["event"] as? String == "present" {
             switch ev["phase"] as? String {
             case "building":
@@ -904,6 +925,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BIOCARTOON"] != nil, !testRan { testRan = true; biocartoonTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OFFSLIDE"] != nil, !testRan { testRan = true; offSlideTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_MOVE"] != nil, !testRan { testRan = true; moveTest() }
         rebuildSteps()
@@ -1144,6 +1166,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             goToStop(1); try? await Task.sleep(nanoseconds: 300_000_000); shot("drawer-build.png")
             showTerminalPage(); try? await Task.sleep(nanoseconds: 1_500_000_000); shot("drawer-term.png")
             log("terminals=\(terminal.tabCount)")
+            let before = scene?.stops?.count ?? 0
+            newBuild()
+            for _ in 0..<60 { try? await Task.sleep(nanoseconds: 250_000_000); if busy == 0, (scene?.stops?.count ?? 0) != before { break } }
+            log("builds \(before) -> \(scene?.stops?.count ?? 0) at stop \(stopIndex)")
+            if let cs = centerSplit { cs.setPosition(cs.bounds.height, ofDividerAt: 0) }
+            try? await Task.sleep(nanoseconds: 500_000_000); shot("collapsed.png")
+            log("collapsed hidden=\(drawer.isHidden) showNotes=\(UserDefaults.standard.bool(forKey: "showNotes"))")
+            if let cs = centerSplit { cs.setPosition(cs.bounds.height - 200, ofDividerAt: 0) }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            log("reopened hidden=\(drawer.isHidden) showNotes=\(UserDefaults.standard.bool(forKey: "showNotes"))")
             NSApp.terminate(nil)
         }
     }
@@ -1691,8 +1723,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    /// Cmd-A right after a move in one build: the move applies to every build of the slide instead.
+    /// Cmd-A: selects all the text in a focused text box, else, right after a move in one build, applies that
+    /// move to every build of the slide instead. (Every menu item the controller answers to is targeted at it,
+    /// so the text box never sees the key on its own.)
     @objc func selectAll(_ sender: Any?) {
+        if let t = window.firstResponder as? NSText { t.selectAll(sender); return }
         submit { [weak self] in                 // after the move itself, when it is still queued
             guard let self = self, let m = self.lastBuildMove, m.scene == self.sceneName, m.stop == self.stopIndex else { return }
             await self.runEdit(["op": "spread", "oid": m.oid, "scene": m.scene])
@@ -1844,7 +1879,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func beginInlineText(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
         let current = textField?.stringValue ?? o.value          // includes an applied edit still rendering
         return canvas.beginTextEdit(oid, text: current, family: o.font, bold: o.weight == "BOLD", italic: o.slant == "ITALIC",
-                                    color: o.color, at: at,
+                                    color: o.color, at: at, align: o.format?.align ?? "left", valign: o.format?.valign ?? "top",
+                                    lineSpacing: o.format?.lineSpacing, frame: o.frameBox,
                                     changed: { [weak self] v in self?.textField?.setText(v) },
                                     done: { [weak self] v, release in
                                         guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
@@ -2227,6 +2263,26 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     @objc func newSlide() { slideOp("new", layout: "title_content") }
     @objc func duplicateSlide() { slideOp("duplicate") }
+
+    /// Add an empty build after the build on screen (it starts out showing the same picture) and go to it.
+    @objc func newBuild() {
+        guard let name = sceneName, scene?.name == name, scene?.stops != nil, player == nil else { return }
+        if buildNotesBox.isEditing || notesBox.isEditing { window.makeFirstResponder(canvas) }     // commits the notes first
+        let stop = stopIndex
+        submit { [weak self] in
+            guard let self = self else { return }
+            self.busy += 1
+            let r = try? await self.engine.call("new_build", ["scene": name, "stop": stop], as: SlideResult.self)
+            self.busy -= 1
+            guard let res = r, res.ok == true else { self.toast(r?.error ?? "could not add a build", error: true); return }
+            self.lastChanged = res.changed
+            if let s = res.stop { self.stopIndex = s }
+            await self.loadScene(name, keepStop: true)
+            await self.reloadState()
+            self.refreshBuildRows()
+            self.toast((res.message ?? "added a build").capitalized + " — ⌘Z to undo")
+        }
+    }
     @objc func deleteSlide() { slideOp("delete") }
 
     /// Delete the current build of the slide: its next_slide() goes, so what it showed runs on into the next build.
@@ -2330,6 +2386,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 cs.setPosition(max(160, cs.bounds.height - 140), ofDividerAt: 0)
             }
         }
+        // collapsed or brought back by dragging the divider: remember it like the hide button does
+        (centerSplit as? GrabSplitView)?.onResize = { [weak self] in
+            guard let self = self, UserDefaults.standard.bool(forKey: "showNotes") == self.drawer.isHidden else { return }
+            if self.drawer.isHidden, self.notesBox.isEditing || self.buildNotesBox.isEditing { self.window.makeFirstResponder(self.canvas) }
+            UserDefaults.standard.set(!self.drawer.isHidden, forKey: "showNotes")
+        }
     }
 
     var drawerShowsNotes: Bool { !drawer.isHidden && (drawer.page == .notes || drawer.page == .buildNotes) }
@@ -2421,6 +2483,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return sceneName != nil && !selectedSlideIsUnused && player == nil
         case #selector(newSlide), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
             return sceneName != nil && !selectedSlideIsUnused && player == nil
+        case #selector(newBuild):
+            return sceneName != nil && scene?.name == sceneName && scene?.stops != nil && player == nil
         case #selector(extractElementsPressed):
             return objInfo?.kind == "image" && objInfo?.imagePath != nil && player == nil
         case #selector(slideNumbersPressed):
@@ -2440,6 +2504,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return true
         case #selector(exportPythonPressed):
             return workspace != nil
+        case #selector(exportMovie):
+            return state?.scenes.isEmpty == false && player == nil && animatedPlayer == nil
         case #selector(toggleUnusedSlides):
             item.state = showUnusedSlides ? .on : .off
             return workspace != nil

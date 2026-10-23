@@ -69,56 +69,135 @@ final class PresenterWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func keyDown(with event: NSEvent) { onKey?(event) }
+    /// Every plain key press drives the show, whatever view is first responder: nothing in this window takes
+    /// typing, and the notes text views and the sidebar's scroll view would otherwise keep the arrow keys.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.modifierFlags.intersection([.command, .control, .option]).isEmpty, let k = onKey {
+            k(event)
+            return
+        }
+        super.sendEvent(event)
+    }
 }
 
-/// One slide in the strip along the bottom of Presenter View: its picture and number; the current one is outlined.
-final class SlideThumb: NSView {
-    let image = NSImageView()
-    let number = NSTextField(labelWithString: "")
+/// A picture that never asks for its image's size: the sidebar panels are sized by their width, not by the PNG.
+private func thumbImageView() -> NSImageView {
+    let iv = NSImageView()
+    iv.imageScaling = .scaleProportionallyUpOrDown
+    iv.translatesAutoresizingMaskIntoConstraints = false
+    iv.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+    iv.setContentCompressionResistancePriority(.init(1), for: .vertical)
+    iv.setContentHuggingPriority(.init(1), for: .horizontal)
+    iv.setContentHuggingPriority(.init(1), for: .vertical)
+    return iv
+}
+
+/// One build of a slide in Presenter View's sidebar, nested under its slide like the editor's navigator: a smaller
+/// 16:9 panel with its number; the build on the audience display is outlined.
+final class BuildThumb: NSView {
+    let image = thumbImageView()
     var onClick: (() -> Void)?
     var selected = false {
         didSet {
-            image.layer?.borderColor = (selected ? Theme.accent : NSColor(white: 1, alpha: 0.12)).cgColor
-            image.layer?.borderWidth = selected ? 3 : 1
-            number.textColor = selected ? Theme.accent : NSColor(white: 1, alpha: 0.6)
+            layer?.borderWidth = selected ? 2 : 1
+            layer?.borderColor = (selected ? Theme.accent : NSColor(white: 1, alpha: 0.18)).cgColor
+            image.alphaValue = selected ? 1 : 0.72
         }
     }
-    static let size = NSSize(width: 160, height: 90)
 
     init(number n: Int) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        image.imageScaling = .scaleProportionallyUpOrDown
-        image.wantsLayer = true
-        image.layer?.backgroundColor = NSColor.black.cgColor
-        image.layer?.cornerRadius = 4; image.layer?.masksToBounds = true
-        image.translatesAutoresizingMaskIntoConstraints = false
-        image.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        image.setContentCompressionResistancePriority(.init(1), for: .vertical)
-        number.stringValue = "\(n)"
-        number.font = Theme.font(11, .medium)
-        number.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(image); addSubview(number)
+        wantsLayer = true
+        layer?.cornerRadius = 5; layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        addSubview(image)
+        let l = NSTextField(labelWithString: String(n)); l.font = Theme.font(9, .bold); l.textColor = .white; l.alignment = .center
+        l.wantsLayer = true; l.layer?.backgroundColor = NSColor(white: 0, alpha: 0.55).cgColor; l.layer?.cornerRadius = 3
+        l.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(l)
         NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalTo: widthAnchor, multiplier: 9.0 / 16.0),
             image.leadingAnchor.constraint(equalTo: leadingAnchor), image.trailingAnchor.constraint(equalTo: trailingAnchor),
-            image.topAnchor.constraint(equalTo: topAnchor),
-            image.widthAnchor.constraint(equalToConstant: Self.size.width),
-            image.heightAnchor.constraint(equalToConstant: Self.size.height),
-            number.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            number.topAnchor.constraint(equalTo: image.bottomAnchor, constant: 3),
-            number.bottomAnchor.constraint(equalTo: bottomAnchor),
+            image.topAnchor.constraint(equalTo: topAnchor), image.bottomAnchor.constraint(equalTo: bottomAnchor),
+            l.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4), l.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            l.widthAnchor.constraint(equalToConstant: 14), l.heightAnchor.constraint(equalToConstant: 12),
         ])
+        toolTip = "Build \(n)"
         selected = false
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    /// Clicks land here, not on the image view inside (an NSControl, which would swallow them).
+    override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
+
+/// One slide in the sidebar of Presenter View, laid out like the editor's navigator: its number in a column at
+/// the left, its picture (16:9, as wide as the column allows) and, when it has builds, every build as an indented
+/// panel beneath, always expanded. The current slide is outlined.
+final class SlideThumb: NSView {
+    let image = thumbImageView()
+    let number = NSTextField(labelWithString: "")
+    let builds: [BuildThumb]
+    var onClick: (() -> Void)?
+    var selected = false {
+        didSet {
+            image.layer?.borderColor = (selected ? Theme.accent : NSColor(white: 1, alpha: 0.12)).cgColor
+            image.layer?.borderWidth = selected ? 2.5 : 1
+            number.textColor = selected ? Theme.accent : NSColor(white: 1, alpha: 0.5)
+        }
+    }
+    /// Number column and margins (as in the editor) and the extra indent of the builds.
+    static let numberColumn: CGFloat = 2 + 20 + 8
+    static let buildIndent: CGFloat = 16
+
+    init(number n: Int, builds count: Int) {
+        builds = count > 1 ? (1...count).map { BuildThumb(number: $0) } : []
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        number.stringValue = String(n)
+        number.font = Theme.font(11, .medium); number.alignment = .right
+        number.translatesAutoresizingMaskIntoConstraints = false
+        image.wantsLayer = true
+        image.layer?.backgroundColor = NSColor.black.cgColor
+        image.layer?.cornerRadius = 5; image.layer?.masksToBounds = true
+        let stack = NSStackView(views: builds)
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(number); addSubview(image); addSubview(stack)
+        NSLayoutConstraint.activate([
+            number.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2), number.widthAnchor.constraint(equalToConstant: 20),
+            number.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            image.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.numberColumn),
+            image.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            image.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            image.heightAnchor.constraint(equalTo: image.widthAnchor, multiplier: 9.0 / 16.0),
+            stack.leadingAnchor.constraint(equalTo: image.leadingAnchor, constant: Self.buildIndent),
+            stack.trailingAnchor.constraint(equalTo: image.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: image.bottomAnchor, constant: 6),
+            (builds.isEmpty ? image : stack).bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+        ])
+        for b in builds { b.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        selected = false
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    /// A click on the slide's picture lands here (its image view would swallow it); a click on a build panel
+    /// stays with the panel.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let v = super.hitTest(point) else { return nil }
+        return v.isDescendant(of: self) && builds.contains(where: { v.isDescendant(of: $0) }) ? v : self
+    }
     override func mouseDown(with event: NSEvent) { onClick?() }
 }
 
 /// Presenter view: two windows. The audience display is the regular full-screen show (on the second screen when
-/// there is one, else on the same screen); the presenter window is laid out like PowerPoint's: End Show, Swap
-/// Displays and Use Slide Show at the top, the timer and clock under them, the current slide large with the speaker
-/// notes beside it, the slide counter with arrows, and a strip of every slide along the bottom. On a single screen
+/// there is one, else on the same screen); the presenter window has End Show, Swap Displays and Use Slide Show at
+/// the top, the timer and clock under them, then a sidebar of every slide with its builds expanded (as the
+/// editor's navigator shows the current slide) down the left, the current slide large to its right, the slide
+/// notes and build notes side by side under it, and the slide counter with arrows at the bottom. On a single screen
 /// it floats above the show, so both are in view. With the animated show the current slide plays live, mirroring
 /// the audience display.
 @MainActor
@@ -141,10 +220,11 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private let pauseButton = NSButton()
     private let progress = NSView()
     private var progressWidth: NSLayoutConstraint?
-    private let strip = NSScrollView()
+    private let sidebar = NSScrollView()
     private var thumbs: [SlideThumb] = []
     /// For each slide of the show: its first page (where a thumbnail click goes) and last page (its picture).
     private var slideRange: [(first: Int, last: Int)] = []
+    static let sidebarWidth: CGFloat = 250
     private var started = Date()
     private var accumulated: TimeInterval = 0
     private var paused = false
@@ -259,7 +339,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
             source.window.whenSettled { [weak self] in self?.fillScreen() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { Task { @MainActor [weak self] in self?.fillScreen() } }
         }
-        buildStrip()
+        buildSidebar()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -342,7 +422,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
         badge.isHidden = true; badge.translatesAutoresizingMaskIntoConstraints = false
         blank.font = Theme.font(20, .bold); blank.textColor = NSColor(white: 1, alpha: 0.6); blank.isHidden = true
         blank.translatesAutoresizingMaskIntoConstraints = false
-        // speaker notes beside the slide: the slide's (every build) on top, this build's own beneath
+        // speaker notes under the slide: the slide's (every build) at the left, this build's own at the right
         func notesBox(_ tv: NSTextView) -> NSScrollView {
             tv.isEditable = false; tv.isSelectable = true
             tv.font = Theme.font(20)
@@ -358,10 +438,17 @@ final class PresenterController: NSObject, NSWindowDelegate {
             return scroll
         }
         let notesScroll = notesBox(notes), buildScroll = notesBox(buildNotes)
-        let right = NSStackView(views: [caption("SLIDE NOTES"), notesScroll, caption("BUILD NOTES"), buildScroll])
-        right.orientation = .vertical; right.alignment = .leading; right.spacing = 6
-        right.setCustomSpacing(14, after: notesScroll)
-        right.translatesAutoresizingMaskIntoConstraints = false
+        func column(_ title: String, _ scroll: NSScrollView) -> NSStackView {
+            let s = NSStackView(views: [caption(title), scroll])
+            s.orientation = .vertical; s.alignment = .leading; s.spacing = 6
+            s.translatesAutoresizingMaskIntoConstraints = false
+            scroll.widthAnchor.constraint(equalTo: s.widthAnchor).isActive = true
+            return s
+        }
+        let notesRow = NSStackView(views: [column("SLIDE NOTES", notesScroll), column("BUILD NOTES", buildScroll)])
+        notesRow.orientation = .horizontal; notesRow.alignment = .top; notesRow.spacing = 20
+        notesRow.distribution = .fillEqually
+        notesRow.translatesAutoresizingMaskIntoConstraints = false
         // counter row: ‹ Slide N of M › with a thin progress line, keys hint at the right
         counter.font = Theme.font(16); counter.textColor = NSColor(white: 1, alpha: 0.85)
         counter.alignment = .center
@@ -383,17 +470,23 @@ final class PresenterController: NSObject, NSWindowDelegate {
         hint.lineBreakMode = .byTruncatingTail
         hint.setContentCompressionResistancePriority(.init(1), for: .horizontal)   // never widens the window
         hint.translatesAutoresizingMaskIntoConstraints = false
-        // strip of slides along the bottom
-        strip.hasHorizontalScroller = true; strip.hasVerticalScroller = false
-        strip.drawsBackground = true; strip.backgroundColor = NSColor(white: 0.1, alpha: 1)
-        strip.horizontalScrollElasticity = .allowed
-        strip.translatesAutoresizingMaskIntoConstraints = false
+        // the sidebar of slides down the left
+        sidebar.hasVerticalScroller = true; sidebar.hasHorizontalScroller = false
+        sidebar.drawsBackground = true; sidebar.backgroundColor = NSColor(white: 0.1, alpha: 1)
+        sidebar.verticalScrollElasticity = .allowed
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        // everything right of the sidebar
+        let main = NSView()
+        main.translatesAutoresizingMaskIntoConstraints = false
 
-        for v in [toolbar, timerRow, clock, current, live, badge, blank, right, counterRow, track, hint, strip] { root.addSubview(v) }
+        for v in [toolbar, timerRow, clock, sidebar, main] { root.addSubview(v) }
+        for v in [current, live, badge, blank, notesRow, counterRow, track, hint] { main.addSubview(v) }
         let pw = progress.widthAnchor.constraint(equalToConstant: 0)
         progressWidth = pw
-        let slideWidth = current.widthAnchor.constraint(equalTo: root.widthAnchor, multiplier: 0.62)
-        slideWidth.priority = .defaultHigh
+        // the slide: as wide as the main area, unless that leaves too little height for the notes under it; then
+        // as tall as the room allows, centred
+        let slideWidth = current.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -48)
+        slideWidth.priority = .init(400)      // below the window's own size (500): the slide shrinks, the window never grows
         NSLayoutConstraint.activate([
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             toolbar.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
@@ -401,45 +494,51 @@ final class PresenterController: NSObject, NSWindowDelegate {
             timerRow.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10),
             clock.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
             clock.centerYAnchor.constraint(equalTo: timerRow.centerYAnchor),
-            current.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
-            current.topAnchor.constraint(equalTo: timerRow.bottomAnchor, constant: 10),
+            sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: timerRow.bottomAnchor, constant: 10),
+            sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: Self.sidebarWidth),
+            main.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            main.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            main.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            main.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            current.centerXAnchor.constraint(equalTo: main.centerXAnchor),
+            current.topAnchor.constraint(equalTo: main.topAnchor),
             slideWidth,
+            current.widthAnchor.constraint(lessThanOrEqualTo: main.widthAnchor, constant: -48),
             current.heightAnchor.constraint(equalTo: current.widthAnchor, multiplier: 9.0 / 16.0),
-            current.bottomAnchor.constraint(lessThanOrEqualTo: counterRow.topAnchor, constant: -8),
+            current.heightAnchor.constraint(lessThanOrEqualTo: root.heightAnchor, multiplier: 0.6),
             live.leadingAnchor.constraint(equalTo: current.leadingAnchor), live.trailingAnchor.constraint(equalTo: current.trailingAnchor),
             live.topAnchor.constraint(equalTo: current.topAnchor), live.bottomAnchor.constraint(equalTo: current.bottomAnchor),
             badge.leadingAnchor.constraint(equalTo: current.leadingAnchor, constant: 10),
             badge.topAnchor.constraint(equalTo: current.topAnchor, constant: 10),
             blank.centerXAnchor.constraint(equalTo: current.centerXAnchor), blank.centerYAnchor.constraint(equalTo: current.centerYAnchor),
-            right.leadingAnchor.constraint(equalTo: current.trailingAnchor, constant: 20),
-            right.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
-            right.topAnchor.constraint(equalTo: current.topAnchor),
-            right.bottomAnchor.constraint(equalTo: current.bottomAnchor),
-            notesScroll.widthAnchor.constraint(equalTo: right.widthAnchor),
-            buildScroll.widthAnchor.constraint(equalTo: right.widthAnchor),
+            notesRow.leadingAnchor.constraint(equalTo: main.leadingAnchor, constant: 24),
+            notesRow.trailingAnchor.constraint(equalTo: main.trailingAnchor, constant: -24),
+            notesRow.topAnchor.constraint(equalTo: current.bottomAnchor, constant: 14),
+            notesRow.bottomAnchor.constraint(equalTo: counterRow.topAnchor, constant: -12),
+            notesRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
+            notesScroll.heightAnchor.constraint(equalTo: notesRow.heightAnchor, constant: -20),
             buildScroll.heightAnchor.constraint(equalTo: notesScroll.heightAnchor),
-            counterRow.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            counterRow.centerXAnchor.constraint(equalTo: main.centerXAnchor),
             counterRow.bottomAnchor.constraint(equalTo: track.topAnchor, constant: -6),
-            track.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            track.centerXAnchor.constraint(equalTo: main.centerXAnchor),
             track.widthAnchor.constraint(equalToConstant: 220),
             track.heightAnchor.constraint(equalToConstant: 3),
-            track.bottomAnchor.constraint(equalTo: strip.topAnchor, constant: -12),
+            track.bottomAnchor.constraint(equalTo: main.bottomAnchor, constant: -14),
             progress.leadingAnchor.constraint(equalTo: track.leadingAnchor),
             progress.topAnchor.constraint(equalTo: track.topAnchor), progress.bottomAnchor.constraint(equalTo: track.bottomAnchor),
             pw,
-            hint.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            hint.trailingAnchor.constraint(equalTo: main.trailingAnchor, constant: -24),
             hint.centerYAnchor.constraint(equalTo: counterRow.centerYAnchor),
             hint.leadingAnchor.constraint(greaterThanOrEqualTo: counterRow.trailingAnchor, constant: 16),
-            strip.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            strip.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            strip.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            strip.heightAnchor.constraint(equalToConstant: SlideThumb.size.height + 44),
         ])
         return root
     }
 
-    /// One thumbnail per slide (not per build): the picture of its last build, a click goes to its first.
-    private func buildStrip() {
+    /// One entry per slide: the picture of its last build (a click goes to its first) with every build nested
+    /// beneath it (a click goes to that build).
+    private func buildSidebar() {
         slideRange = []
         for i in 0..<source.pageCount {
             let p = source.presenterPage(i)
@@ -450,35 +549,41 @@ final class PresenterController: NSObject, NSWindowDelegate {
             }
         }
         thumbs = slideRange.enumerated().map { k, r in
-            let t = SlideThumb(number: k + 1)
+            let t = SlideThumb(number: k + 1, builds: r.last - r.first + 1)
             t.onClick = { [weak self] in self?.source.go(r.first) }
+            for (b, panel) in t.builds.enumerated() { panel.onClick = { [weak self] in self?.source.go(r.first + b) } }
             return t
         }
-        let row = NSStackView(views: thumbs)
-        row.orientation = .horizontal; row.alignment = .top; row.spacing = 14
-        row.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 10, right: 16)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        let doc = NSView()
-        doc.addSubview(row)
+        let column = NSStackView(views: thumbs)
+        column.orientation = .vertical; column.alignment = .leading; column.spacing = 4
+        column.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 12, right: 0)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        let doc = FlippedView()                         // so the list starts at the top
+        doc.addSubview(column)
         doc.translatesAutoresizingMaskIntoConstraints = false
-        strip.documentView = doc
+        sidebar.documentView = doc
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: doc.leadingAnchor), row.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
-            row.topAnchor.constraint(equalTo: doc.topAnchor), row.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
-            doc.heightAnchor.constraint(equalTo: strip.heightAnchor),
+            column.leadingAnchor.constraint(equalTo: doc.leadingAnchor), column.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            column.topAnchor.constraint(equalTo: doc.topAnchor), column.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
+            doc.widthAnchor.constraint(equalTo: sidebar.contentView.widthAnchor),
+            doc.topAnchor.constraint(equalTo: sidebar.contentView.topAnchor),
         ])
+        for t in thumbs { t.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
         loadThumbnails()
     }
 
-    /// Small pictures for the strip, decoded in the background at thumbnail size (the full PNGs would take hundreds
-    /// of megabytes for a long deck).
+    /// Small pictures for the sidebar, one per page, decoded in the background at thumbnail size (the full PNGs
+    /// would take hundreds of megabytes for a long deck). A slide shows its last build; its panels show each build.
     private func loadThumbnails() {
+        let dark = DarkMode.isOn
         for (k, r) in slideRange.enumerated() {
-            let page = source.presenterPage(r.last)
-            let dark = DarkMode.isOn
-            Task { @MainActor [weak self] in
-                guard let img = await Self.thumbnailImage(page, dark: dark) else { return }
-                self?.thumbs[safe: k]?.image.image = img
+            for i in r.first...r.last {
+                let page = source.presenterPage(i)
+                Task { @MainActor [weak self] in
+                    guard let img = await Self.thumbnailImage(page, dark: dark), let t = self?.thumbs[safe: k] else { return }
+                    if i == r.last { t.image.image = img }
+                    t.builds[safe: i - r.first]?.image.image = img
+                }
             }
         }
     }
@@ -565,15 +670,16 @@ final class PresenterController: NSObject, NSWindowDelegate {
         progressWidth?.constant = 220 * CGFloat(source.pageIndex + 1) / CGFloat(max(1, source.pageCount))
         Self.show(page.notes, in: notes, empty: Self.noNotes)
         Self.show(page.buildNotes, in: buildNotes, empty: Self.noBuildNotes)
-        // the strip: outline the current slide and keep it in view
+        // the sidebar: outline the current slide and its current build, and keep them in view
         if let k = slideRange.firstIndex(where: { $0.first <= source.pageIndex && source.pageIndex <= $0.last }) {
             for (i, t) in thumbs.enumerated() where t.selected != (i == k) { t.selected = i == k }
-            if let t = thumbs[safe: k], t.frame.width > 0 {
-                let visible = strip.contentView.bounds
-                let f = t.frame.insetBy(dx: -16, dy: 0)
-                if !visible.contains(f) {
-                    let x = max(0, min(f.minX, (strip.documentView?.frame.width ?? 0) - visible.width))
-                    strip.contentView.animator().setBoundsOrigin(NSPoint(x: f.minX < visible.minX ? f.minX : x, y: 0))
+            if let t = thumbs[safe: k] {
+                let b = source.pageIndex - slideRange[k].first
+                for (i, p) in t.builds.enumerated() where p.selected != (i == b) { p.selected = i == b }
+                let target: NSView = t.builds[safe: b] ?? t
+                if t.frame.height > 0 {
+                    let r = target.convert(target.bounds, to: sidebar.documentView).insetBy(dx: 0, dy: -24)
+                    sidebar.documentView?.scrollToVisible(r)
                 }
             }
         }
