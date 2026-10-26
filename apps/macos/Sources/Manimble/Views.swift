@@ -60,6 +60,15 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
             return super.performKeyEquivalent(with: event)
         }
         override func cancelOperation(_ sender: Any?) { onCancel?() }
+        /// Pictures pasted or dropped in (see `MultilineTextBox.imageBase`); true when it took them.
+        var onImages: ((NSPasteboard) -> Bool)?
+        override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+            onImages == nil ? super.readablePasteboardTypes : [.fileURL, .png, .tiff] + super.readablePasteboardTypes
+        }
+        override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+            if let f = onImages, f(pboard) { return true }
+            return super.readSelection(from: pboard, type: type)
+        }
         override func resignFirstResponder() -> Bool {
             let accepted = super.resignFirstResponder()
             if accepted { onBlur?() }
@@ -74,8 +83,13 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
     var fillsContainer = false { didSet { heightConstraint.isActive = !fillsContainer; fit() } }
     private let maxLines: Int
     var onCommit: ((String) -> Void)?
+    /// The deck folder: pictures in the text (Markdown images, see `NoteImages`) show inline, and pictures pasted,
+    /// dropped or inserted are copied there. Nil keeps the box plain text.
+    var imageBase: URL? {
+        didSet { editor.onImages = imageBase == nil ? nil : { [weak self] pb in self?.pasteImages(pb) ?? false } }
+    }
 
-    var stringValue: String { editor.string }
+    var stringValue: String { imageBase == nil ? editor.string : NoteImages.markup(editor.attributedString()) }
     /// Current selection (UTF-16 range) of the box, kept while the box is not focused.
     var selectedRange: NSRange { editor.selectedRange() }
     /// Whether the box has the keyboard focus (unsaved typing is committed when it loses it).
@@ -96,7 +110,41 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
     var editorBackground: NSColor { get { editor.backgroundColor } set { editor.backgroundColor = newValue; backgroundColor = newValue } }
 
     /// Replace the text without triggering a commit (the caller applies the edit itself).
-    func setText(_ s: String) { editor.string = s; original = s; fit() }
+    func setText(_ s: String) { show(s); original = s; fit() }
+
+    private func show(_ s: String) {
+        guard imageBase != nil, NoteImages.has(s) else { editor.string = s; return }
+        let attrs: [NSAttributedString.Key: Any] = [.font: editor.font ?? Theme.font(13), .foregroundColor: editor.textColor ?? NSColor.textColor]
+        editor.textStorage?.setAttributedString(NoteImages.attributed(s, base: imageBase, attributes: attrs, maxWidth: imageWidth))
+    }
+
+    /// Pictures at most this wide: the box's text width, up to 360 pt.
+    private var imageWidth: CGFloat { min(360, max(80, (editor.textContainer?.size.width ?? 360) - 12)) }
+
+    /// The pictures in the text, for the headless test.
+    var imageCount: Int {
+        var n = 0
+        editor.attributedString().enumerateAttribute(.attachment, in: NSRange(location: 0, length: editor.attributedString().length)) { v, _, _ in
+            if v is NoteImageAttachment { n += 1 }
+        }
+        return n
+    }
+
+    /// Put picture files (paths relative to `imageBase`) at the insertion point.
+    func insertImages(_ paths: [String]) {
+        guard let base = imageBase, !paths.isEmpty else { return }
+        if window?.firstResponder !== editor { window?.makeFirstResponder(editor) }
+        NoteImages.insert(paths, in: editor, base: base, maxWidth: imageWidth)
+        fit()
+    }
+
+    /// Pictures on a pasteboard into the text at the insertion point; false when it has none.
+    func pasteImages(_ pb: NSPasteboard) -> Bool {
+        guard let base = imageBase, let paths = NoteImages.importImages(from: pb, into: base) else { return false }
+        NoteImages.insert(paths, in: editor, base: base, maxWidth: imageWidth)
+        fit()
+        return true
+    }
 
     init(string: String, maxLines: Int = 14) {
         original = string; self.maxLines = maxLines
@@ -113,7 +161,7 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
         editor.onBlur = { [weak self] in self?.editor.scriptMode = nil; self?.commit() }
         editor.onCancel = { [weak self] in
             guard let self = self else { return }
-            self.editor.string = self.original; self.fit()
+            self.show(self.original); self.fit()
             self.window?.makeFirstResponder(nil)
         }
         documentView = editor
@@ -131,7 +179,7 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
     func beginEditing() { window?.makeFirstResponder(editor); editor.selectAll(nil) }
 
     private func commit() {
-        let v = editor.string
+        let v = stringValue
         guard v != original else { return }
         original = v
         onCommit?(v)

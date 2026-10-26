@@ -40,8 +40,10 @@ class WorkerProc:
         self.media_dir = str(root / worker_name)
         self.lock = threading.Lock()
         self.proc = None
+        self.renders = 0            # renders by the current process: its first one pays the imports and caches
 
     def _start(self):
+        self.renders = 0
         env = os.environ.copy()
         env["MANIMBLE_MEDIA_DIR"] = self.media_dir
         env["MANIMBLE_SHARED_MEDIA"] = str(Path(self.media_dir).parent / "shared")   # SVGs every worker may reuse
@@ -51,7 +53,8 @@ class WorkerProc:
             text=True, bufsize=1, encoding="utf-8", env=env,
         )
 
-    def request(self, req: dict) -> dict:
+    def request(self, req: dict, on_progress=None) -> dict:
+        """`on_progress` gets the worker's interim {"step": n} lines (renders only) before the reply."""
         with self.lock:
             for attempt in (0, 1):
                 if self.proc is None or self.proc.poll() is not None:
@@ -59,9 +62,16 @@ class WorkerProc:
                 try:
                     self.proc.stdin.write(json.dumps(req) + "\n")
                     self.proc.stdin.flush()
-                    line = self.proc.stdout.readline()
-                    if line:
-                        return json.loads(line)
+                    while True:
+                        line = self.proc.stdout.readline()
+                        if not line:
+                            break
+                        obj = json.loads(line)
+                        if "progress" in obj and len(obj) == 1:
+                            if on_progress:
+                                on_progress(obj["progress"])
+                            continue
+                        return obj
                 except (BrokenPipeError, OSError):
                     pass
                 self.proc = None
@@ -115,6 +125,7 @@ class Manimble:
         self.rendering: set = set()
         self.history: list[dict] = []
         self.redo: list[dict] = []
+        self._undo_seq = 0          # numbers each undo step, so `undo_merge` can tell which came after a mark
         self.last_changed: dict = {}
         self.cv = threading.Condition()
         self.refresh_scenes()
@@ -311,11 +322,25 @@ class Manimble:
                 out = self.cache_dir / name / sub
                 out.mkdir(parents=True, exist_ok=True)
                 anchors = self._anchors()
-                res = (self.edit_worker if interactive else self.render_worker).request(
-                    {"cmd": "render", "scene": name, "module": s["module"], "out": str(out)}
+                worker = self.edit_worker if interactive else self.render_worker
+                cold = worker.renders == 0
+                t_req = time.time()
+                res = worker.request(
+                    {"cmd": "render", "scene": name, "module": s["module"], "out": str(out)},
+                    on_progress=self._progress_reporter(name, cur, cold),
                 )
                 if "error" not in res:
                     res["anchors"] = anchors
+                    res["cold"] = cold
+                    worker.renders += 1
+                    # the estimate is wall time as seen from here: worker start-up and the request on top of the
+                    # worker's own measure; the timeline (fractions of that measure) is rescaled to match
+                    wall = time.time() - t_req
+                    inner = float(res.get("duration") or 0)
+                    if wall > 0:
+                        lead = max(wall - inner, 0.0)
+                        res["timeline"] = [round((lead + f * inner) / wall, 4) for f in res.get("timeline", [])]
+                        res["duration"] = round(wall, 3)
                 dependencies = sorted(set(res.get("dependencies", [])))
                 if "error" in res:
                     rec = {"key": key, "error": res["error"], "dir": sub,
@@ -336,6 +361,51 @@ class Manimble:
                 return rec
             finally:
                 self.rendering.discard(name)
+
+    def _estimate_duration(self, prev: dict | None, cold: bool) -> float:
+        """Seconds this render will probably take: the slide's last render, unless that one was a worker's cold
+        first render and this one is not, then the deck's other warm renders (median), then a guess."""
+        d = (prev or {}).get("data") or {}
+        if d.get("duration") and (d.get("cold", False) == cold or cold):
+            return float(d["duration"])
+        warm = sorted(r["data"]["duration"] for r in list(self.results.values())
+                      if r.get("data", {}).get("duration") and not r["data"].get("cold"))
+        if warm:
+            return float(warm[len(warm) // 2])
+        if d.get("duration"):
+            return float(d["duration"]) * 0.3
+        return 6.0 if cold else 2.0
+
+    def _progress_reporter(self, name: str, prev: dict | None, cold: bool):
+        """`render_progress` events for one render: {"name", "step", "fraction", "elapsed", "estimate"}. `fraction`
+        is where the previous render of the slide was (by time) when it reached the same step (None without one);
+        `estimate` the expected duration in seconds. The first event (step 0) goes out before the worker starts,
+        so the app's bar restarts on every render."""
+        timeline = ((prev or {}).get("data") or {}).get("timeline") or []
+        estimate = self._estimate_duration(prev, cold)
+        t0 = time.time()
+        last = [0.0, 0.0]                       # fraction and time of the last event sent
+
+        def emit(step: int):
+            if not self.on_event:
+                return
+            fraction = None
+            if timeline:
+                fraction = timeline[min(step, len(timeline)) - 1] if step > 0 else 0.0
+                if step > len(timeline):        # longer than last time: stay near the end rather than lie
+                    fraction = max(fraction, 0.98)
+                fraction = min(max(fraction, 0.0), 0.995)
+            if step > 0 and fraction is None:
+                return                          # nothing to compare with: the bar runs on the estimate alone
+            now = time.time()
+            if step > 0 and fraction - last[0] < 0.02 and now - last[1] < 0.15:
+                return
+            last[0], last[1] = fraction or 0.0, now
+            self.on_event({"event": "render_progress", "name": name, "step": step, "fraction": fraction,
+                           "elapsed": round(now - t0, 3), "estimate": round(estimate, 3)})
+
+        emit(0)
+        return lambda p: emit(int(p.get("step", 0)))
 
     def dependency_report(self) -> dict:
         """Render any unscanned scenes and report files opened by deck code."""
@@ -437,6 +507,8 @@ class Manimble:
             fix(o["frames"])
             for ev in o.get("events", []):
                 fix(ev.get("frames", []))
+            if o.get("group"):
+                fix(o["group"]["frames"])
         data["objects"] = objects
         return data
 
@@ -536,6 +608,7 @@ class Manimble:
                 "siblings": counts[k], "font": o.get("font"), "weight": o.get("weight"), "slant": o.get("slant"),
                 "loc": f"{o['frames'][-1]['file']}:{o['frames'][-1]['pos'][0]}",
                 "rotation": o.get("rotation"), "dims": o.get("dims"),
+                "group": o["group"]["id"] if o.get("group") else None,
             }
             if o["kind"] in ("text", "tex"):
                 info["format"] = self.planner.format_info(o)
@@ -630,11 +703,19 @@ class Manimble:
 
     # -------------------------------------------------------- API: edit
     def _commit(self, label: str, written: dict):
-        entry = {"label": label, "files": {rel: (b, a) for rel, (b, a) in written.items()}}
+        self._undo_seq += 1
+        entry = {"label": label, "files": {rel: (b, a) for rel, (b, a) in written.items()}, "seq": self._undo_seq}
         self.history.append(entry)
         self.redo.clear()
         self.last_changed = self._diff_lines(written)
+        self._requeue_stale()
         return entry
+
+    def _requeue_stale(self):
+        """After a change to the deck's files: when a shared module (or manim.cfg) changed, every other slide is
+        stale now, so render them in the background rather than when a slideshow or an export first asks for them.
+        Off the calling thread: recomputing every scene's key takes ~50 ms on a long deck."""
+        threading.Thread(target=self.enqueue_all, daemon=True).start()
 
     def _diff_lines(self, written: dict) -> dict:
         for rel, (before, after) in written.items():
@@ -755,6 +836,30 @@ class Manimble:
                     a = (cx(float(req["sx"])), cy(float(req["sy"])))
                     b = (cx(float(req["ex"])), cy(float(req["ey"])))
                     attempts = self.planner.plan_endpoints(obj, a, b)
+                    # ends written as arguments of the line's own call: one dropped on an object's corner, edge or
+                    # centre reads that point (`Arrow(rect.get_right(), ...)`) and follows the object from then on;
+                    # an end left where it was keeps what the source says
+                    site = self.planner.line_end_site(obj)
+                    if site:
+                        src, call, stmt = site
+                        fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        cur = data["stops"][min(stop, len(data["stops"]) - 1)].get("lines", {}).get(oid) or []
+                        ends, extra, named, attached = [None, None], [], {}, 0
+                        for i, (p, k) in enumerate(((a, "s"), (b, "e"))):
+                            an = req.get("startAnchor" if i == 0 else "endAnchor")
+                            other = data["objects"].get(str((an or {}).get("oid")))
+                            got = (self.planner.anchor_point(other, str(an.get("at")), src.rel, fdef.lineno, stmt.lineno, named)
+                                   if other is not None and fdef is not None and str(an["oid"]) != oid else None)
+                            if got:
+                                ends[i] = got[0]
+                                extra += got[1]
+                                attached += 1
+                            elif len(cur) < 4 or abs(cur[2 * i] - float(req[k + "x"])) + abs(cur[2 * i + 1] - float(req[k + "y"])) > 1:
+                                ends[i] = f"({fmt(p[0])}, {fmt(p[1])}, 0)"
+                        if any(ends):
+                            how = (f"attached the {'ends' if attached > 1 else 'end'} to the object" if attached
+                                   else "moved the line's ends in its own call")
+                            attempts.insert(0, (how, self.planner.plan_line_ends(src, call, ends) + extra))
                 elif op == "resize":
                     label = "resize"
                     ratio = float(req["ratio"])
@@ -771,6 +876,10 @@ class Manimble:
                     kind = req.get("kind", "underline")
                     label = ("underline" if kind == "underline" else "strikethrough") + (" on" if req.get("on", True) else " off")
                     attempts = [(label, self.planner.plan_decoration(obj, kind, bool(req.get("on", True))))]
+                elif op == "link":
+                    url = (req.get("url") or "").strip()
+                    label = "link" if url else "remove link"
+                    attempts = [(label, self.planner.plan_link(obj, url or None))]
                 elif op == "highlight":
                     label = "highlight" if req.get("color") else "remove highlight"
                     attempts = [(label, self.planner.plan_highlight(obj, req.get("color"), float(req.get("opacity", 0.6))))]
@@ -795,6 +904,45 @@ class Manimble:
                     if w is None and h is None:
                         return {"ok": True, "message": "no change"}
                     attempts = self.planner.plan_size(obj, w, h)
+                elif op == "order":
+                    how = str(req["value"])
+                    label = {"front": "bring to front", "back": "send to back", "forward": "bring forward",
+                             "backward": "send backward"}.get(how)
+                    if label is None:
+                        return {"ok": False, "error": f"unknown order {how}"}
+                    if any("seq" not in sp for st in data["stops"] for sp in st["sprites"]):
+                        rec = self.render_now(name, interactive=True, force=True)      # a render from before z orders
+                        if "error" in rec:
+                            return {"ok": False, "error": rec["error"]}
+                        data = rec["data"]
+                    oids = [str(o) for o in req.get("oids") or [oid]]
+                    want, zs = self._plan_order(data, stop, oids, how)
+                    if want is None:
+                        return {"ok": True, "message": "no change"}
+                    edits = []
+                    for o, z in zs.items():
+                        edits += self.planner.plan_z(data["objects"][o], z)
+                    req = dict(req, want=want)
+                    attempts = [(label, edits)]
+                elif op in ("group", "ungroup"):
+                    oids = [str(o) for o in dict.fromkeys(req.get("oids") or [oid])]
+                    objs = [data["objects"][o] for o in oids if o in data["objects"]]
+                    old = list({(g["frames"][0]["file"], g["frames"][0]["pos"][0]): g
+                                for g in (o.get("group") for o in objs) if g}.values())
+                    if op == "group":
+                        label = "group"
+                        gids = {o["group"]["id"] for o in objs if o.get("group")}
+                        objs += [o for k, o in data["objects"].items()       # the rest of the groups they are in
+                                 if k not in oids and o.get("group") and o["group"]["id"] in gids]
+                        if len(objs) < 2:
+                            return {"ok": False, "error": "select two or more objects to group"}
+                        attempts = [(f"grouped {len(objs)} objects", self.planner.plan_group(objs, old))]
+                    else:
+                        label = "ungroup"
+                        if not old:
+                            return {"ok": True, "message": "no change"}
+                        attempts = [(label, self.planner.plan_ungroup(old))]
+                    req = dict(req, oids=oids)
                 elif op == "rotate":
                     label = "rotate"
                     want = float(req["degrees"]) % 360.0
@@ -1190,6 +1338,8 @@ class Manimble:
         site = (obj["frames"][-1]["file"], obj["frames"][-1]["pos"])
         mine = before.get(oid)
         moved = {}
+        me = new_data["objects"].get(oid)
+        names = self.planner.names_of(me) if me else set()
         for k, a in before.items():
             b = after.get(k)
             if k == oid or b is None:
@@ -1197,6 +1347,8 @@ class Manimble:
             o = new_data["objects"].get(k)
             if o is None or (o["frames"][-1]["file"], o["frames"][-1]["pos"]) == site:
                 continue                      # siblings share the edited line: they move together by design
+            if names and o.get("kind") == "line" and self.planner.reads(o, names):
+                continue                      # attached to the edited object (`Arrow(rect.get_right(), ...)`)
             (ax, ay), (bx, by) = centre(a), centre(b)
             if abs(bx - ax) <= 1.5 and abs(by - ay) <= 1.5:
                 continue
@@ -1258,7 +1410,81 @@ class Manimble:
             merged[rel] = (written[rel][0], a) if rel in written else (b, a)
         return merged, sorted(moved, key=int), []
 
+    @staticmethod
+    def _plan_order(data, stop, oids, how):
+        """Stacking order on build `stop`: the new bottom-to-top order of the drawn objects and the z_index
+        values that give it, {oid: z} for the objects whose value has to change (as few as possible), or
+        (None, None) when it already is that way. Manim draws by z_index, ties in the order things were added."""
+        st = data["stops"][min(stop, len(data["stops"]) - 1)]
+        sprites = sorted(st["sprites"], key=lambda sp: sp["z"])
+        stack = [str(sp["oid"]) for sp in sprites]
+        key = {str(sp["oid"]): (float(sp.get("zi", 0.0)), sp.get("seq", sp["z"])) for sp in sprites}
+        chosen = set(oids)
+        sel = [o for o in stack if o in chosen]
+        if not sel:
+            raise EditError("the selection is not drawn in this build")
+        others = [o for o in stack if o not in chosen]
+        if how == "front":
+            want = others + sel
+        elif how == "back":
+            want = sel + others
+        else:
+            # one step: past the next object above (below) that overlaps it, else simply the next one
+            boxes = {str(v[0]): v[1:] for v in st["visible"]}
+
+            def overlaps(a, b):
+                p, q = boxes.get(a), boxes.get(b)
+                return bool(p and q and p[0] < q[2] and q[0] < p[2] and p[1] < q[3] and q[1] < p[3])
+            step = 1 if how == "forward" else -1
+            want = stack[:]
+            for o in (reversed(sel) if step == 1 else sel):
+                i = want.index(o)
+                ahead = [k for k in range(i + step, len(want) if step == 1 else -1, step) if want[k] not in chosen]
+                k = next((k for k in ahead if overlaps(o, want[k])), ahead[0] if ahead else None)
+                if k is not None:
+                    want.pop(i)
+                    want.insert(k, o)
+        if want == stack:
+            return None, None
+
+        def raise_pass():              # bottom up: anything not above the one below it goes up
+            out, prev = {}, None
+            for o in want:
+                z, q = key[o]
+                if prev is not None and (z, q) <= prev:
+                    z = prev[0] if q > prev[1] else math.floor(prev[0]) + 1
+                    out[o] = z
+                prev = (z, q)
+            return out
+
+        def lower_pass():              # top down: anything not below the one above it goes down
+            out, nxt = {}, None
+            for o in reversed(want):
+                z, q = key[o]
+                if nxt is not None and (z, q) >= nxt:
+                    z = nxt[0] if q < nxt[1] else math.ceil(nxt[0]) - 1
+                    out[o] = z
+                nxt = (z, q)
+            return out
+        up, down = raise_pass(), lower_pass()
+        score = lambda zs: (len(zs), not set(zs) <= chosen, min(zs.values(), default=0) < 0)   # noqa: E731
+        return want, min((up, down), key=score)
+
     def _verify(self, op, req, oid, stop, before_box, data, ux, uy, before=None):
+        if op == "order":
+            st = data["stops"][min(stop, len(data["stops"]) - 1)]
+            want = req["want"]
+            got = [str(sp["oid"]) for sp in sorted(st["sprites"], key=lambda sp: sp["z"]) if str(sp["oid"]) in set(want)]
+            if got != [o for o in want if o in set(got)]:
+                return False, "later code in the slide sets the stacking order"
+            return True, ""
+        if op in ("group", "ungroup"):
+            gids = [((data["objects"].get(o) or {}).get("group") or {}).get("id") for o in req["oids"]]
+            if op == "group" and (None in gids or len(set(gids)) != 1):
+                return False, "the objects did not end up in one group"
+            if op == "ungroup" and any(g is not None for g in gids):
+                return False, "the objects are still grouped"
+            return True, ""
         if op == "delete":
             # objects are renumbered on every render and the cut shifts the lines below it, so the deleted one is
             # known by its kind and content: fewer such objects must be visible than before
@@ -2201,18 +2427,88 @@ class Manimble:
             self.enqueue_all()
             return {"ok": True, "message": f"build {k + 1} notes", "changed": self.last_changed}
 
-    def deck_pages(self, req: dict) -> dict:
-        """Every build of every slide, in order, for the slideshow (hidden slides left out)."""
+    def deck_pages(self, req: dict | None = None) -> dict:
+        """Every build of every slide, in order, for the slideshow and Presenter View (hidden slides left out).
+
+        Without `ahead`, every out-of-date slide is rendered before the reply. With `current` and `ahead`, only
+        `current` and the `ahead - 1` slides after it are waited for; the other out-of-date slides go to the front
+        of the background queue in show order (continuing after those, then from the top) and come back as
+        {"pending": true, "pages": [], "builds": n}, n being their last render's build count (1 if never rendered).
+        Each one's `rendered` event says it is time to ask again; `ahead` 0 waits for nothing."""
+        req = req or {}
         self._settle()
-        slides = []
-        for s in self.visible_scenes():
-            sc = self.api_scene(s["name"])
-            if sc.get("status") != "ready":
-                slides.append({"scene": s["name"], "error": sc.get("error", "not rendered"), "pages": []})
-            else:
-                slides.append({"scene": s["name"], "pages": [st["png"] for st in sc["stops"]], "notes": sc["notes"],
-                               "buildNotes": sc["buildNotes"]})
-        return {"slides": slides}
+        self.refresh_scenes()
+        names = [s["name"] for s in self.visible_scenes()]
+        ahead = req.get("ahead")
+        if ahead is None:
+            wait = set(names)
+        else:
+            start = names.index(req["current"]) if req.get("current") in names else 0
+            wait = set(names[start:start + max(0, int(ahead))])
+            order = names[start:] + names[:start]
+            pending = [n for n in order if n not in wait and self.status(n) in ("pending", "stale", "queued")]
+            with self.cv:
+                for n in pending:
+                    if n in self.queue:
+                        self.queue.remove(n)
+                self.queue[0:0] = pending
+                self.cv.notify()
+        return {"slides": [self._slide_pages(n, n in wait) for n in names]}
+
+    def _wait_ready(self, name: str):
+        """Render `name` on the interactive worker if it is out of date, or wait for the render in progress."""
+        if self.status(name) in ("pending", "stale", "queued"):
+            with self.cv:
+                if name in self.queue:
+                    self.queue.remove(name)
+            self.render_now(name, interactive=True)
+        deadline = time.time() + 120
+        while self.status(name) in ("pending", "stale", "queued", "rendering") and time.time() < deadline:
+            time.sleep(0.05)
+
+    def _slide_pages(self, name: str, wait: bool) -> dict:
+        """One slide's `deck_pages` entry, read straight from its render record: the editor's per-object analysis
+        (what `scene` returns) is not needed to show the pictures."""
+        if wait:
+            self._wait_ready(name)
+        rec = self.results.get(name)
+        st = self.status(name)
+        if st == "error":
+            return {"scene": name, "error": (rec or {}).get("error", "not rendered"), "pages": []}
+        if st != "ready" or not rec or "data" not in rec:
+            builds = len(rec["data"]["stops"]) if rec and "data" in rec else 1
+            return {"scene": name, "pages": [], "pending": True, "builds": max(1, builds)}
+        base = str(self.cache_dir / name / rec["dir"]) + "/"
+        data = rec["data"]
+        links: list = [[] for _ in data["stops"]]
+        if any(b"manimble_link" in self.project.src(rel).data for rel in self.project.py_files()):
+            data = self._rebased(data)
+            pw, ph = data["size"]
+            urls: dict = {}
+            for k, stop in enumerate(data["stops"]):
+                for v in stop["visible"]:
+                    oid = str(int(v[0]))
+                    if oid not in urls:
+                        o = data["objects"].get(oid)
+                        urls[oid] = self.planner.link_of(o) if o and o["kind"] in ("text", "tex") else None
+                    if urls[oid]:
+                        links[k].append([v[1] / pw, v[3] / pw, v[2] / ph, v[4] / ph, urls[oid]])
+        return {"scene": name, "pages": [base + st["png"] for st in data["stops"]], "notes": self._notes_of(name),
+                "buildNotes": self._build_notes_of(name, data["stops"]), "links": links}
+
+    @staticmethod
+    def _stop_links(sc: dict, stop: dict, with_oid: bool = False) -> list:
+        """Clickable regions of one build: [x0, x1, y0, y1, url] per linked text on screen, as fractions of the
+        slide, y from the top (the animated player's link format); (oid, region) pairs with `with_oid`."""
+        pw, ph = sc["size"]
+        out = []
+        for v in stop["visible"]:
+            oid = str(int(v[0]))
+            url = ((sc["objects"].get(oid) or {}).get("format") or {}).get("link")
+            if url:
+                r = [v[1] / pw, v[3] / pw, v[2] / ph, v[4] / ph, url]
+                out.append((oid, r) if with_oid else r)
+        return out
 
     # ------------------------------------------------------------ insert
     def _font_const(self) -> bool:
@@ -2233,7 +2529,7 @@ class Manimble:
             fw, fh, pw, ph = 14.222222, 8.0, 1280, 720
         return fw / pw, fh / ph, pw, ph
 
-    def _insert_code(self, kind: str, req: dict, preview: bool = False) -> str | None:
+    def _insert_code(self, kind: str, req: dict, preview: bool = False, ends=(None, None)) -> str | None:
         font = ""
         if self._font_const():
             if preview:
@@ -2252,6 +2548,7 @@ class Manimble:
             origin = f"({fmt((a[0] + b[0]) / 2)}, {fmt((a[1] + b[1]) / 2)}, 0)"
         w, h = max(abs(b[0] - a[0]), 0.05), max(abs(b[1] - a[1]), 0.05)
         pa, pb = f"({fmt(a[0])}, {fmt(a[1])}, 0)", f"({fmt(b[0])}, {fmt(b[1])}, 0)"
+        pa, pb = ends[0] or pa, ends[1] or pb            # ends attached to objects (`rect.get_right()`)
         drawn = req.get("sx") is not None
         codes = {
             "text": f'Text("Text", font_size=36{font}).move_to({origin})',
@@ -2312,10 +2609,19 @@ class Manimble:
             try:
                 stops = rec["data"]["stops"]
                 si = min(int(req.get("stop", 0)), nstops - 1)
-                edit, line = self.planner.plan_insert(self.scene(name), si, nstops, code,
-                                                      stops[si].get("site") if si < nstops - 1 else None,
-                                                      tag="pen" if kind == "pen" else "")
-                written = self.project.apply([edit])
+                scene = self.scene(name)
+                site = stops[si].get("site") if si < nstops - 1 else None
+                edit, line = self.planner.plan_insert(scene, si, nstops, code, site, tag="pen" if kind == "pen" else "")
+                extra = []
+                if kind in ("line", "arrow", "darrow") and (req.get("startAnchor") or req.get("endAnchor")):
+                    ends, extra = self._anchored_ends(rec["data"], scene, line, [req.get("startAnchor"), req.get("endAnchor")])
+                    if extra or any(ends):
+                        edit, line = self.planner.plan_insert(scene, si, nstops, self._insert_code(kind, req, ends=ends), site)
+                        # naming an object (`shape1 = ...` + `self.add(shape1)`) above the insert pushes it down
+                        src = self.project.src(edit.rel)
+                        line += sum(e.text.count("\n") - src.data[e.start:e.end].count(b"\n")
+                                    for e in extra if e.rel == edit.rel and e.start <= edit.start)
+                written = self.project.apply([edit] + extra)
                 self._sig_at = 0
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
@@ -2332,6 +2638,24 @@ class Manimble:
                                                  if o["frames"][-1]["pos"][0] == line and o["frames"][-1]["file"] == edit.rel))
             return {"ok": True, "message": f"inserted {kind}", "line": line, "file": edit.rel,
                     "changed": self.last_changed, "hidden": not shown}
+
+    def _anchored_ends(self, data, scene, line, anchors):
+        """Expressions for the ends of a line inserted at `line` of the scene's construct() that are attached to
+        objects (`{"oid": 3, "at": "UR"}` -> `shape1.get_corner(UR)`), plus the edits naming those objects. An end
+        whose object cannot be read there (no name, made in a loop or a helper) keeps its coordinates."""
+        src = self.project.src(scene["file"])
+        cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == scene["name"]), None)
+        fn = next((n for n in (cls.body if cls else []) if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
+        ends, edits, named = [None, None], [], {}
+        for i, an in enumerate(anchors):
+            obj = data["objects"].get(str((an or {}).get("oid")))
+            if fn is None or obj is None:
+                continue
+            got = self.planner.anchor_point(obj, str(an.get("at")), src.rel, fn.lineno, line, named)
+            if got:
+                ends[i] = got[0]
+                edits += got[1]
+        return ends, edits
 
     def insert_many(self, req: dict) -> dict:
         """Insert several elements (`items`: one dict per element, as for `insert`) at the same build as one undo step.
@@ -2736,6 +3060,7 @@ class Manimble:
             self._restore(e["files"], 0)
             self.redo.append(e)
             self.last_changed = {}
+            self._requeue_stale()
             return {"ok": True, "label": e["label"]}
 
     def redo_(self) -> dict:
@@ -2747,7 +3072,34 @@ class Manimble:
             self._restore(e["files"], 1)
             self.history.append(e)
             self.last_changed = self._diff_lines(e["files"])
+            self._requeue_stale()
             return {"ok": True, "label": e["label"]}
+
+    def undo_mark(self) -> dict:
+        """Where the undo history stands now: pass it to `undo_merge` after a series of edits on several objects."""
+        with self.edit_lock:
+            self._settle()
+            return {"mark": self._undo_seq}
+
+    def undo_merge(self, req: dict) -> dict:
+        """Fold the undo steps recorded since `mark` into one (a move, nudge or delete of a multi-object selection
+        is sent as one edit per object), so one undo reverts them all."""
+        with self.edit_lock:
+            self._settle()
+            mark = int(req["mark"])
+            n = 0
+            while n < len(self.history) and self.history[-1 - n].get("seq", 0) > mark:
+                n += 1
+            if n < 2:
+                return {"ok": True, "merged": n}
+            steps = self.history[-n:]
+            files: dict = {}
+            for e in steps:                       # oldest first: each file keeps its first before and its last after
+                for rel, (b, a) in e["files"].items():
+                    files[rel] = (files[rel][0] if rel in files else b, a)
+            del self.history[-n:]
+            self.history.append({"label": req.get("label") or steps[-1]["label"], "files": files, "seq": steps[-1]["seq"]})
+            return {"ok": True, "merged": n}
 
     # ------------------------------------------------------------ misc
     def sprite(self, req: dict) -> dict:
@@ -2773,6 +3125,9 @@ class Manimble:
             builds, editable = bool(req.get("builds", True)), bool(req.get("editable", True))
             if req["kind"] == "pptx":
                 r = ex.build_pptx(self, req["path"], builds, editable, prog)
+            elif req["kind"] == "beamer":
+                from .beamer import build_beamer
+                r = build_beamer(self, req["path"], builds, editable, prog)
             else:
                 import tempfile
                 tmp = os.path.join(tempfile.mkdtemp(), "deck.pptx")
@@ -2780,7 +3135,8 @@ class Manimble:
                 if r.get("ok"):
                     emit({"event": "export", "phase": "keynote"})
                     r = ex.pptx_to_keynote(tmp, req["path"])
-            emit({"event": "export", "phase": "done" if r.get("ok") else "error", "path": req["path"], "error": r.get("error")})
+            emit({"event": "export", "phase": "done" if r.get("ok") else "error", "path": req["path"], "error": r.get("error"),
+                  "pdfError": r.get("pdfError")})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "export", "phase": "error", "error": str(exc)})
         finally:
@@ -3049,7 +3405,23 @@ class Manimble:
         except Exception:                                 # noqa: BLE001
             sections, links = [], {}
         n = len(self.scenes)
-        return {"sections": [int(i) for i in sections if 0 <= int(i) < n],
-                "links": {str(k): [list(r) for r in v] for k, v in links.items()}}
+        links = {str(k): [list(r) for r in v] for k, v in links.items()}
+        # hyperlinks set on text in the editor: each linked text's box in the last build that shows it
+        for i, s in enumerate(self.scenes):
+            if self.status(s["name"]) != "ready":
+                continue
+            try:
+                sc = self.api_scene(s["name"], wait=False)
+            except Exception:                             # noqa: BLE001
+                continue
+            if sc.get("status") != "ready":
+                continue
+            found: dict = {}
+            for st in sc["stops"]:
+                for oid, r in self._stop_links(sc, st, with_oid=True):
+                    found[oid] = r
+            if found:
+                links.setdefault(str(i), []).extend(found.values())
+        return {"sections": [int(i) for i in sections if 0 <= int(i) < n], "links": links}
 
 # -------------------------------------------------------------------- HTTP

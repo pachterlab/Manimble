@@ -37,10 +37,28 @@ def _hex(c: str | None):
     return RGBColor(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16))
 
 
+def _link_run(run, url: str) -> None:
+    """Make a run open `url` when clicked in the show, drawn as in Manimble: in the run's own colour rather than
+    the theme's hyperlink colour (PowerPoint 2019+ honours the hlinkClr extension; older versions ignore it), and
+    without the automatic underline."""
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    run.hyperlink.address = url
+    rPr = run._r.find(qn("a:rPr"))
+    rPr.set("u", "none")                # an underline in Manimble is a line of its own, exported with the rest
+    hl = rPr.find(qn("a:hlinkClick"))
+    ext_lst = etree.SubElement(hl, qn("a:extLst"))
+    ext = etree.SubElement(ext_lst, qn("a:ext"), uri="{A12FA001-AC4F-418D-AE19-62706E023703}")
+    clr = etree.SubElement(ext, "{http://schemas.microsoft.com/office/drawing/2018/hyperlinkcolor}hlinkClr",
+                           nsmap={"ahyp": "http://schemas.microsoft.com/office/drawing/2018/hyperlinkcolor"})
+    clr.set("val", "tx")
+
+
 def build_pptx(app, path: str, builds: bool = False, editable: bool = True, progress=None) -> dict:
     try:
         from pptx import Presentation
         from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+        from pptx.enum.shapes import MSO_SHAPE
         from pptx.util import Emu, Pt
     except ImportError:
         return {"ok": False, "error": "python-pptx is not installed in the Python environment Manimble uses "
@@ -66,6 +84,15 @@ def build_pptx(app, path: str, builds: bool = False, editable: bool = True, prog
             slide = prs.slides.add_slide(blank)
             if not editable:
                 slide.shapes.add_picture(st["png"], 0, 0, prs.slide_width, prs.slide_height)
+                # linked text is part of the picture: an invisible box over each one opens its link
+                for x0, x1, y0, y1, url in app._stop_links(sc, st):
+                    W, H = prs.slide_width, prs.slide_height
+                    hot = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Emu(int(x0 * W)), Emu(int(y0 * H)),
+                                                 Emu(max(1, int((x1 - x0) * W))), Emu(max(1, int((y1 - y0) * H))))
+                    hot.fill.background()
+                    hot.line.fill.background()
+                    hot.shadow.inherit = False
+                    hot.click_action.hyperlink.address = url
                 continue
             slide.shapes.add_picture(st["bg"], 0, 0, prs.slide_width, prs.slide_height)
             vis = {int(v[0]): v for v in st["visible"]}
@@ -73,6 +100,7 @@ def build_pptx(app, path: str, builds: bool = False, editable: bool = True, prog
                 oid = sp["oid"]
                 obj = sc["objects"].get(str(oid), {})
                 v = vis.get(oid)
+                url = (obj.get("format") or {}).get("link")
                 if obj.get("kind") == "text" and v is not None and obj.get("value"):
                     x0, y0, x1, y1 = v[1:5]
                     padx = 0.06 * (x1 - x0) + 30
@@ -95,9 +123,13 @@ def build_pptx(app, path: str, builds: bool = False, editable: bool = True, prog
                         f.bold = str(obj.get("weight") or "").upper() == "BOLD"
                         f.italic = str(obj.get("slant") or "").upper() in ("ITALIC", "OBLIQUE")
                         f.color.rgb = _hex(obj.get("color"))
+                        if url:
+                            _link_run(run, url)
                 else:
-                    slide.shapes.add_picture(sp["file"], Emu(int(sp["x"] * k)), Emu(int(sp["y"] * k)),
-                                             Emu(int(sp["w"] * k)), Emu(int(sp["h"] * k)))
+                    pic = slide.shapes.add_picture(sp["file"], Emu(int(sp["x"] * k)), Emu(int(sp["y"] * k)),
+                                                   Emu(int(sp["w"] * k)), Emu(int(sp["h"] * k)))
+                    if url:                                 # a linked formula: the picture opens the link
+                        pic.click_action.hyperlink.address = url
     prs.save(path)
     return {"ok": True, "path": path, "slides": len(prs.slides)}
 

@@ -363,6 +363,14 @@ extension MainController {
 
     @objc func hideNotesPane() { setDrawerOpen(false) }
 
+    /// The drawer's picture button: choose pictures and put them in the notes tab on screen, where the typing is.
+    func insertNotesImage() {
+        guard let ws = workspace, drawer.page != .terminal else { return }
+        let box = drawer.page == .buildNotes ? buildNotesBox : notesBox
+        let paths = NoteImages.choose(into: ws.work)
+        box.insertImages(paths)
+    }
+
     /// ⌥⌘K: the drawer on the notes tab, or closed if that is already showing.
     @objc func toggleNotesPane() {
         if drawerShowsNotes { setDrawerOpen(false); return }
@@ -609,10 +617,14 @@ extension MainController {
 
     /// Right-click menu of the slide navigator (the row is already selected).
     func navigatorMenu(row: Int) -> NSMenu? {
-        guard navigatorScenes.indices.contains(row), player == nil else { return nil }
+        guard player == nil, !navigatorScenes.isEmpty else { return nil }
         let m = NSMenu()
         func add(_ title: String, _ sel: Selector, _ obj: Any? = nil) {
             let mi = NSMenuItem(title: title, action: sel, keyEquivalent: ""); mi.target = self; mi.representedObject = obj; m.addItem(mi)
+        }
+        let expandTitle = buildsExpandedAll ? "Collapse All Builds" : "Expand All Builds"
+        guard navigatorScenes.indices.contains(row) else {      // right-click below the last slide
+            add(expandTitle, #selector(toggleExpandAllBuilds)); return m
         }
         let layouts = NSMenu()
         for (title, layout, _) in MainController.slideLayouts {
@@ -624,6 +636,8 @@ extension MainController {
         m.addItem(newItem)
         add("New Build", #selector(newBuild))
         add("Duplicate Slide", #selector(duplicateSlide))
+        m.addItem(.separator())
+        add(expandTitle, #selector(toggleExpandAllBuilds))
         m.addItem(.separator())
         if selectedSlideIsUnused { add("Restore Slide to Show", #selector(restoreSlide)) }
         else { add(selectedSlideIsHidden ? "Unhide Slide" : "Hide Slide", #selector(toggleHideSlide)) }
@@ -763,29 +777,29 @@ extension MainController {
         Task { @MainActor in
             busyText = "Preparing presenter view…"
             busy += 1
-            let deck = try? await engine.call("deck_pages", as: DeckPages.self)
+            let deck = await fetchStillPages(fromCurrent: true)
             busy -= 1; busyText = "Rendering…"
             guard let d = deck else { toast("Could not prepare the slideshow", error: true); return }
             let broken = d.slides.filter { $0.error != nil }.map { $0.scene }
-            let playable = d.slides.filter { $0.error == nil && !$0.pages.isEmpty }
+            let s = stillPages(d)
             if !broken.isEmpty { toast("Skipping slides that fail to render: " + broken.joined(separator: ", "), error: true) }
-            guard !playable.isEmpty else { return }
+            guard !s.slides.isEmpty else { return }
             var start = 0
-            if let n = sceneName, let i = playable.firstIndex(where: { $0.scene == n }) { start = i }
+            if let n = sceneName, let i = s.scenes.firstIndex(of: n) { start = i }
             let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
             let other = NSScreen.screens.first { $0 != here }
-            let p = PresenterController(slides: playable.map { $0.pages }, scenes: playable.map { $0.scene },
-                                        notes: playable.map { $0.notes ?? "" },
-                                        buildNotes: playable.map { $0.buildNotes ?? [] },
+            let p = PresenterController(slides: s.slides, links: s.links, scenes: s.scenes, notes: s.notes, buildNotes: s.buildNotes,
                                         startSlide: start, presenterScreen: here, audienceScreen: other)
-            p.onExit = { [weak self] in self?.presenter = nil; self?.window.makeKeyAndOrderFront(nil) }
+            showPending = s.pending
+            p.onExit = { [weak self] in self?.presenter = nil; self?.showPending = false; self?.window.makeKeyAndOrderFront(nil) }
             p.onSaveNotes = { [weak self] scene, build, text, done in self?.savePresenterNotes(scene: scene, build: build, text: text, done: done) }
+            p.noteImageBase = workspace?.work
             p.feedback = feedback
             // "Use Slide Show": the presenter window closes and the show carries on as the plain slideshow
             p.onDetach = { [weak self] src in
                 self?.presenter = nil
                 guard let s = src as? SlidePlayer else { return }
-                s.onExit = { [weak self] in self?.player = nil; self?.window.makeKeyAndOrderFront(nil) }
+                s.onExit = { [weak self] in self?.player = nil; self?.showPending = false; self?.window.makeKeyAndOrderFront(nil) }
                 self?.player = s
             }
             presenter = p
@@ -816,7 +830,8 @@ extension MainController {
         syncFeedbackButton()
         canvas.feedbackLayer?.rebuild()
         presenter?.feedbackChanged()
-        (feedbackPopover?.contentViewController?.view as? FeedbackListView)?.reload()
+        feedbackPane?.reload()
+        if feedback?.isEmpty ?? true { hideFeedbackPane() }        // nothing left to list: the edit panel comes back
     }
 
     func syncFeedbackButton() {
@@ -835,12 +850,23 @@ extension MainController {
         return "Missing slide · \(scene)"
     }
 
-    /// "View Feedback": the notes grouped by slide in a popover; a click (or Previous / Next) shows that slide
-    /// with the note outlined, ready to edit.
+    /// "View Feedback": the notes grouped by slide take the edit panel's place (top right); a click (or Previous /
+    /// Next) shows that slide with the note outlined, ready to edit. Again, or Done, puts the edit panel back.
     @objc func viewFeedback(_ sender: NSButton) {
-        if let p = feedbackPopover, p.isShown { p.close(); return }
+        if let p = feedbackPane, !p.isHidden { hideFeedbackPane(); return }
         guard let store = feedback, !store.isEmpty else { return }
-        let list = FeedbackListView(store: store)
+        if let old = feedbackPane, old.store !== store { old.removeFromSuperview(); feedbackPane = nil }
+        let list = feedbackPane ?? FeedbackListView(store: store)
+        if feedbackPane == nil {
+            list.translatesAutoresizingMaskIntoConstraints = false
+            inspectorHost.addSubview(list)
+            NSLayoutConstraint.activate([
+                list.leadingAnchor.constraint(equalTo: inspectorHost.leadingAnchor), list.trailingAnchor.constraint(equalTo: inspectorHost.trailingAnchor),
+                list.topAnchor.constraint(equalTo: inspectorHost.topAnchor), list.bottomAnchor.constraint(equalTo: inspectorHost.bottomAnchor),
+            ])
+            feedbackPane = list
+        } else { list.reload() }
+        list.onClose = { [weak self] in self?.hideFeedbackPane() }
         list.slideLabel = { [weak self] in self?.feedbackSlideLabel($0) ?? $0 }
         list.onGo = { [weak self] n in
             guard let self else { return }
@@ -858,10 +884,19 @@ extension MainController {
                 self.canvas.feedbackLayer?.focus(n.id)
             }
         }
-        let vc = NSViewController(); vc.view = list
-        let p = NSPopover(); p.contentViewController = vc; p.behavior = .transient
-        feedbackPopover = p
-        p.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+        hideBioCartoon()
+        inspectorScroll?.isHidden = true
+        list.isHidden = false
+        formatBar?.feedback.state = .on
+        if let right = mainSplit?.subviews.last, right.isHidden { right.isHidden = false; mainSplit?.adjustSubviews() }
+    }
+
+    /// The edit panel back in the top right.
+    func hideFeedbackPane() {
+        formatBar?.feedback.state = .off
+        guard let p = feedbackPane, !p.isHidden else { return }
+        p.isHidden = true
+        if biocartoonPane?.view.isHidden ?? true { inspectorScroll?.isHidden = false }
     }
 }
 
@@ -909,7 +944,9 @@ extension MainController {
             // Feedback Mode: a click adds a note and typing goes into it
             pc.setFeedbackMode(true)
             r = pc.feedbackSlideRectInWindow
-            click(w, CGPoint(x: r.minX + r.width * 0.2, y: r.minY + r.height * 0.7)); await wait(0.3)
+            let cp = CGPoint(x: r.minX + r.width * 0.2, y: r.minY + r.height * 0.7)
+            log("feedback click: r=\(r.integral) at=\(cp) hit=\(type(of: w.contentView?.hitTest(cp) as Any)) layer=\(pc.feedbackLayerDebug)")
+            click(w, cp); await wait(0.3)
             log("after click: first responder=\(type(of: w.firstResponder as Any)) notes=\(feedback?.notes.count ?? -1)")
             (w.firstResponder as? NSTextView)?.insertText("Fix this title", replacementRange: NSRange(location: 0, length: 0))
             await wait(0.2)
@@ -948,20 +985,24 @@ extension MainController {
             log("button=\(formatBar.feedback.isEnabled) title='\(formatBar.feedback.title)'")
             // View Feedback: Next goes to the first note, then the second (another slide), focused for editing
             viewFeedback(formatBar.feedback); await wait(0.5)
-            guard let list = feedbackPopover?.contentViewController?.view as? FeedbackListView else { log("no popover"); return }
-            log("popover shown=\(feedbackPopover?.isShown ?? false)")
+            guard let list = feedbackPane, !list.isHidden else { log("no pane"); return }
+            log("pane shown=\(!list.isHidden) inspectorHidden=\(inspectorScroll?.isHidden ?? false) button=\(formatBar.feedback.state == .on) frame=\(list.frame.integral)")
             list.goNext(); await wait(1.2)
             log("after next 1: scene=\(sceneName ?? "-") fr=\(type(of: window.firstResponder as Any))")
             list.goNext(); await wait(1.5)
             log("after next 2: scene=\(sceneName ?? "-") fr=\(type(of: window.firstResponder as Any)) boxes=\(canvas.feedbackLayer?.subviews.compactMap { $0 as? FeedbackBox }.count ?? -1)")
             shot(window, "feedback-4-editor-formula.png")
-            feedbackPopover?.close()
-            // deleting: one, then all
+            viewFeedback(formatBar.feedback); await wait(0.2)
+            log("after hide: paneHidden=\(feedbackPane?.isHidden ?? true) inspectorHidden=\(inspectorScroll?.isHidden ?? false) button=\(formatBar.feedback.state == .on)")
+            viewFeedback(formatBar.feedback); await wait(0.3)
+            shot(window, "feedback-5-pane.png")
+            // deleting: one, then all (the pane empties and goes away by itself)
             if let id = feedback?.notes.first?.id { feedback?.remove(id) }
             await wait(0.2)
             log("after remove one: notes=\(feedback?.notes.count ?? -1) button=\(formatBar.feedback.isEnabled)")
             feedback?.removeAll(); await wait(0.2)
             log("after remove all: notes=\(feedback?.notes.count ?? -1) button=\(formatBar.feedback.isEnabled) file=\(FileManager.default.fileExists(atPath: feedback?.url.path ?? "")) boxes=\(canvas.feedbackLayer?.subviews.compactMap { $0 as? FeedbackBox }.count ?? -1)")
+            log("after remove all: paneHidden=\(feedbackPane?.isHidden ?? true) inspectorHidden=\(inspectorScroll?.isHidden ?? false)")
             log("done")
         }
     }

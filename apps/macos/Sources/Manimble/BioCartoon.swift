@@ -143,8 +143,9 @@ enum BioCartoonCLI {
     }
 
     /// The oldest `biocartoon` Manimble works with: it lists icons' taxonomy (`taxa`) and calls the databases' own
-    /// categories source categories (`--source-category`, `source_categories`). Keep in step with engine/requirements.txt.
-    static let minimumVersion = "0.3.4"
+    /// categories source categories (`--source-category`, `source_categories`), and filters by tag (`--tags`). Keep in step
+    /// with engine/requirements.txt.
+    static let minimumVersion = "0.4.0"
 
     static func supported(_ version: String) -> Bool {
         version.compare(minimumVersion, options: .numeric) != .orderedAscending
@@ -176,6 +177,7 @@ enum BioCartoonCLI {
         for k in filter.dbCats.sorted() { let d = BCFilter.split(k); args += ["--source-category", "\(d.database):\(d.category)"] }
         for l in filter.licenses.sorted() { args += ["--license", l] }
         for t in filter.fileTypes.sorted() { args += ["--file-type", t] }
+        if !filter.tagList.isEmpty { args += ["--tags", filter.tagList.joined(separator: ",")] }
         return args
     }
 
@@ -557,13 +559,17 @@ struct BCFilter: Equatable {
     var dbCats: Set<String> = []          // a database's own categories, as `key(_:_:)` makes them
     var licenses: Set<String> = []
     var fileTypes: Set<String> = []       // "svg" (published as SVG), "png" (a PNG only)
+    var tags = ""                         // whole tags, any case, commas between
 
     var authorParts: [String] {
         authors.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
     }
+    var tagList: [String] {
+        tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
     var isEmpty: Bool {
         sources.isEmpty && authorParts.isEmpty && categories.isEmpty && subcategories.isEmpty && dbCats.isEmpty && licenses.isEmpty
-            && fileTypes.isEmpty
+            && fileTypes.isEmpty && tagList.isEmpty
     }
 
     static func key(_ database: String, _ category: String) -> String { database + "\t" + category }
@@ -654,6 +660,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private let dbCatPopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let licensePopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let fileTypePopup = BCMultiPopup(frame: .zero, pullsDown: true)
+    private let tagsField = NSTextField()
     private let clearButton = NSButton(title: "Clear filters", target: nil, action: nil)
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let status = NSTextField(labelWithString: "")
@@ -721,11 +728,16 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         authorField.placeholderString = "Any (commas for several)"
         authorField.font = Theme.font(11); authorField.controlSize = .small
         authorField.delegate = self
+        tagsField.placeholderString = "Any (commas for several)"
+        tagsField.font = Theme.font(11); tagsField.controlSize = .small
+        tagsField.delegate = self
+        let tagsLabel = fieldLabel("Tags")
+        tagsLabel.toolTip = "Icons with one of these as a whole tag, any case"
         let dbCatLabel = fieldLabel("Database category")
         dbCatLabel.toolTip = "A database's own categories, by its code (BA: NIAID NIH BioArt, …)"
         let rows: [[NSView]] = [[fieldLabel("Database"), dbPopup], [fieldLabel("Author"), authorField], [fieldLabel("Category"), catPopup],
                                 [fieldLabel("Subcategory"), subPopup], [dbCatLabel, dbCatPopup], [fieldLabel("License"), licensePopup],
-                                [fieldLabel("File type"), fileTypePopup]]
+                                [fieldLabel("File type"), fileTypePopup], [tagsLabel, tagsField]]
         for r in rows { r[1].setContentHuggingPriority(.init(1), for: .horizontal) }
         let table = NSGridView(views: rows)
         table.rowSpacing = 6; table.columnSpacing = 8
@@ -986,6 +998,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         filter = BCFilter()
         for p in [dbPopup, catPopup, subPopup, dbCatPopup, licensePopup, fileTypePopup] { p.clear() }
         authorField.stringValue = ""
+        tagsField.stringValue = ""
         refreshSubcategories()
         refreshDbCategories()
         refreshFilterChrome()
@@ -1008,6 +1021,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         filter.licenses = licensePopup.picked
         filter.fileTypes = fileTypePopup.picked
         filter.authors = authorField.stringValue
+        filter.tags = tagsField.stringValue
         refreshFilterChrome()
         reload()
     }
@@ -1021,6 +1035,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         refreshDbCategories()
         dbCatPopup.pick(f.dbCats); licensePopup.pick(f.licenses); fileTypePopup.pick(f.fileTypes)
         authorField.stringValue = f.authors
+        tagsField.stringValue = f.tags
         filterBox.isHidden = false
         refreshFilterChrome()
         reload()
@@ -1030,7 +1045,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private func refreshFilterChrome() {
         let active = !filter.isEmpty
         funnel.contentTintColor = active || !filterBox.isHidden ? Theme.accent : .secondaryLabelColor
-        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category, license or file type" : "Hide the filters"
+        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category, license, file type or tags" : "Hide the filters"
         clearButton.isHidden = !active
         summary.stringValue = summaryText()
         summary.isHidden = !(active && filterBox.isHidden)
@@ -1049,6 +1064,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         }
         if !filter.licenses.isEmpty { parts.append(filter.licenses.sorted().joined(separator: ", ")) }
         if !filter.fileTypes.isEmpty { parts.append(filter.fileTypes.sorted().map { $0.uppercased() }.joined(separator: ", ")) }
+        if !filter.tagList.isEmpty { parts.append("tagged " + filter.tagList.joined(separator: ", ")) }
         return parts.joined(separator: "  ·  ")
     }
 
@@ -1059,8 +1075,9 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     @objc private func searchSubmitted() { typing?.cancel(); reload() }
     func controlTextDidChange(_ n: Notification) {
         typing?.cancel()
-        let author = (n.object as? NSTextField) === authorField
-        let w = DispatchWorkItem { [weak self] in author ? self?.filtersEdited() : self?.reload() }
+        let field = n.object as? NSTextField
+        let edited = field === authorField || field === tagsField
+        let w = DispatchWorkItem { [weak self] in edited ? self?.filtersEdited() : self?.reload() }
         typing = w
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
     }
@@ -1189,6 +1206,7 @@ extension MainController {
             ])
             biocartoonPane = p
         }
+        hideFeedbackPane()
         p.view.isHidden = false
         inspectorScroll?.isHidden = true
         if let right = mainSplit?.subviews.last, right.isHidden { right.isHidden = false; mainSplit?.adjustSubviews() }

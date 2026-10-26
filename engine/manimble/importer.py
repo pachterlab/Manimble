@@ -1761,6 +1761,9 @@ class _Importer:
         ref_font = theme.fonts.get(font_ref.get("idx")) if font_ref is not None and font_ref.get("idx") in ("major", "minor") else None
         default_text = ctx["default_text"]
         NB = "\xa0"
+        # a link on the whole shape (Insert ▸ Link with the box selected) applies to text without a link of its own
+        cnv = el.find(".//" + qn("p:cNvPr"))
+        shape_link = self.link_url(cnv.find(qn("a:hlinkClick")) if cnv is not None else None, ctx)
 
         # the box as laid out: vertical text is laid out in a box turned on its side, then rotated back
         angle = box.angle
@@ -1794,7 +1797,8 @@ class _Importer:
                 bold = self._attr(srcs, "b") == "1"
                 italic = self._attr(srcs, "i") == "1"
                 _, fill_own = self._child(srcs_own, "solidFill")
-                link = rPr is not None and rPr.find(qn("a:hlinkClick")) is not None
+                hl = rPr.find(qn("a:hlinkClick")) if rPr is not None else None
+                link = hl is not None
                 color = None
                 if fill_own is not None:
                     c = theme.first_clr(fill_own)
@@ -1819,7 +1823,7 @@ class _Importer:
                 strike = self._attr(srcs, "strike") not in (None, "noStrike")
                 return {"size": size, "bold": bold, "italic": italic, "color": color or default_text,
                         "font": font or theme.fonts["minor"], "underline": underline, "strike": strike,
-                        "spc": _int(self._attr(srcs_own, "spc"))}
+                        "spc": _int(self._attr(srcs_own, "spc")), "url": self.link_url(hl, ctx)}
 
             main_rpr = next((rp for t, rp, _ in runs if t.strip()), None)
             mp = rprops(main_rpr if main_rpr is not None else end_rpr)
@@ -1840,14 +1844,15 @@ class _Importer:
                 return ft.getlength(seg) / 1000 if ft is not None else len(seg) * (0.55 if st[0] else 0.5)
 
             # per-character style, colour and decoration; characters without a run take the paragraph's
-            raw, styles, colors, decos = "", [], [], []
+            raw, styles, colors, decos, urls = "", [], [], [], []
             for t, rp, m in runs:
                 t = t.replace("\x0b", "\n").replace("\t", "    ")
-                st = col = deco = None
+                st = col = deco = url = None
                 spc = 0
                 if rp is not None and t.strip():
                     rpp = rprops(rp)
                     st, col, deco, spc = (rpp["bold"], rpp["italic"]), rpp["color"], (rpp["underline"], rpp["strike"]), rpp["spc"]
+                    url = rpp["url"]
                     if m is not None:
                         st = (rpp["bold"], rpp["italic"] and m.find(".//" + _MATH_NS + "nor") is None)
                 if spc >= 50 and t.strip():
@@ -1860,9 +1865,11 @@ class _Importer:
                 styles += [st] * len(t)
                 colors += [col] * len(t)
                 decos += [deco] * len(t)
+                urls += [url or shape_link] * len(t)
             lead = len(raw) - len(raw.lstrip())
             text = raw.strip()
             styles, colors, decos = styles[lead:lead + len(text)], colors[lead:lead + len(text)], decos[lead:lead + len(text)]
+            urls = urls[lead:lead + len(text)]
             counts: dict = {}
             for ch, st in zip(text, styles):
                 if st is not None and not ch.isspace():
@@ -1924,6 +1931,7 @@ class _Importer:
                 text, styles, idx = _wrap(text, styles, avail_em, measure)
                 colors = [colors[i] if i >= 0 else color for i in idx]
                 decos = [decos[i] if i >= 0 else (False, False) for i in idx]
+                urls = [urls[i] if i >= 0 else None for i in idx]
             text_lines = text.split("\n")
 
             pil = _font_or_fallback(font, bold, italic)
@@ -1963,7 +1971,7 @@ class _Importer:
                 except Exception:                               # noqa: BLE001
                     latex = ""
                 n_lines = 2.2 if any(omml_tall(m) for m in math_els) else 1.0
-            laid.append({"text": text, "styles": styles, "colors": colors, "decos": decos, "n_lines": n_lines, "fs": fs,
+            laid.append({"text": text, "styles": styles, "colors": colors, "decos": decos, "urls": urls, "n_lines": n_lines, "fs": fs,
                          "size_emu": size_emu, "color": color, "font": font, "pitch": pitch, "align": algn,
                          "empty": empty, "text_x": text_x, "bold": bold, "italic": italic, "math": latex,
                          "bullet": bullet, "bullet_x": bullet_x, "bullet_w": bullet_w, "bullet_color": bullet_color, "bullet_font": bullet_font,
@@ -1973,6 +1981,9 @@ class _Importer:
                          "pil": pil, "ascent": pil.getmetrics()[0] if pil is not None else 950})
         if not laid:
             return
+        for p in laid:
+            linked = [u for ch, u in zip(p["text"], p["urls"]) if u and not ch.isspace()]
+            p["link"] = max(set(linked), key=linked.count) if linked else None
 
         # ---- group paragraphs into Texts: one per text box when the paragraphs share size, font and alignment
         def left_aligned(p):
@@ -1983,6 +1994,9 @@ class _Importer:
             if ref is None or p["empty"]:
                 return True
             if p["math"] or ref["math"]:
+                return False
+            # a link belongs to a whole Text, so paragraphs that open different links stay apart
+            if any(q["link"] and p["link"] and q["link"] != p["link"] for q in g):
                 return False
             return (p["fs"] == ref["fs"] and p["font"] == ref["font"] and p["align"] == ref["align"]
                     and (not left_aligned(p) or abs(p["text_x"] - ref["text_x"]) < 1000))
@@ -2081,6 +2095,8 @@ class _Importer:
                     pos = place((l_in - r_in) / 2, dy)
                 if ref["bullet"]:
                     emit_bullet(ref, yc, fs)
+                url = next((u for u in ref["urls"] if u), shape_link)
+                pos += f".set(manimble_link={url!r})" if url else ""
                 out.append(f'self.add(MathTex({ref["math"]!r}, font_size={_num(fs * 1.3, 1)}, color="{ref["color"]}"){pos})  # manimble')
                 y += block_h + g[-1]["after"]
                 continue
@@ -2095,9 +2111,10 @@ class _Importer:
             y += block_h + g[-1]["after"]
 
             text = "\n".join(p["text"] for p in mid)
-            styles, colors, decos = [], [], []
+            styles, colors, decos, urls = [], [], [], []
             for pi, p in enumerate(mid):
                 more = pi < len(mid) - 1
+                urls += p["urls"]
                 styles += p["styles"] + ([(p["bold"], p["italic"])] if more else [])
                 colors += p["colors"] + ([p["color"]] if more else [])
                 decos += p["decos"] + ([(False, False)] if more else [])
@@ -2156,6 +2173,18 @@ class _Importer:
                 pos = place(bw / 2 - r_in - widest / 2, dy, right_x=bw - r_in)
             else:
                 pos = place((l_in - r_in) / 2, dy)
+            # a link belongs to the whole Text in Manimble: the one on most of its linked characters
+            linked: dict = {}
+            for ch, u in zip("".join(p["text"] for p in mid), urls):
+                if u and not ch.isspace():
+                    linked[u] = linked.get(u, 0) + 1
+            if linked:
+                url = max(linked, key=linked.get)
+                pos += f".set(manimble_link={url!r})"
+                if len(linked) > 1:
+                    dropped = ", ".join(u for u in linked if u != url)
+                    self.warnings.append(f"slide {ctx['slide_idx']}: a line with several links keeps only {url} "
+                                         f"(dropped {dropped})")
             decorated = any(d[0] or d[1] for d in decos) and abs(angle) < 0.05
             var = None
             if decorated:
@@ -2204,6 +2233,18 @@ class _Importer:
                         out.append(f'self.add(Line(({xa}, {ya}, 0), ({xb}, {ya}, 0), color="{colors[off + i]}", stroke_width={sw}))  # manimble')
                     i = j
                 off += len(ln) + 1
+
+    def link_url(self, hl, ctx: dict) -> str | None:
+        """The web/mail address an a:hlinkClick opens; None for jumps to slides and other actions, which a show in
+        Manimble cannot follow."""
+        if hl is None or (hl.get("action") or "").startswith("ppaction://"):
+            return None
+        rid = hl.get(self.qn("r:id"))
+        try:
+            rel = ctx["slide"].part.rels[rid]
+        except (KeyError, TypeError):
+            return None
+        return rel.target_ref if rel.is_external and rel.target_ref else None
 
     @staticmethod
     def _seg_width(text, styles, start, end, measure):

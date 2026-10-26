@@ -15,6 +15,7 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+from . import find
 from .core import Manimble
 
 _out = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8")
@@ -58,6 +59,8 @@ def main():
         "edit_source": lambda a: need().edit_source(a),
         "undo": lambda a: need().undo(),
         "redo": lambda a: need().redo_(),
+        "undo_mark": lambda a: need().undo_mark(),
+        "undo_merge": lambda a: need().undo_merge(a),
         "sprite": lambda a: need().sprite(a),
         "present": present,
         "animation_preview": lambda a: need().animation_preview(a),
@@ -77,6 +80,8 @@ def main():
         "export_python": lambda a: need().export_python(a),
         "export_movie": lambda a: need().export_movie(a),
         "darkmode": lambda a: need().dark_mode(a),
+        "find": lambda a: find.find(need(), a),
+        "replace": lambda a: find.replace(need(), a),
     }
     def import_job(a):
         from . import importer
@@ -85,7 +90,11 @@ def main():
             def prog(i, n, what):
                 send({"event": "import", "phase": "building", "done": i, "total": n, "scene": what})
             try:
-                r = importer.import_presentation(a["src"], a["dest"], prog)
+                if a["src"].lower().endswith((".tex", ".ltx")):
+                    from .beamer_import import import_beamer
+                    r = import_beamer(a["src"], a["dest"], prog)
+                else:
+                    r = importer.import_presentation(a["src"], a["dest"], prog)
             except Exception as exc:                          # noqa: BLE001
                 r = {"ok": False, "error": str(exc)}
             send({"event": "import", "phase": "done" if r.get("ok") else "error", **{k: v for k, v in r.items() if k != "ok"}})

@@ -128,6 +128,18 @@ class Src:
             if b == 10:
                 self.line_starts.append(i + 1)
         self._calls = None
+        self._literals = None
+
+    def literals(self, value: str) -> list:
+        """The string constants equal to `value` (docstrings and other bare expression statements excluded),
+        from an index built once per parse: the planner asks for one literal after another."""
+        if self._literals is None:
+            idx: dict = {}
+            for n in ast.walk(self.tree):
+                if isinstance(n, ast.Constant) and isinstance(n.value, str) and not isinstance(self.parent.get(n), ast.Expr):
+                    idx.setdefault(n.value, []).append(n)
+            self._literals = idx
+        return self._literals.get(value, [])
 
     def off(self, line: int, col: int) -> int:
         return self.line_starts[line - 1] + col
@@ -289,17 +301,14 @@ class Project:
     def find_literals(self, value, scope_rel=None):
         """String constants equal to value (docstrings excluded)."""
         hits = []
+        if not isinstance(value, str):
+            return hits
         for rel in self.py_files():
             try:
                 s = self.src(rel)
             except SyntaxError:
                 continue
-            for node in ast.walk(s.tree):
-                if isinstance(node, ast.Constant) and node.value == value and isinstance(node.value, str):
-                    p = s.parent.get(node)
-                    if isinstance(p, ast.Expr):
-                        continue
-                    hits.append((s, node))
+            hits.extend((s, node) for node in s.literals(value))
         return hits
 
 
@@ -645,6 +654,74 @@ class Planner:
             attempts.append(("appended .put_start_and_end_on() after the positioning", [self._append_chain(last["frames"], text)]))
         attempts.append(("appended .put_start_and_end_on() where the line is created", [self._append_chain(obj["frames"], text)]))
         return attempts
+
+    # where an end attached to an object sits on it, as the canvas names it -> the call that reads that point
+    ANCHOR_CALLS = {"UL": "get_corner(UL)", "UP": "get_top()", "UR": "get_corner(UR)", "LEFT": "get_left()",
+                    "ORIGIN": "get_center()", "RIGHT": "get_right()", "DL": "get_corner(DL)", "DOWN": "get_bottom()",
+                    "DR": "get_corner(DR)"}
+    LINE_CALLS = ("Line", "Arrow", "DoubleArrow", "DashedLine")
+    ROUND = ("Circle", "Ellipse", "Dot")                 # their corner anchors sit on the curve, at 45° (the canvas agrees)
+    ROUND_CORNERS = {"UR": "PI / 4", "UL": "3 * PI / 4", "DL": "5 * PI / 4", "DR": "7 * PI / 4"}
+
+    def anchor_point(self, obj: dict, at: str, rel: str, fn_line: int, before: int, named: dict):
+        """`var.get_corner(UR)` (and the edits naming the object, if it had no name) for a line end attached to
+        `obj` at `at`, read by a statement at line `before` of the function starting at `fn_line` in `rel`. The
+        object must be assigned in that function ahead of the statement and outside a loop; None otherwise.
+        `named` (id(obj) -> var) keeps a second end on the same object from naming it twice."""
+        call = self.ANCHOR_CALLS.get(at)
+        if call is None or obj.get("kind") == "line":
+            return None
+        try:
+            src, _, top, stmt = self._creation(obj)
+        except EditError:
+            return None
+        fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if (src.rel != rel or fdef is None or fdef.lineno != fn_line or stmt.end_lineno >= before
+                or src.enclosing(stmt, (ast.For, ast.AsyncFor, ast.While)) is not None):
+            return None
+        key = id(obj)
+        if obj.get("value") in self.ROUND and at in self.ROUND_CORNERS:   # on the curve, not the bounding box
+            call = f"point_at_angle({self.ROUND_CORNERS[at]})"
+        if key in named:
+            return f"{named[key]}.{call}", []
+        try:
+            var, edits = self._ensure_var(obj, src, top, stmt)
+        except EditError:
+            return None
+        named[key] = var
+        return f"{var}.{call}", edits
+
+    def line_end_site(self, obj: dict):
+        """(src, call, stmt) of the call whose first two arguments place a line's ends: its constructor
+        (`Arrow(a, b, ...)`) when nothing repositions it afterwards, or the `put_start_and_end_on(a, b)` that
+        does last. None when the ends are set some other way."""
+        try:
+            src, call, _, stmt = self._creation(obj)
+        except EditError:
+            return None
+        own = [e for e in obj["events"] if e["own"] and e["method"] in
+               ("shift", "move_to", "next_to", "to_edge", "to_corner", "align_to", "scale", "set", "set_x", "set_y",
+                "put_start_and_end_on", "set_width", "set_height", "rotate")]
+        if own:
+            last = own[-1]
+            fr = last["frames"][-1]
+            if last["method"] != "put_start_and_end_on" or fr["file"] != src.rel:
+                return None
+            call = src.find_call(fr["pos"])
+            if call is None or not isinstance(call.func, ast.Attribute) or call.func.attr != "put_start_and_end_on":
+                return None
+            stmt = call
+            while stmt is not None and not isinstance(stmt, ast.stmt):
+                stmt = src.parent.get(stmt)
+        elif _func_name(call) not in self.LINE_CALLS:
+            return None
+        if stmt is None or len(call.args) < 2 or any(isinstance(a, ast.Starred) for a in call.args[:2]):
+            return None
+        return src, call, stmt
+
+    def plan_line_ends(self, src: Src, call, ends: list) -> list[Edit]:
+        """New expressions for the first two arguments of `call` (see `line_end_site`); None keeps one as written."""
+        return [Edit(src.rel, *src.span(call.args[i]), e) for i, e in enumerate(ends) if e is not None]
 
     # ----------------------------------------------------------- moving
     def plan_move(self, obj: dict, dx: float, dy: float) -> list[tuple[str, list[Edit]]]:
@@ -992,6 +1069,9 @@ class Planner:
             else:
                 edits = self._cut_node(src, top)
                 if edits is None:
+                    if src.in_loop(top):
+                        raise EditError("this element is made in a loop together with others like it; "
+                                        "remove it in the source instead")
                     raise EditError("this element is part of a larger expression; remove it in the source instead")
             return self._keep_block(src, body, edits)
 
@@ -1171,9 +1251,10 @@ class Planner:
                 stmts.append(node)
         return any(isinstance(n, ast.Name) and n.id in names for s in stmts for n in ast.walk(s))
 
-    def _ensure_var(self, obj: dict, src: Src, top, stmt) -> tuple[str, list[Edit]]:
+    def _ensure_var(self, obj: dict, src: Src, top, stmt, taken: set | None = None) -> tuple[str, list[Edit]]:
         """A variable holding the object. A Manimble insert (`self.add(X)  # manimble`) is split into
-        `name = X  # manimble` + `self.add(name)  # manimble`; other code must name the object itself."""
+        `name = X  # manimble` + `self.add(name)  # manimble`; other code must name the object itself.
+        `taken`: names other edits of the same plan already give out."""
         var = _assigned_name(stmt, top)
         if var:
             return var, []
@@ -1183,6 +1264,7 @@ class Planner:
                 and len(stmt.value.args) == 1 and stmt.value.args[0] is top and "# manimble" in text and text.count("\n") <= 1):
             fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
             used = {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name)} if fdef is not None else set()
+            used |= taken or set()
             base = {"text": "text", "tex": "formula", "image": "image", "line": "line", "table": "table"}.get(obj["kind"], "shape")
             i = 1
             while f"{base}{i}" in used:
@@ -1190,7 +1272,11 @@ class Planner:
             name = f"{base}{i}"
             indent = " " * stmt.col_offset
             sa, sb = src.span(stmt)
-            return name, [Edit(src.rel, sa, sb, f"{name} = {src.text(top)}  # manimble\n{indent}self.add({name})")]
+            # the line's comment (`# manimble`, or a text frame's `# manimble box ...`) stays with the creation
+            eol = src.data.find(b"\n", sb)
+            eol = len(src.data) if eol < 0 else eol
+            comment = src.data[sb:eol].decode("utf-8").rstrip()
+            return name, [Edit(src.rel, sa, eol, f"{name} = {src.text(top)}{comment}\n{indent}self.add({name})  # manimble")]
         raise EditError("give this element a name in the source first (for example `t = Text(...)`), "
                         "then it can be underlined or struck through")
 
@@ -1273,6 +1359,135 @@ class Planner:
             b = src.span(existing)[1]
             return [Edit(src.rel, a, b, f"({args})")]
         return [self._append_chain(obj["frames"], f".add_background_rectangle({args})")]
+
+    def _link_call(self, src: Src, call):
+        """The `.set(manimble_link=...)` in the object's method chain, if any."""
+        return next((c for c in self._chain(src, call) if isinstance(c.func, ast.Attribute) and c.func.attr == "set"
+                     and any(k.arg == "manimble_link" for k in c.keywords)), None)
+
+    def link_of(self, obj: dict) -> str | None:
+        """The hyperlink a text object opens when clicked in a show."""
+        try:
+            src, call, top, stmt = self._creation(obj)
+        except EditError:
+            return None
+        c = self._link_call(src, call)
+        kw = next((k.value for k in c.keywords if k.arg == "manimble_link"), None) if c is not None else None
+        return kw.value if isinstance(kw, ast.Constant) and isinstance(kw.value, str) and kw.value else None
+
+    def plan_link(self, obj: dict, url: str | None) -> list[Edit]:
+        """Hyperlink: the URL rides on the text object (`.set(manimble_link="...")`), so it moves with it; the show
+        makes the text's box clickable."""
+        if obj["kind"] not in ("text", "tex"):
+            raise EditError("only text and formulas can have a link")
+        src, call, top, stmt = self._creation(obj)
+        existing = self._link_call(src, call)
+        if not url:
+            return [self._remove_chain_call(src, existing)] if existing is not None else []
+        if existing is not None:
+            return [Edit(src.rel, src.span(existing.func)[1], src.span(existing)[1], f"(manimble_link={py_str(url)})")]
+        return [self._append_chain(obj["frames"], f".set(manimble_link={py_str(url)})")]
+
+    def z_index_of(self, obj: dict) -> float | None:
+        """The literal of the `.set_z_index(...)` in the object's own chain, if it has one."""
+        try:
+            src, call, _, _ = self._creation(obj)
+        except EditError:
+            return None
+        c = self._chain_call(src, call, "set_z_index")
+        try:
+            return float(ast.literal_eval(c.args[0])) if c is not None and c.args else None
+        except (ValueError, TypeError):
+            return None
+
+    def plan_z(self, obj: dict, z: float) -> list[Edit]:
+        """Stacking order: `.set_z_index(z)` on the object's creation chain (manim draws by z_index, then by the
+        order things were added)."""
+        src, call, top, stmt = self._creation(obj)
+        if src.in_loop(stmt):
+            raise EditError("this element is made in a loop; its stacking order is set for all of them in the code")
+        lit = str(int(z)) if float(z).is_integer() else fmt(z)
+        existing = self._chain_call(src, call, "set_z_index")
+        if existing is not None:
+            return [Edit(src.rel, src.span(existing.func)[1], src.span(existing)[1], f"({lit})")]
+        return [self._append_chain(obj["frames"], f".set_z_index({lit})")]
+
+    def _group_stmt(self, group: dict):
+        """(src, stmt) of a `g = Group(...)  # manimble group` line, from the group's frames."""
+        fr = group["frames"][0]
+        src = self.p.src(fr["file"])
+        call = src.find_call(fr["pos"])
+        stmt = call
+        while stmt is not None and not isinstance(stmt, ast.stmt):
+            stmt = src.parent.get(stmt)
+        if stmt is None:
+            raise EditError("group statement not found")
+        return src, stmt
+
+    def plan_ungroup(self, groups: list[dict]) -> list[Edit]:
+        """Remove the group lines; a group the code goes on to use only loses its `# manimble group` mark."""
+        edits, seen = [], set()
+        for g in groups:
+            src, stmt = self._group_stmt(g)
+            if (src.rel, stmt.lineno) in seen:
+                continue
+            seen.add((src.rel, stmt.lineno))
+            a, b = _stmt_lines(src, stmt)
+            name = _assigned_name(stmt, stmt.value) if isinstance(stmt, ast.Assign) else None
+            fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            used = name is None or any(isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load)
+                                       for n in ast.walk(fdef if fdef is not None else src.tree))
+            if not used:
+                edits.append(Edit(src.rel, a, b, ""))
+                continue
+            line = src.data[a:b].decode("utf-8")
+            i = line.find("# manimble group")
+            j = len(line[:i].rstrip())
+            edits.append(Edit(src.rel, a + len(line[:j].encode("utf-8")), a + len(line[:i + len("# manimble group")].encode("utf-8")), ""))
+        return edits
+
+    def plan_group(self, objs: list[dict], old_groups: list[dict]) -> list[Edit]:
+        """Group: `group1 = Group(a, b, ...)  # manimble group` after the last of the members is made. The
+        line draws nothing; the editor selects, moves and orders the members together. Members already in
+        groups are regrouped (their old group lines go)."""
+        edits = self.plan_ungroup(old_groups)
+        names, where, fdef0 = [], [], None
+        for obj in objs:
+            src, call, top, stmt = self._creation(obj)
+            fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            if fdef is None or (fdef0 is not None and (fdef is not fdef0[1] or src.rel != fdef0[0].rel)):
+                raise EditError("only elements made in the same slide's code can be grouped")
+            fdef0 = (src, fdef)
+            if src.in_loop(stmt):
+                raise EditError("an element made in a loop cannot be grouped on its own")
+            try:
+                var, pre = self._ensure_var(obj, src, top, stmt, taken=set(names))
+            except EditError:
+                raise EditError("give each element a name in the source first (for example `t = Text(...)`), "
+                                "then they can be grouped") from None
+            if not pre and sum(1 for n in ast.walk(fdef) if isinstance(n, ast.Name) and n.id == var
+                               and isinstance(n.ctx, ast.Store)) > 1:
+                raise EditError(f"`{var}` names more than one element in the code; give each its own name to group them")
+            edits += pre
+            names.append(var)
+            anc = stmt                                   # the statement directly in the function's body
+            while src.parent.get(anc) is not fdef:
+                anc = src.parent.get(anc)
+            where.append(anc)
+        src, fdef = fdef0
+        used = {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name)}
+        i = 1
+        while f"group{i}" in used:
+            i += 1
+        last = max(where, key=lambda s: s.end_lineno)
+        k = fdef.body.index(last)            # past the `self.add(member)` lines that follow
+        while k + 1 < len(fdef.body) and isinstance(nx := fdef.body[k + 1], ast.Expr) and isinstance(nx.value, ast.Call) \
+                and ast.unparse(nx.value.func) == "self.add" and nx.value.args \
+                and all(isinstance(x, ast.Name) and x.id in names for x in nx.value.args):
+            k += 1
+        last = fdef.body[k]
+        edits.append(_after_stmt(src, last, f"group{i} = Group({', '.join(dict.fromkeys(names))})  # manimble group"))
+        return edits
 
     def _text_call(self, obj: dict, what: str):
         """The Text(...) / Paragraph(...) call itself; it must be written in the slide, not in a helper."""
@@ -1430,6 +1645,7 @@ class Planner:
         if var:
             for kind in ("underline", "strike"):
                 info[kind] = self._decoration_stmt(src, stmt, var, kind) is not None
+        info["link"] = self.link_of(obj)
         if self._columns_group(src, call) is not None:
             info["columns"] = len(self._columns_group(src, call)[0].args)
         if obj["kind"] == "text":

@@ -375,6 +375,8 @@ final class FeedbackListView: NSView {
     let store: FeedbackStore
     var slideLabel: (String) -> String = { $0 }
     var onGo: ((FeedbackNote) -> Void)?
+    /// "Done": the host puts the inspector back.
+    var onClose: (() -> Void)?
     private let counter = NSTextField(labelWithString: "")
     private let column = NSStackView()
     private let scroll = NSScrollView()
@@ -384,6 +386,22 @@ final class FeedbackListView: NSView {
     init(store: FeedbackStore) {
         self.store = store
         super.init(frame: .zero)
+        wantsLayer = true
+        Theme.layerColors(self) { $0.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
+        // title row, like the inspector's header: symbol, "Feedback", Done
+        let img = NSImageView(image: NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil) ?? NSImage())
+        img.symbolConfiguration = .init(pointSize: 15, weight: .medium); img.contentTintColor = Theme.accent
+        let title = NSTextField(labelWithString: "Feedback"); title.font = Theme.font(14, .semibold)
+        let sub = NSTextField(labelWithString: "red notes from Presenter View"); sub.font = Theme.mono(10); sub.textColor = .tertiaryLabelColor
+        let col = NSStackView(views: [title, sub]); col.orientation = .vertical; col.alignment = .leading; col.spacing = 0
+        col.setContentHuggingPriority(.init(1), for: .horizontal)
+        let done = NSButton(title: "Done", target: self, action: #selector(close))
+        done.bezelStyle = .texturedRounded; done.controlSize = .small; done.font = Theme.font(11)
+        done.toolTip = "Back to the edit panel"
+        let titleRow = NSStackView(views: [img, col, done])
+        titleRow.orientation = .horizontal; titleRow.alignment = .centerY; titleRow.spacing = 9
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        // controls: previous / counter / next, Delete All
         let prev = NSButton(image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Previous")!, target: self, action: #selector(previous))
         let next = NSButton(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Next")!, target: self, action: #selector(nextOne))
         for b in [prev, next] { b.bezelStyle = .texturedRounded; b.translatesAutoresizingMaskIntoConstraints = false }
@@ -395,15 +413,20 @@ final class FeedbackListView: NSView {
         let head = NSStackView(views: [prev, counter, next, clear])
         head.orientation = .horizontal; head.alignment = .centerY; head.spacing = 6
         head.translatesAutoresizingMaskIntoConstraints = false
+        let rule = NSBox(); rule.boxType = .separator; rule.translatesAutoresizingMaskIntoConstraints = false
         column.orientation = .vertical; column.alignment = .leading; column.spacing = 2
         column.translatesAutoresizingMaskIntoConstraints = false
         let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(column)
         scroll.documentView = doc; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(head); addSubview(scroll)
+        addSubview(titleRow); addSubview(rule); addSubview(head); addSubview(scroll)
         NSLayoutConstraint.activate([
-            head.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            titleRow.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            titleRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14), titleRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            rule.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 10),
+            rule.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14), rule.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            head.topAnchor.constraint(equalTo: rule.bottomAnchor, constant: 10),
             head.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), head.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             scroll.topAnchor.constraint(equalTo: head.bottomAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor), scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -411,10 +434,11 @@ final class FeedbackListView: NSView {
             column.leadingAnchor.constraint(equalTo: doc.leadingAnchor), column.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
             column.topAnchor.constraint(equalTo: doc.topAnchor), column.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
             doc.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            widthAnchor.constraint(equalToConstant: 360), heightAnchor.constraint(equalToConstant: 380),
         ])
         reload()
     }
+
+    @objc private func close() { onClose?() }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Notes in slide order, as listed.

@@ -268,9 +268,17 @@ extension MainController {
     func canvasMenu() -> NSMenu? {
         guard sceneName != nil, player == nil else { return nil }
         let m = NSMenu()
-        if objInfo != nil {
+        if let o = objInfo {
+            if o.kind == "text" || o.kind == "tex" {
+                let link = NSMenuItem(title: o.format?.link == nil ? "Add Hyperlink…" : "Edit Hyperlink…",
+                                      action: #selector(hyperlinkPressed), keyEquivalent: "")
+                link.target = self
+                if let u = o.format?.link { link.toolTip = u }
+                m.addItem(link)
+            }
             if let item = bioCartoonMenuItem() { m.addItem(item) }
-            return m.items.isEmpty ? nil : m
+            addArrangeItems(to: m)
+            return m
         }
         let bg = NSMenuItem(title: "Format Background…", action: #selector(formatBackground), keyEquivalent: "")
         bg.target = self

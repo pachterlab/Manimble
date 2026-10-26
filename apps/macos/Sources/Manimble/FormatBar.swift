@@ -34,7 +34,7 @@ final class FormatBar: NSView {
     let snap = FormatBar.button("square.on.square.dashed", "⌗", "Snap to other objects, guides and the slide while dragging (⌥⌘S; hold ⌥ to drag freely)", toggle: true)
     let guideV = FormatBar.button("rectangle.split.2x1", "│", "Add a vertical guide (drag it into place, drag it off the slide to remove)")
     let guideH = FormatBar.button("rectangle.split.1x2", "─", "Add a horizontal guide (drag it into place, drag it off the slide to remove)")
-    /// Far right: the feedback notes typed in Presenter View's Feedback Mode, listed by slide (greyed out until
+    /// Right end, before the search: the feedback notes typed in Presenter View's Feedback Mode, listed by slide (greyed out until
     /// there are any).
     let feedback: NSButton = {
         let b = NSButton(title: "View Feedback", target: nil, action: nil)
@@ -42,12 +42,15 @@ final class FormatBar: NSView {
         b.imagePosition = .imageLeading
         b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         b.bezelStyle = .texturedRounded
+        b.setButtonType(.pushOnPushOff)        // lit while the list is up in the top-right panel
         b.font = Theme.font(12)
-        b.toolTip = "Feedback notes typed in Presenter View (Feedback Mode): walk through them and delete them"
+        b.toolTip = "Feedback notes typed in Presenter View (Feedback Mode), listed in the top-right panel: walk through them and delete them"
         b.isEnabled = false
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }()
+    /// Right of View Feedback: search (and replace) the text of every slide.
+    let find = FindBar()
     var alignButtons: [(String, NSButton)] {
         [("left", alignLeft), ("center", alignCenter), ("right", alignRight), ("justify", alignJustify)]
     }
@@ -129,13 +132,16 @@ final class FormatBar: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         addSubview(feedback)
+        addSubview(find)
         let line = hairline(); line.translatesAutoresizingMaskIntoConstraints = false
         addSubview(line)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(lessThanOrEqualTo: feedback.leadingAnchor, constant: -8),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            feedback.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            feedback.trailingAnchor.constraint(equalTo: find.leadingAnchor, constant: -8),
             feedback.centerYAnchor.constraint(equalTo: centerYAnchor),
+            find.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            find.centerYAnchor.constraint(equalTo: centerYAnchor),
             heightAnchor.constraint(equalToConstant: 36),
             line.leadingAnchor.constraint(equalTo: leadingAnchor), line.trailingAnchor.constraint(equalTo: trailingAnchor),
             line.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -292,6 +298,7 @@ extension MainController {
         bar.guideV.target = self; bar.guideV.action = #selector(addVerticalGuide)
         bar.guideH.target = self; bar.guideH.action = #selector(addHorizontalGuide)
         bar.feedback.target = self; bar.feedback.action = #selector(viewFeedback(_:))
+        wireFindBar(bar.find)
         return bar
     }
 
@@ -594,9 +601,10 @@ extension MainController {
         }
     }
 
-    /// The canvas finished a rubber-band drag: insert the element with that geometry.
-    func drawFinished(_ kind: String, _ sx: Double, _ sy: Double, _ ex: Double, _ ey: Double) {
-        insert(kind: kind, extra: ["sx": sx, "sy": sy, "ex": ex, "ey": ey])
+    /// The canvas finished a rubber-band drag: insert the element with that geometry (a line's ends dropped on
+    /// objects attached to them, `anchors`).
+    func drawFinished(_ kind: String, _ sx: Double, _ sy: Double, _ ex: Double, _ ey: Double, anchors: [String: Any] = [:]) {
+        insert(kind: kind, extra: anchors.merging(["sx": sx, "sy": sy, "ex": ex, "ey": ey]) { $1 })
     }
 
     // MARK: headless check (MANIMBLE_TEST_FORMAT=deck)

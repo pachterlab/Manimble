@@ -80,11 +80,82 @@ func hairline() -> NSView {
     return v
 }
 
-/// Translucent rounded "pill" used for toasts and the busy indicator.
+/// A thin accent progress bar. `set` fills it to a known fraction; `run` drives it on a time estimate: it reaches
+/// 90% when the estimated time is up, then creeps on toward 99% while the work overruns. It never moves backwards.
+final class ProgressBar: NSView {
+    private let fill = CALayer()
+    private(set) var running = false
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true; layer?.cornerRadius = 1.5; layer?.masksToBounds = true
+        fill.cornerRadius = 1.5; fill.anchorPoint = CGPoint(x: 0, y: 0.5)
+        layer?.addSublayer(fill)
+        Theme.layerColors(self) { v in
+            v.layer?.backgroundColor = Theme.ink(0.14).cgColor
+            v.fill.backgroundColor = Theme.accent.cgColor
+        }
+        heightAnchor.constraint(equalToConstant: 3).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// The fraction on screen right now (mid-animation included).
+    var current: Double {
+        guard bounds.width > 0 else { return 0 }
+        return Double((fill.presentation() ?? fill).bounds.width / bounds.width)
+    }
+
+    override func layout() {
+        super.layout()
+        fill.position = CGPoint(x: 0, y: bounds.height / 2)
+        if !running { place(current, animated: false) }
+    }
+
+    func reset() { running = false; fill.removeAllAnimations(); place(0, animated: false) }
+
+    /// Fill to `fraction` (0…1) with a short animation.
+    func set(_ fraction: Double) { running = false; place(min(max(fraction, 0), 1), animated: true) }
+
+    /// Estimate mode: 90% in `remaining` seconds (from wherever the bar is), then ease toward 99% over `tail` seconds.
+    func run(remaining: Double, tail: Double = 4) {
+        let w = bounds.width, h = bounds.height
+        guard w > 0 else { return }
+        running = true
+        let from = current
+        let ahead = max(remaining, 0.05), tailTime = max(tail, 1)
+        let a = CAKeyframeAnimation(keyPath: "bounds.size.width")
+        if from < 0.9 {
+            a.values = [from * w, 0.9 * w, 0.99 * w]
+            a.keyTimes = [0, NSNumber(value: ahead / (ahead + tailTime)), 1]
+            a.timingFunctions = [CAMediaTimingFunction(name: .linear), CAMediaTimingFunction(name: .easeOut)]
+            a.duration = ahead + tailTime
+        } else {
+            a.values = [from * w, 0.99 * w]
+            a.timingFunctions = [CAMediaTimingFunction(name: .easeOut)]
+            a.duration = tailTime
+        }
+        a.fillMode = .forwards; a.isRemovedOnCompletion = false
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        fill.bounds = CGRect(x: 0, y: 0, width: 0.99 * w, height: h)
+        fill.removeAnimation(forKey: "run")
+        CATransaction.commit()
+        fill.add(a, forKey: "run")
+    }
+
+    private func place(_ fraction: Double, animated: Bool) {
+        fill.removeAnimation(forKey: "run")
+        CATransaction.begin()
+        if animated { CATransaction.setAnimationDuration(0.2) } else { CATransaction.setDisableActions(true) }
+        fill.bounds = CGRect(x: 0, y: 0, width: bounds.width * CGFloat(fraction), height: bounds.height)
+        CATransaction.commit()
+    }
+}
+
+/// Translucent rounded "pill" used for toasts and the busy indicator (text with a progress bar beneath).
 final class Pill: NSVisualEffectView {
     let label = NSTextField(labelWithString: "")
     let icon = NSImageView()
-    private let spinner = NSProgressIndicator()
+    let bar = ProgressBar()
 
     init() {
         super.init(frame: .zero)
@@ -93,32 +164,47 @@ final class Pill: NSVisualEffectView {
         label.font = Theme.font(12, .medium); label.textColor = .labelColor
         label.maximumNumberOfLines = 3; label.lineBreakMode = .byWordWrapping
         icon.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
-        spinner.style = .spinning; spinner.controlSize = .small; spinner.isHidden = true
-        let row = NSStackView(views: [icon, spinner, label]); row.spacing = 7; row.alignment = .centerY
-        row.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 14)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        let row = NSStackView(views: [icon, label]); row.spacing = 7; row.alignment = .centerY
+        bar.isHidden = true
+        let column = NSStackView(views: [row, bar]); column.orientation = .vertical; column.alignment = .leading; column.spacing = 6
+        column.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 14)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(column)
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
+            column.leadingAnchor.constraint(equalTo: leadingAnchor), column.trailingAnchor.constraint(equalTo: trailingAnchor),
+            column.topAnchor.constraint(equalTo: topAnchor), column.bottomAnchor.constraint(equalTo: bottomAnchor),
+            bar.leadingAnchor.constraint(equalTo: row.leadingAnchor), bar.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            bar.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
         ])
         isHidden = true; alphaValue = 0
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ text: String, symbol: String?, tint: NSColor?, spinning: Bool = false) {
+    /// `spinning`: the pill reports work in progress and shows the bar. `progress` 0…1 fills it by count; otherwise
+    /// `remaining` seconds drive it as a time estimate; with neither, a running estimate keeps going or a default
+    /// (`defaultEstimate` seconds) starts.
+    func show(_ text: String, symbol: String?, tint: NSColor?, spinning: Bool = false, progress: Double? = nil,
+              remaining: Double? = nil) {
         label.stringValue = text
         icon.isHidden = symbol == nil || spinning
         if let s = symbol { icon.image = NSImage(systemSymbolName: s, accessibilityDescription: nil); icon.contentTintColor = tint }
-        spinner.isHidden = !spinning
-        if spinning { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        let wasHidden = isHidden || alphaValue == 0
+        bar.isHidden = !spinning
+        if spinning {
+            if wasHidden { bar.reset() }
+            layoutSubtreeIfNeeded()                          // the bar needs its width before it can animate
+            if let p = progress { bar.set(p) }
+            else if let r = remaining { bar.run(remaining: r) }
+            else if !bar.running { bar.run(remaining: defaultEstimate) }
+        }
         isHidden = false
         NSAnimationContext.runAnimationGroup { $0.duration = 0.18; animator().alphaValue = 1 }
     }
+    var defaultEstimate = 3.0
 
     func hide() {
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; animator().alphaValue = 0 }, completionHandler: { [weak self] in
-            if self?.alphaValue == 0 { self?.isHidden = true }
+            if self?.alphaValue == 0 { self?.isHidden = true; self?.bar.reset() }
         })
     }
 }

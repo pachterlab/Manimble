@@ -17,11 +17,17 @@ final class PlayerWindow: NSWindow {
     var onKey: ((NSEvent) -> Void)?
     var onClick: ((Bool) -> Void)?          // true = forward
     var onMouse: ((NSEvent, Bool) -> Void)? // takes over from onClick when the position matters (true = left button)
+    /// Whether the pointer is over a hyperlink, which shows the pointing hand.
+    var overLink: ((NSEvent) -> Bool)? { didSet { acceptsMouseMovedEvents = overLink != nil } }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func keyDown(with event: NSEvent) { onKey?(event) }
     override func mouseDown(with event: NSEvent) { if let m = onMouse { m(event, true) } else { onClick?(true) } }
     override func rightMouseDown(with event: NSEvent) { if let m = onMouse { m(event, false) } else { onClick?(false) } }
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        if let f = overLink { (f(event) ? NSCursor.pointingHand : NSCursor.arrow).set() }
+    }
 
     /// Shows the window as the whole of `screen`. `ownSpace`: as a native full-screen window with a Space of its
     /// own, so the display switches to the show whatever it was showing (another app's full-screen Space included),
@@ -95,14 +101,17 @@ extension NSWindow {
 }
 
 final class SlidePlayer: NSObject {
-    struct Page { var slide: Int; var build: Int; var builds: Int; var path: String }
+    struct Page { var slide: Int; var build: Int; var builds: Int; var path: String; var links: [PresentDeck.LinkRegion] = [] }
 
     let window: PlayerWindow
     private let content = CALayer()
     private let progress = CALayer()
     private let counter = CATextLayer()
+    private let placeholder = CATextLayer()      // over a page whose picture is still rendering (an empty path)
     private(set) var pages: [Page] = []
     private(set) var index = 0
+    /// Bumped whenever `update` replaces the pages, so the presenter view rebuilds its sidebar.
+    private(set) var reloadToken = 0
     /// Speaker notes per slide, and each slide's notes per build, for Presenter View.
     var notes: [String] = []
     var buildNotes: [[String]] = []
@@ -141,17 +150,43 @@ final class SlidePlayer: NSObject {
         counter.frame = CGRect(x: root.bounds.width - 140, y: 14, width: 124, height: 18)
         counter.autoresizingMask = [.layerMinXMargin]
         root.layer?.addSublayer(counter)
+        placeholder.fontSize = 26; placeholder.foregroundColor = NSColor(white: 1, alpha: 0.55).cgColor
+        placeholder.alignmentMode = .center; placeholder.contentsScale = screen.backingScaleFactor
+        placeholder.frame = CGRect(x: 0, y: root.bounds.midY - 20, width: root.bounds.width, height: 40)
+        placeholder.autoresizingMask = [.layerWidthSizable, .layerMinYMargin, .layerMaxYMargin]
+        placeholder.isHidden = true
+        root.layer?.addSublayer(placeholder)
         window.onKey = { [weak self] e in self?.key(e) }
-        window.onClick = { [weak self] forward in forward ? self?.next() : self?.previous() }
+        window.onMouse = { [weak self] e, primary in
+            guard let self else { return }
+            if !primary { self.previous(); return }
+            if let u = self.link(inWindow: e.locationInWindow) { NSWorkspace.shared.open(u) } else { self.next() }
+        }
+        window.overLink = { [weak self] e in self?.link(inWindow: e.locationInWindow) != nil }
+    }
+
+    /// The hyperlink under a point of the show window, if the page on screen has one there.
+    private func link(inWindow p: NSPoint) -> URL? {
+        guard pages.indices.contains(index), !blackedOut, !pages[index].links.isEmpty, let img = image(pages[index].path) else { return nil }
+        let b = content.frame
+        let aspect = CGFloat(img.width) / CGFloat(max(1, img.height))
+        let w = min(b.width, b.height * aspect), h = w / aspect
+        let r = CGRect(x: b.midX - w / 2, y: b.midY - h / 2, width: w, height: h)
+        return link(at: CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height))
     }
 
     /// slides: for each slide the PNG of every build. `screen`: where the audience display goes; `visible: false`
     /// keeps the pages and navigation without showing a window.
     /// `ownSpace`: take the display with a full-screen Space of its own (see `PlayerWindow.present`).
-    func play(slides: [[String]], startSlide: Int, screen: NSScreen? = nil, visible: Bool = true, ownSpace: Bool = false) {
+    /// `links`: each slide's clickable regions per build.
+    func play(slides: [[String]], links: [[[PresentDeck.LinkRegion]]] = [], startSlide: Int, screen: NSScreen? = nil,
+              visible: Bool = true, ownSpace: Bool = false) {
         pages = []
         for (si, builds) in slides.enumerated() {
-            for (bi, p) in builds.enumerated() { pages.append(Page(slide: si, build: bi, builds: builds.count, path: p)) }
+            let ls = links.indices.contains(si) ? links[si] : []
+            for (bi, p) in builds.enumerated() {
+                pages.append(Page(slide: si, build: bi, builds: builds.count, path: p, links: ls.indices.contains(bi) ? ls[bi] : []))
+            }
         }
         guard !pages.isEmpty else { return }
         index = pages.firstIndex(where: { $0.slide >= startSlide }) ?? 0
@@ -167,7 +202,33 @@ final class SlidePlayer: NSObject {
     private var shown = true
     var slideCount: Int { Set(pages.map { $0.slide }).count }
 
+    /// The pages again, once slides that were still rendering when the show started have their pictures (same
+    /// scenes in the same order, minus any that failed). The show stays on the slide and build it is showing.
+    func update(slides: [[String]], links: [[[PresentDeck.LinkRegion]]], scenes: [String], notes: [String], buildNotes: [[String]]) {
+        let cur = pages.indices.contains(index) ? pages[index] : nil
+        let curScene = cur.flatMap { self.scenes.indices.contains($0.slide) ? self.scenes[$0.slide] : nil }
+        var fresh: [Page] = []
+        for (si, builds) in slides.enumerated() {
+            let ls = links.indices.contains(si) ? links[si] : []
+            for (bi, p) in builds.enumerated() {
+                fresh.append(Page(slide: si, build: bi, builds: builds.count, path: p, links: ls.indices.contains(bi) ? ls[bi] : []))
+            }
+        }
+        guard !fresh.isEmpty else { return }
+        pages = fresh
+        self.scenes = scenes; self.notes = notes; self.buildNotes = buildNotes
+        reloadToken += 1
+        if let cur {
+            let si = scenes.firstIndex(of: curScene ?? "") ?? min(cur.slide, slides.count - 1)
+            index = pages.firstIndex { $0.slide == si && $0.build == cur.build } ?? pages.firstIndex { $0.slide >= si } ?? pages.count - 1
+        } else {
+            index = 0
+        }
+        show(animated: cur?.path.isEmpty ?? false)
+    }
+
     private func image(_ path: String) -> CGImage? {
+        if path.isEmpty { return nil }
         if let c = cache[path] { return c }
         guard let img = DarkMode.cgImage(path: path) else { return nil }
         if cache.count > 12 { cache.removeAll() }
@@ -183,6 +244,8 @@ final class SlidePlayer: NSObject {
             content.add(t, forKey: "fade")
         }
         content.contents = blackedOut ? nil : image(page.path)
+        placeholder.string = "Rendering slide \(page.slide + 1)…"
+        placeholder.isHidden = blackedOut || !page.path.isEmpty
         let w = window.contentView?.bounds.width ?? 1
         CATransaction.begin(); CATransaction.setAnimationDuration(0.25)
         progress.frame = CGRect(x: 0, y: 0, width: showProgress ? w * CGFloat(index + 1) / CGFloat(pages.count) : 0, height: 3)
@@ -251,6 +314,9 @@ final class SlidePlayer: NSObject {
 extension SlidePlayer: PresenterSource {
     var pageCount: Int { pages.count }
     var pageIndex: Int { index }
+    func link(at p: CGPoint) -> URL? {
+        pages.indices.contains(index) ? PresentDeck.LinkRegion.url(at: p, in: pages[index].links) : nil
+    }
     var livePlayer: AVPlayer? { nil }
     var playbackState: String? { nil }
     func presenterPage(_ i: Int) -> PresenterPage {

@@ -77,10 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let importMenu = NSMenu(title: "Import")
         importMenu.addItem(item("PowerPoint (.pptx)…", #selector(MainController.importPowerPoint), "", []))
         importMenu.addItem(item("Keynote (.key)…", #selector(MainController.importKeynote), "", []))
+        importMenu.addItem(item("Beamer (.tex)…", #selector(MainController.importBeamer), "", []))
         let importItem = NSMenuItem(title: "Import", action: nil, keyEquivalent: ""); importItem.submenu = importMenu
         let exportMenu = NSMenu(title: "Export To")
         exportMenu.addItem(item("PowerPoint (.pptx)…", #selector(MainController.exportPowerPoint), "", []))
         exportMenu.addItem(item("Keynote (.key)…", #selector(MainController.exportKeynote), "", []))
+        exportMenu.addItem(item("Beamer (.tex)…", #selector(MainController.exportBeamer), "", []))
         exportMenu.addItem(item("PDF…", #selector(MainController.exportPDFPressed), "", []))
         exportMenu.addItem(item("Movie (.mp4, with animations)…", #selector(MainController.exportMovie), "", []))
         exportMenu.addItem(.separator())
@@ -108,6 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Copy", #selector(NSText.copy(_:)), "c"),
             item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
+            .separator(),
+            item("Find…", #selector(MainController.showFind(_:)), "f"),
+            item("Find and Replace…", #selector(MainController.showFindReplace(_:)), "f", [.command, .option]),
+            item("Find Next", #selector(MainController.findNext(_:)), ""),
+            item("Find Previous", #selector(MainController.findPrevious(_:)), ""),
         ])
         let shapes = NSMenu(title: "Shape")
         for (title, kind) in [("Rectangle", "rectangle"), ("Rounded Rectangle", "rounded"), ("Circle", "circle"), ("Ellipse", "ellipse"),
@@ -208,6 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Bigger", #selector(MainController.formatBigger), "=", [.command, .option]),
             item("Smaller", #selector(MainController.formatSmaller), "-", [.command, .option]),
             highlightItem,
+            item("Hyperlink…", #selector(MainController.hyperlinkPressed), "k"),
             item("Clear Formatting", #selector(MainController.clearFormatting), "", []),
             .separator(),
             item("Bulleted List", #selector(MainController.toggleBullets), "8", [.command, .shift]),
@@ -226,6 +234,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .separator(),
             item("Apply Dark Mode to Deck…", #selector(MainController.applyDarkMode), "", []),
             item("Apply Inverted Colors to Deck…", #selector(MainController.applyInvertColors), "", []),
+        ])
+        add("Arrange", MainActor.assumeIsolated { MainController.arrangeItems }.map { item($0.title, $0.action, $0.key, $0.mods) } + [
+            .separator(),
+            item("Group", #selector(MainController.groupObjects), "g"),
+            item("Ungroup", #selector(MainController.ungroupObjects), "g", [.command, .shift]),
         ])
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j", [.command, .option]),

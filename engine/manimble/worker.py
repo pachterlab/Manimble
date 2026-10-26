@@ -29,6 +29,7 @@ import sys
 import traceback
 import types
 import functools
+import time
 import shutil
 
 DECK = os.path.realpath(sys.argv[1])
@@ -50,7 +51,7 @@ import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Camera, ORIGIN  # noqa: E402
-from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor  # noqa: E402
+from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor, Group  # noqa: E402
 from manim import (FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,  # noqa: E402
                    GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform,
                    TransformFromCopy, AnimationGroup, LaggedStart, Transform, MoveToTarget,
@@ -211,6 +212,7 @@ TRACKED: list = []          # tracked mobjects of the current run, oid == index
 # (Attributes on the mobjects themselves would be deep-copied by manim.)
 EVENTS: dict = {}           # id(mob) -> (mob, [event, ...])
 PARENTS: dict = {}          # id(mob) -> (mob, [(parent, seq_joined), ...])
+GROUPS: list = []           # (group, members, frames) of every `Group(...)  # manimble group` of the run
 _pos_cache: dict = {}
 _building = {"on": False}
 
@@ -232,15 +234,33 @@ def frame_pos(f):
     return None
 
 
+_COMPREHENSIONS = {"<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>"}
+
+
 def project_stack(f):
-    """Project (deck) frames, innermost first."""
+    """Project (deck) frames, innermost first.
+
+    Before Python 3.12 a comprehension runs as a function of its own, called from the enclosing code at the
+    comprehension's position, which is not a call site: the comprehension's frame stands in for the enclosing
+    frame (`[SurroundingRectangle(r) for r in rs]` is known by the SurroundingRectangle call)."""
     out = []
+    hidden = None
     while f is not None:
-        fn = f.f_code.co_filename
-        if in_project(fn):
+        code = f.f_code
+        if f is not hidden and in_project(code.co_filename):
             pos = frame_pos(f)
             if pos:
-                out.append({"file": os.path.relpath(fn, DECK), "func": f.f_code.co_name, "pos": pos})
+                out.append({"file": os.path.relpath(code.co_filename, DECK), "func": code.co_name, "pos": pos})
+        if code.co_name in _COMPREHENSIONS:
+            g = f.f_back
+            while g is not None and code not in g.f_code.co_consts:
+                g = g.f_back
+            if g is not None:
+                if out and out[-1]["func"] == code.co_name:
+                    out[-1]["func"] = g.f_code.co_name
+                hidden = g
+                f = g
+                continue
         f = f.f_back
     return out
 
@@ -451,9 +471,41 @@ _track("image", ImageMobject, lambda s, a, k: str(a[0]) if a else str(k.get("fil
 _track("shape", VMobject, lambda s, a, k: "Pen", only=lambda s, line: type(s) is VMobject and "# manimble pen" in line)
 # Tex (plain LaTeX text) is a MathTex subclass in manim and is tracked as such.
 
+_orig_group_init = Group.__init__
+
+
+@functools.wraps(_orig_group_init)
+def _group_init(self, *a, **k):
+    """A group the user made in the editor (`g = Group(a, b)  # manimble group`): its members select together."""
+    _orig_group_init(self, *a, **k)
+    try:
+        caller = sys._getframe(1)
+        if not in_project(caller.f_code.co_filename):
+            return
+        linecache.checkcache(caller.f_code.co_filename)
+        if "# manimble group" in linecache.getline(caller.f_code.co_filename, caller.f_lineno):
+            GROUPS.append((self, [m for m in a if isinstance(m, Mobject)], project_stack(caller)))
+    except Exception:
+        traceback.print_exc()
+
+
+Group.__init__ = _group_init
+
 # ------------------------------------------------------------ fake Slide
 
-_STATE = {"stops": [], "out": None, "scene": None}
+_STATE = {"stops": [], "out": None, "scene": None,
+          "steps": 0, "t0": 0.0, "times": []}     # render progress: steps reached and the time of each
+
+
+def _sl_progress():
+    """Mark a render step (a play/wait reached, a stop captured). The parent maps the step to a fraction with
+    the previous render's timeline; the times become this render's timeline."""
+    _STATE["steps"] += 1
+    _STATE["times"].append(time.perf_counter() - _STATE["t0"])
+    try:
+        _proto.write(json.dumps({"progress": {"step": _STATE["steps"]}}) + "\n")
+    except OSError:
+        pass
 
 
 class Slide(Scene):
@@ -478,6 +530,7 @@ class Slide(Scene):
 
     def play(self, *a, **k):
         self._sl_dirty = self._sl_animated = True
+        _sl_progress()
         if not REAL_PLAY and self._fast_play(a):
             return None
         return super().play(*a, **k)
@@ -549,6 +602,7 @@ class Slide(Scene):
 
     def wait(self, *a, **k):
         self._sl_dirty = self._sl_animated = True          # a wait() counts as an animation for manim-slides
+        _sl_progress()
         return super().wait(*a, **k)
 
     def add(self, *a, **k):
@@ -579,6 +633,9 @@ class Slide(Scene):
         members = extract_mobject_family_members(
             list_update(self.mobjects, self.foreground_mobjects), use_z_index=True, only_those_with_points=True)
         order = {id(m): i for i, m in enumerate(members)}
+        # the order things were added in, which breaks ties between equal z_index values
+        added = {id(m): i for i, m in enumerate(extract_mobject_family_members(
+            list_update(self.mobjects, self.foreground_mobjects), use_z_index=False, only_those_with_points=True))}
         top = set()
         stack = list(self.mobjects)
         while stack:
@@ -638,7 +695,8 @@ class Slide(Scene):
                 z = min((order.get(id(f), 10 ** 9) for f in fam), default=10 ** 9)
                 sp = raster(cam, fam, out)
                 if sp:
-                    sp.update(oid=m._sl_id, z=z)
+                    sp.update(oid=m._sl_id, z=z, zi=float(m.z_index),
+                              seq=min((added.get(id(f), 10 ** 9) for f in fam), default=10 ** 9))
                     sprites.append(sp)
             except Exception:
                 traceback.print_exc()
@@ -649,6 +707,7 @@ class Slide(Scene):
         _STATE["stops"].append({"png": f"stop{n}.png", "bg": f"bg{n}.png", "visible": vis, "sprites": sprites, "lines": lines,
                                 "cells": cells,
                                 "site": site})
+        _sl_progress()
 
 
 def _offslide_camera(members, pw, ph):
@@ -838,12 +897,14 @@ def render(req):
     TRACKED.clear()
     EVENTS.clear()
     PARENTS.clear()
+    GROUPS.clear()
     _STATE.update(stops=[], out=out, scene=req["scene"])
     purge_project_modules()
     mod = importlib.import_module(req["module"])
     cls = getattr(mod, req["scene"])
     for attempt in (0, 1):
-        TRACKED.clear(); EVENTS.clear(); PARENTS.clear(); _STATE.update(stops=[])
+        TRACKED.clear(); EVENTS.clear(); PARENTS.clear(); GROUPS.clear()
+        _STATE.update(stops=[], steps=0, t0=time.perf_counter(), times=[])
         scene = cls(skip_animations=True)
         try:
             scene.render()
@@ -869,6 +930,10 @@ def render(req):
             "frames": m._sl_frames,
             "events": collect_events(m),
         }
+    for gi, (_, members, frames) in enumerate(GROUPS):
+        for m in members:
+            if "_sl_id" in m.__dict__ and m._sl_id < len(TRACKED) and TRACKED[m._sl_id] is m:
+                objects[m._sl_id]["group"] = {"id": gi, "frames": frames}
     files = {}
     for name in os.listdir(DECK):
         if name.endswith(".py"):
@@ -879,11 +944,15 @@ def render(req):
         im = Image.open(os.path.join(out, last)).convert("RGB")
         im.thumbnail((360, 203))
         im.save(os.path.join(out, "thumb.jpg"), quality=82)
+    total = time.perf_counter() - _STATE["t0"]
     return {
         "stops": _STATE["stops"],
         "objects": objects,
         "files": files,
         "dependencies": sorted(DEPENDENCIES),
+        # how long the render took and when each step was reached, as a fraction of that: the next render's progress bar
+        "duration": round(total, 3),
+        "timeline": [round(t / total, 4) for t in _STATE["times"]] if total > 0 else [],
         "size": [config.pixel_width, config.pixel_height],
         "frame": [config.frame_width, config.frame_height],
     }

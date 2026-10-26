@@ -26,14 +26,22 @@ protocol PresenterSource: AnyObject {
     /// "Playing", "Paused", "Build done" for clips; nil for stills.
     var playbackState: String? { get }
     func presenterPage(_ i: Int) -> PresenterPage
+    /// Changes whenever the pages are replaced (stills arriving for slides that were still rendering).
+    var reloadToken: Int { get }
     func next()
     func previous()
     /// Jump to page `i` (a thumbnail click).
     func go(_ i: Int)
+    /// The hyperlink on the page on screen under a point given as fractions of the slide (y from the top).
+    func link(at p: CGPoint) -> URL?
     func exit()
     @discardableResult func handleKey(_ e: NSEvent) -> Bool
     /// Notes typed in Presenter View, once saved: the slide's (`build` false) or page `i`'s own.
     func setNotes(_ text: String, forPage i: Int, build: Bool)
+}
+
+extension PresenterSource {
+    var reloadToken: Int { 0 }
 }
 
 extension AnimatedPlayer: PresenterSource {}
@@ -57,12 +65,14 @@ final class LiveVideoView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// The current slide in Presenter View: a left click advances, a right click goes back, like the show itself,
-/// and the first click counts even when the window is not key (the presenter just clicked the show).
+/// The current slide in Presenter View: a left click advances (or opens the hyperlink under it), a right click goes
+/// back, like the show itself, and the first click counts even when the window is not key (the presenter just
+/// clicked the show).
 final class SlideView: NSImageView {
     var onClick: ((Bool) -> Void)?   // true = forward
+    var onLink: ((NSEvent) -> Bool)? // opened a link: the click does not advance
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) { onClick?(true) }
+    override func mouseDown(with event: NSEvent) { if onLink?(event) != true { onClick?(true) } }
     override func rightMouseDown(with event: NSEvent) { onClick?(false) }
 }
 
@@ -73,6 +83,17 @@ final class NotesTextView: NSTextView {
     var onBlur: (() -> Void)?
     /// The panel shows the dimmed "no notes" hint rather than notes.
     var showsHint = false
+    /// Pictures pasted or dropped in while typing (see `PresenterController.noteImageBase`); true when it took them.
+    var onImages: ((NSPasteboard) -> Bool)?
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        onImages == nil ? super.readablePasteboardTypes : [.fileURL, .png, .tiff] + super.readablePasteboardTypes
+    }
+    override func readSelection(from pboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        if let f = onImages, f(pboard) { return true }
+        return super.readSelection(from: pboard, type: type)
+    }
+    /// The notes as text, pictures as their Markdown (see `NoteImages`).
+    var notesText: String { NoteImages.markup(attributedString()) }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     /// Only a click starts typing: AppKit must not hand the keys to a panel on its own (as the window's initial
     /// first responder), or the arrow keys would stop driving the show.
@@ -256,7 +277,30 @@ final class PresenterController: NSObject, NSWindowDelegate {
     /// Saves notes typed here: the scene, the build (nil for the slide's notes) and the text. `done` says whether
     /// they were saved.
     var onSaveNotes: ((_ scene: String, _ build: Int?, _ text: String, _ done: @escaping (Bool) -> Void) -> Void)?
-    /// The deck's feedback notes (set by the controller that opened the show): shown over the current slide, and
+    /// The deck folder, where the pictures in the notes are (see `NoteImages`); pictures pasted in are copied there.
+    var noteImageBase: URL? {
+        didSet {
+            for tv in [notes, buildNotes] {
+                tv.onImages = noteImageBase == nil ? nil : { [weak self, weak tv] pb in
+                    guard let self, let tv, let base = self.noteImageBase,
+                          let paths = NoteImages.importImages(from: pb, into: base) else { return false }
+                    NoteImages.insert(paths, in: tv, base: base, maxWidth: self.imageWidth(tv))
+                    return true
+                }
+            }
+            if !finished { shown = [:]; refresh() }
+        }
+    }
+    /// Pictures shown in the slide notes panel, for the headless test.
+    var notesImageCount: Int {
+        var n = 0
+        notes.attributedString().enumerateAttribute(.attachment, in: NSRange(location: 0, length: notes.attributedString().length)) { v, _, _ in
+            if v is NoteImageAttachment { n += 1 }
+        }
+        return n
+    }
+    /// The text each notes panel shows, so a refresh leaves an unchanged panel (and its pictures) alone.
+    private var shown: [ObjectIdentifier: String] = [:]    /// The deck's feedback notes (set by the controller that opened the show): shown over the current slide, and
     /// in Feedback Mode new ones are typed there. The audience display never shows them.
     var feedback: FeedbackStore? {
         didSet { feedbackLayer.store = feedback; feedbackButton.isEnabled = feedback != nil; if !finished { refresh() } }
@@ -268,6 +312,15 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private let live = LiveVideoView()
     private let feedbackLayer = FeedbackLayer()
     private var feedbackButton = NSButton()
+    private var slideNotesButton = NSButton()
+    private var buildNotesButton = NSButton()
+    /// The two notes panels with their captions, and the row holding them under the slide.
+    private var slideNotesColumn = NSView(), buildNotesColumn = NSView(), notesRow = NSView()
+    /// Active while any notes panel shows: the panels keep some height, and the slide leaves them room.
+    private var notesRoom: [NSLayoutConstraint] = []
+    /// Notes panels hidden with the toolbar buttons (kept for the next show).
+    private var hideSlideNotes = UserDefaults.standard.bool(forKey: "presenterHideSlideNotes")
+    private var hideBuildNotes = UserDefaults.standard.bool(forKey: "presenterHideBuildNotes")
     private let badge = NSTextField(labelWithString: "")
     private let notes = NotesTextView()
     private let buildNotes = NotesTextView()
@@ -282,6 +335,8 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private var progressWidth: NSLayoutConstraint?
     private let sidebar = NSScrollView()
     private var thumbs: [SlideThumb] = []
+    private var sidebarToken = 0                 // the source's `reloadToken` the sidebar was built for
+    private var thumbCache: [String: NSImage] = [:]   // sidebar pictures by file, kept across sidebar rebuilds
     /// For each slide of the show: its first page (where a thumbnail click goes) and last page (its picture).
     private var slideRange: [(first: Int, last: Int)] = []
     static let sidebarWidth: CGFloat = 250
@@ -301,12 +356,12 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private var closing = false
 
     /// The stills slideshow: one PNG per build.
-    convenience init(slides: [[String]], scenes: [String], notes: [String], buildNotes: [[String]], startSlide: Int,
-                     presenterScreen: NSScreen, audienceScreen: NSScreen?) {
+    convenience init(slides: [[String]], links: [[[PresentDeck.LinkRegion]]] = [], scenes: [String], notes: [String],
+                     buildNotes: [[String]], startSlide: Int, presenterScreen: NSScreen, audienceScreen: NSScreen?) {
         let p = SlidePlayer(screen: audienceScreen ?? presenterScreen)
         p.notes = notes; p.buildNotes = buildNotes; p.scenes = scenes
         self.init(source: p, animated: false, presenterScreen: presenterScreen, sharedScreen: audienceScreen == nil)
-        p.play(slides: slides, startSlide: startSlide, screen: audienceScreen ?? presenterScreen, ownSpace: audienceScreen != nil)
+        p.play(slides: slides, links: links, startSlide: startSlide, screen: audienceScreen ?? presenterScreen, ownSpace: audienceScreen != nil)
         begin()
     }
 
@@ -448,10 +503,12 @@ final class PresenterController: NSObject, NSWindowDelegate {
         swap.toolTip = sharedScreen ? "Needs a second display" : "Show the slides on this display and the notes on the other"
         let useShow = toolButton("Use Slide Show", symbol: "play.rectangle", action: #selector(useSlideShow))
         useShow.toolTip = "Close Presenter View and keep the show running"
+        slideNotesButton = toolButton("Hide Slide Notes", symbol: "note.text", action: #selector(toggleSlideNotes))
+        buildNotesButton = toolButton("Hide Build Notes", symbol: "list.bullet.rectangle", action: #selector(toggleBuildNotes))
         feedbackButton = toolButton("Feedback Mode", symbol: "text.bubble", action: #selector(toggleFeedbackMode))
         feedbackButton.toolTip = "Click the slide here to type red feedback notes on it (F). The audience never sees them; the editor shows them afterwards."
         feedbackButton.isEnabled = false
-        let toolbar = NSStackView(views: [endShow, swap, useShow, feedbackButton])
+        let toolbar = NSStackView(views: [endShow, swap, useShow, slideNotesButton, buildNotesButton, feedbackButton])
         toolbar.orientation = .horizontal; toolbar.alignment = .top; toolbar.spacing = 22
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         // timer row: elapsed, pause, reset … clock
@@ -478,6 +535,15 @@ final class PresenterController: NSObject, NSWindowDelegate {
         current.setContentHuggingPriority(.init(1), for: .horizontal)
         current.setContentHuggingPriority(.init(1), for: .vertical)
         current.onClick = { [weak self] forward in forward ? self?.advance() : self?.goBack() }
+        current.onLink = { [weak self] e in
+            guard let self, !self.source.isBlackedOut else { return false }
+            let r = self.feedbackLayer.slideRect()
+            guard r.width > 0, r.height > 0 else { return false }
+            let p = self.feedbackLayer.convert(e.locationInWindow, from: nil)
+            guard let u = self.source.link(at: CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height)) else { return false }
+            NSWorkspace.shared.open(u)
+            return true
+        }
         live.translatesAutoresizingMaskIntoConstraints = false
         live.isHidden = true
         // feedback notes over the slide (above the live clip); the slide's place within the panel follows the
@@ -536,10 +602,13 @@ final class PresenterController: NSObject, NSWindowDelegate {
             scroll.widthAnchor.constraint(equalTo: s.widthAnchor).isActive = true
             return s
         }
-        let notesRow = NSStackView(views: [column("SLIDE NOTES", notesScroll), column("BUILD NOTES", buildScroll)])
+        slideNotesColumn = column("SLIDE NOTES", notesScroll); buildNotesColumn = column("BUILD NOTES", buildScroll)
+        // a hidden column leaves the stack, so the other one takes the whole row
+        let notesRow = NSStackView(views: [slideNotesColumn, buildNotesColumn])
         notesRow.orientation = .horizontal; notesRow.alignment = .top; notesRow.spacing = 20
         notesRow.distribution = .fillEqually
         notesRow.translatesAutoresizingMaskIntoConstraints = false
+        self.notesRow = notesRow
         // counter row: ‹ Slide N of M › with a thin progress line, keys hint at the right
         counter.font = Theme.font(16); counter.textColor = NSColor(white: 1, alpha: 0.85)
         counter.alignment = .center
@@ -598,7 +667,6 @@ final class PresenterController: NSObject, NSWindowDelegate {
             slideWidth,
             current.widthAnchor.constraint(lessThanOrEqualTo: main.widthAnchor, constant: -48),
             current.heightAnchor.constraint(equalTo: current.widthAnchor, multiplier: 9.0 / 16.0),
-            current.heightAnchor.constraint(lessThanOrEqualTo: root.heightAnchor, multiplier: 0.6),
             live.leadingAnchor.constraint(equalTo: current.leadingAnchor), live.trailingAnchor.constraint(equalTo: current.trailingAnchor),
             live.topAnchor.constraint(equalTo: current.topAnchor), live.bottomAnchor.constraint(equalTo: current.bottomAnchor),
             feedbackLayer.leadingAnchor.constraint(equalTo: current.leadingAnchor), feedbackLayer.trailingAnchor.constraint(equalTo: current.trailingAnchor),
@@ -610,9 +678,9 @@ final class PresenterController: NSObject, NSWindowDelegate {
             notesRow.trailingAnchor.constraint(equalTo: main.trailingAnchor, constant: -24),
             notesRow.topAnchor.constraint(equalTo: current.bottomAnchor, constant: 14),
             notesRow.bottomAnchor.constraint(equalTo: counterRow.topAnchor, constant: -12),
-            notesRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
+            notesRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 0),
             notesScroll.heightAnchor.constraint(equalTo: notesRow.heightAnchor, constant: -20),
-            buildScroll.heightAnchor.constraint(equalTo: notesScroll.heightAnchor),
+            buildScroll.heightAnchor.constraint(equalTo: notesRow.heightAnchor, constant: -20),
             counterRow.centerXAnchor.constraint(equalTo: main.centerXAnchor),
             counterRow.bottomAnchor.constraint(equalTo: track.topAnchor, constant: -6),
             track.centerXAnchor.constraint(equalTo: main.centerXAnchor),
@@ -626,7 +694,39 @@ final class PresenterController: NSObject, NSWindowDelegate {
             hint.centerYAnchor.constraint(equalTo: counterRow.centerYAnchor),
             hint.leadingAnchor.constraint(greaterThanOrEqualTo: counterRow.trailingAnchor, constant: 16),
         ])
+        // with both notes panels hidden the slide grows into their room, down to the counter row
+        notesRoom = [notesRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
+                     current.heightAnchor.constraint(lessThanOrEqualTo: root.heightAnchor, multiplier: 0.6)]
+        applyNotesVisibility()
         return root
+    }
+
+    @objc private func toggleSlideNotes() {
+        hideSlideNotes.toggle()
+        UserDefaults.standard.set(hideSlideNotes, forKey: "presenterHideSlideNotes")
+        applyNotesVisibility()
+    }
+
+    @objc private func toggleBuildNotes() {
+        hideBuildNotes.toggle()
+        UserDefaults.standard.set(hideBuildNotes, forKey: "presenterHideBuildNotes")
+        applyNotesVisibility()
+    }
+
+    /// Shows or hides each notes panel as the toolbar buttons say; a panel being typed in saves first.
+    private func applyNotesVisibility() {
+        if let tv = window.firstResponder as? NotesTextView,
+           (tv === notes && hideSlideNotes) || (tv === buildNotes && hideBuildNotes) { window.makeFirstResponder(nil) }
+        slideNotesColumn.isHidden = hideSlideNotes
+        buildNotesColumn.isHidden = hideBuildNotes
+        let none = hideSlideNotes && hideBuildNotes
+        notesRow.isHidden = none
+        if none { NSLayoutConstraint.deactivate(notesRoom) } else { NSLayoutConstraint.activate(notesRoom) }
+        for (b, hidden, what) in [(slideNotesButton, hideSlideNotes, "Slide"), (buildNotesButton, hideBuildNotes, "Build")] {
+            b.title = hidden ? "Show \(what) Notes" : "Hide \(what) Notes"
+            b.contentTintColor = hidden ? Theme.accent : NSColor(white: 1, alpha: 0.85)
+            b.toolTip = hidden ? "Show the \(what.lowercased()) notes under the slide" : "Hide the \(what.lowercased()) notes; the other panel, or the slide, takes their room"
+        }
     }
 
     /// One entry per slide: the picture of its last build (a click goes to its first) with every build nested
@@ -672,8 +772,17 @@ final class PresenterController: NSObject, NSWindowDelegate {
         for (k, r) in slideRange.enumerated() {
             for i in r.first...r.last {
                 let page = source.presenterPage(i)
+                let file = page.still ?? page.clip ?? ""
+                if file.isEmpty { continue }                        // still rendering: no picture yet
+                if let img = thumbCache[file], let t = thumbs[safe: k] {
+                    if i == r.last { t.image.image = img }
+                    t.builds[safe: i - r.first]?.image.image = img
+                    continue
+                }
                 Task { @MainActor [weak self] in
-                    guard let img = await Self.thumbnailImage(page, dark: dark), let t = self?.thumbs[safe: k] else { return }
+                    guard let img = await Self.thumbnailImage(page, dark: dark), let self, let t = self.thumbs[safe: k] else { return }
+                    if self.thumbCache.count > 400 { self.thumbCache.removeAll() }
+                    self.thumbCache[file] = img
                     if i == r.last { t.image.image = img }
                     t.builds[safe: i - r.first]?.image.image = img
                 }
@@ -745,7 +854,18 @@ final class PresenterController: NSObject, NSWindowDelegate {
 
     // MARK: State
 
+    /// Pictures for slides that were still rendering when the show started (the stills show only).
+    func updateStills(slides: [[String]], links: [[[PresentDeck.LinkRegion]]], scenes: [String], notes: [String], buildNotes: [[String]]) {
+        guard let p = source as? SlidePlayer else { return }
+        p.update(slides: slides, links: links, scenes: scenes, notes: notes, buildNotes: buildNotes)
+        refresh()
+    }
+
     func refresh() {
+        if source.reloadToken != sidebarToken {
+            sidebarToken = source.reloadToken
+            buildSidebar()
+        }
         guard (0..<source.pageCount).contains(source.pageIndex) else { return }
         // the show moved on while notes were being typed: save them for the page they belong to
         if let e = editingPage, e != source.pageIndex { window.makeFirstResponder(nil) }
@@ -764,8 +884,8 @@ final class PresenterController: NSObject, NSWindowDelegate {
         counter.stringValue = "Slide \(page.slide + 1) of \(source.slideCount)" + (page.builds > 1 ? "  ·  build \(page.build + 1)/\(page.builds)" : "")
         progressWidth?.constant = 220 * CGFloat(source.pageIndex + 1) / CGFloat(max(1, source.pageCount))
         // a panel being typed in keeps its text; the other one shows this page's
-        if window.firstResponder !== notes { Self.show(page.notes, in: notes, empty: Self.noNotes) }
-        if window.firstResponder !== buildNotes { Self.show(page.buildNotes, in: buildNotes, empty: Self.noBuildNotes) }
+        if window.firstResponder !== notes { show(page.notes, in: notes, empty: Self.noNotes) }
+        if window.firstResponder !== buildNotes { show(page.buildNotes, in: buildNotes, empty: Self.noBuildNotes) }
         // feedback notes of this slide over its picture (a note being typed is saved when the show moves on)
         if feedbackLayer.scene != page.scene { feedbackLayer.endEditing() }
         feedbackLayer.build = page.build
@@ -809,6 +929,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
 
     /// For the headless test: where the slide is drawn in the presenter's panel, in window coordinates.
     var feedbackSlideRectInWindow: CGRect { feedbackLayer.convert(feedbackLayer.slideRect(), to: nil) }
+    var feedbackLayerDebug: String { "frame=\(feedbackLayer.frame.integral) placing=\(feedbackLayer.placing) scene=\(feedbackLayer.scene ?? "nil") store=\(feedbackLayer.store != nil) hidden=\(feedbackLayer.isHiddenOrHasHiddenAncestor) super=\(type(of: feedbackLayer.superview as Any)) idx=\(feedbackLayer.superview?.subviews.firstIndex(of: feedbackLayer) ?? -1)/\(feedbackLayer.superview?.subviews.count ?? -1)" }
     func setFeedbackMode(_ on: Bool) { if on != feedbackMode { toggleFeedbackMode() } }
 
     @objc private func toggleFeedbackMode() {
@@ -824,14 +945,19 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private static let noNotes = "No notes for this slide. Click here to type them."
     private static let noBuildNotes = "No notes for this build. Click here to type them."
 
-    /// Notes in a panel, or a dimmed hint when there are none.
-    private static func show(_ text: String, in tv: NotesTextView, empty: String) {
-        let shown = text.isEmpty ? empty : text
+    /// Notes in a panel, pictures and all, or a dimmed hint when there are none.
+    private func show(_ text: String, in tv: NotesTextView, empty: String) {
+        let s = text.isEmpty ? empty : text
         tv.showsHint = text.isEmpty
-        guard tv.string != shown else { return }
-        tv.string = shown
-        tv.textColor = text.isEmpty ? NSColor(white: 1, alpha: 0.35) : NSColor(white: 0.95, alpha: 1)
+        guard shown[ObjectIdentifier(tv)] != s || tv.notesText != s else { return }
+        shown[ObjectIdentifier(tv)] = s
+        let color = text.isEmpty ? NSColor(white: 1, alpha: 0.35) : NSColor(white: 0.95, alpha: 1)
+        tv.textStorage?.setAttributedString(NoteImages.attributed(s, base: noteImageBase, attributes: [.font: Theme.font(20), .foregroundColor: color],
+                                                                  maxWidth: imageWidth(tv)))
     }
+
+    /// Pictures in a notes panel at most this wide: the panel's text width, up to 480 pt.
+    private func imageWidth(_ tv: NSTextView) -> CGFloat { min(480, max(120, (tv.textContainer?.size.width ?? 480) - 12)) }
 
     // MARK: Typing notes
 
@@ -839,7 +965,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private func beginNotes(_ tv: NotesTextView) {
         guard !finished else { return }
         editingPage = source.pageIndex
-        if tv.showsHint { tv.string = ""; tv.showsHint = false }
+        if tv.showsHint { tv.string = ""; tv.showsHint = false; shown[ObjectIdentifier(tv)] = nil }
         tv.textColor = NSColor(white: 0.95, alpha: 1)
     }
 
@@ -849,7 +975,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
         editingPage = nil
         let isBuild = tv === buildNotes
         let page = source.presenterPage(i)
-        let text = tv.string
+        let text = tv.notesText
         let old = isBuild ? page.buildNotes : page.notes
         if text != old, let scene = page.scene, let save = onSaveNotes {
             source.setNotes(text, forPage: i, build: isBuild)

@@ -219,6 +219,16 @@ final class CanvasView: MTKView {
         keepOthers = true; selection = first; keepOthers = false
         onSelect?(first)
     }
+    /// The object and the others of its group shown in this build (just the object when it is not grouped).
+    func groupMates(_ oid: Int) -> [Int] {
+        guard let g = sceneObjects[String(oid)]?.group, let stop = stop else { return [oid] }
+        return [oid] + stop.visible.map { Int($0[0]) }.filter { $0 != oid && sceneObjects[String($0)]?.group == g }
+    }
+    /// Select an object together with its group.
+    func selectWithGroup(_ oid: Int) {
+        let mates = groupMates(oid)
+        if mates.count > 1 { selectGroup(mates) } else { selection = oid; onSelect?(oid) }
+    }
     /// The slide's empty layout boxes, drawn dashed with their "Click to add …" prompt (never part of the render).
     var placeholders: [Placeholder] = [] { didSet { needsDisplay2() } }
     var onPlaceholder: ((Placeholder) -> Void)?
@@ -234,8 +244,15 @@ final class CanvasView: MTKView {
     var lineOverrides: [Int: [Double]] = [:] { didSet { needsDisplay2() } }
     /// A just-inserted element shown at once, before the real render arrives.
     var ghost: (tex: MTLTexture, cx: Double, cy: Double, w: Double, h: Double)? { didSet { needsDisplay2() } }
-    var onEndpoints: ((Int, [Double]) -> Void)?
+    var onEndpoints: ((Int, [Double], [String: Any]) -> Void)?
     private var dragEnd: Int?           // 0 = start, 1 = end
+    /// A line end dropped on an object's corner, edge midpoint or centre (as PowerPoint's connection points): the
+    /// source reads that point (`rect.get_right()`), so the end stays on the object when it moves.
+    struct LineAnchor { var oid: Int; var at: String; var x: Double; var y: Double }
+    private var anchorHost: Int? { didSet { if anchorHost != oldValue { needsDisplay2() } } }
+    private var snapAnchor: LineAnchor? { didSet { needsDisplay2() } }
+    private var drawAnchors: [LineAnchor?] = [nil, nil]
+    private var dragAnchor: LineAnchor?
     /// Frame pixels per manim unit (grid spacing); set from the scene.
     var unitPx: Double = 90 { didSet { needsDisplay2(); onGeometryChange?() } }
     var showGrid = false { didSet { needsDisplay2() } }
@@ -247,9 +264,10 @@ final class CanvasView: MTKView {
     var onGuidesChange: (() -> Void)?
     private var dragGuide: Int?
     /// Drawing mode: "line", "arrow", "darrow", "rectangle" or "ellipse"; drag on the slide to create one.
-    var drawTool: String? { didSet { needsDisplay2(); onDrawToolChange?() } }
-    var onDraw: ((String, Double, Double, Double, Double) -> Void)?
+    var drawTool: String? { didSet { if drawTool == nil { anchorHost = nil; snapAnchor = nil }; needsDisplay2(); onDrawToolChange?() } }
+    var onDraw: ((String, Double, Double, Double, Double, [String: Any]) -> Void)?
     var onDrawToolChange: (() -> Void)?
+    static let lineTools: Set<String> = ["line", "arrow", "darrow"]
     private var drawStart: CGPoint?
     private var drawBand: (Double, Double, Double, Double)? { didSet { needsDisplay2() } }
     /// Pen tool (`drawTool == "pen"`): freehand strokes, each becoming a smooth VMobject in the source.
@@ -272,6 +290,11 @@ final class CanvasView: MTKView {
     var onEdit: ((Int, CGPoint?) -> Void)?
     var onNudge: ((Int, Double, Double) -> Void)?
     var onDelete: ((Int) -> Void)?
+    /// Wraps the per-object edits of a multi-object move or delete so they undo as one step (label, edits).
+    var onManyEdits: ((String, () -> Void) -> Void)?
+    private func together(_ count: Int, _ label: String, _ body: () -> Void) {
+        if count > 1, let f = onManyEdits { f(label, body) } else { body() }
+    }
     var onZoomChange: (() -> Void)?
     var onContextMenu: (() -> NSMenu?)?
     /// Anything the rulers show changed: slide placement, zoom, pan, selection or guides.
@@ -545,6 +568,47 @@ final class CanvasView: MTKView {
         if let o = lineOverrides[oid] { return o }
         if let l = stop?.lines?[String(oid)], l.count >= 4 { return Array(l[0..<4]) }
         return nil
+    }
+
+    /// The points a line end can attach to on an object: corners, edge midpoints and centre of its box (named as
+    /// the engine writes them); a circle's or ellipse's corners sit on the curve at 45°.
+    func anchorPoints(_ oid: Int) -> [(at: String, x: Double, y: Double)] {
+        guard let b = rawBox(oid) else { return [] }
+        var c: (Double, Double) = (b.x0, b.x1)
+        var r: (Double, Double) = (b.y0, b.y1)
+        if ["Circle", "Ellipse", "Dot"].contains(sceneObjects[String(oid)]?.value ?? "") {
+            let k = (1 - 0.5.squareRoot()) / 2
+            c = (b.x0 + k * b.w, b.x1 - k * b.w); r = (b.y0 + k * b.h, b.y1 - k * b.h)
+        }
+        return [("UL", c.0, r.0), ("UP", b.cx, b.y0), ("UR", c.1, r.0), ("LEFT", b.x0, b.cy), ("ORIGIN", b.cx, b.cy),
+                ("RIGHT", b.x1, b.cy), ("DL", c.0, r.1), ("DOWN", b.cx, b.y1), ("DR", c.1, r.1)]
+    }
+
+    /// The object whose attach points show near `p` (the smallest one the point is on or close to) and the
+    /// point the end snaps to, if one is within reach. Lines are not attached to; `excluding` is the line being drawn.
+    private func lineAnchor(near p: CGPoint, excluding: Int? = nil) -> (host: Int?, anchor: LineAnchor?) {
+        guard let stop = stop else { return (nil, nil) }
+        let px = Double(p.x), py = Double(p.y), reach = 10 * pxPerPoint
+        var host: (oid: Int, area: Double)?
+        var best: (a: LineAnchor, d: Double)?
+        for v in stop.visible {
+            let oid = Int(v[0])
+            guard oid != excluding, let o = sceneObjects[String(oid)], o.kind != "line", let b = rawBox(oid),
+                  px >= b.x0 - 3 * reach, px <= b.x1 + 3 * reach, py >= b.y0 - 3 * reach, py <= b.y1 + 3 * reach else { continue }
+            if host == nil || b.w * b.h < host!.area { host = (oid, b.w * b.h) }
+            for a in anchorPoints(oid) {
+                let d = hypot(a.x - px, a.y - py)
+                if d <= reach && (best == nil || d < best!.d) { best = (LineAnchor(oid: oid, at: a.at, x: a.x, y: a.y), d) }
+            }
+        }
+        return (best?.a.oid ?? host?.oid, best?.a)
+    }
+
+    /// Request fields for attached ends ({"startAnchor": {"oid", "at"}, ...}).
+    private static func anchorFields(_ ends: [LineAnchor?]) -> [String: Any] {
+        var f: [String: Any] = [:]
+        for (i, a) in ends.enumerated() { if let a = a { f[i == 0 ? "startAnchor" : "endAnchor"] = ["oid": a.oid, "at": a.at] } }
+        return f
     }
 
     static let framePad = 0.1                  // the text's inset from its frame's edges (manim units)
@@ -883,6 +947,18 @@ final class CanvasView: MTKView {
                     outline(Box(x0: min(d.0, d.2), y0: min(d.1, d.3), x1: max(d.0, d.2), y1: max(d.1, d.3)), c, th * 1.4)
                 }
             }
+            if let h = anchorHost {                  // where a line end can attach; the one it snaps to is filled
+                for a in anchorPoints(h) {
+                    let on = snapAnchor.map { $0.oid == h && $0.at == a.at } ?? false
+                    let r = (on ? 5.5 : 3.5) * pxPerPoint
+                    var u = Uniforms2(rect: on ? SIMD4(1, 1, 1, 1) : accentRGB, color: on ? accentRGB : SIMD4(1, 1, 1, 1), frame: frame,
+                                      pad: SIMD2(0.35, 0), geo: SIMD4(Float(a.x - r + ox), Float(a.y - r + oy), Float(2 * r), Float(2 * r)))
+                    enc.setRenderPipelineState(discPipe)
+                    enc.setVertexBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
+                    enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms2>.size, index: 0)
+                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+                }
+            }
             for ph in placeholders where ph.line != inline?.placeholder {
                 let b = ph.rect
                 let light = shownLight(b)
@@ -1012,7 +1088,14 @@ final class CanvasView: MTKView {
 
     override func mouseMoved(with event: NSEvent) {
         onCursorMove?(framePoint(event))
-        if drawTool != nil { NSCursor.crosshair.set(); return }
+        if let t = drawTool {
+            NSCursor.crosshair.set()
+            if CanvasView.lineTools.contains(t) {
+                let (h, a) = event.modifierFlags.contains(.command) ? (nil, nil) : lineAnchor(near: framePoint(event))
+                anchorHost = h; snapAnchor = a
+            }
+            return
+        }
         if let i = guideAt(framePoint(event)) { (userGuides[i].vertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set(); return }
         let h = hit(framePoint(event))
         if h != hover { hover = h; needsDisplay2() }
@@ -1028,7 +1111,9 @@ final class CanvasView: MTKView {
     override func menu(for event: NSEvent) -> NSMenu? {
         if drawTool == nil {           // on the empty slide nothing stays selected: the menu is the slide's
             let oid = hit(framePoint(event))
-            if oid != selection, !(oid.map { others.contains($0) } ?? false) { selection = oid; onSelect?(oid) }
+            if oid != selection, !(oid.map { others.contains($0) } ?? false) {
+                if let o = oid { selectWithGroup(o) } else { selection = nil; onSelect?(nil) }
+            }
         }
         return onContextMenu?()
     }
@@ -1040,7 +1125,12 @@ final class CanvasView: MTKView {
             penPoints = [p]
             return
         }
-        if drawTool != nil {
+        if let t = drawTool {
+            var p = p
+            drawAnchors = [nil, nil]
+            if CanvasView.lineTools.contains(t), !event.modifierFlags.contains(.command), let a = lineAnchor(near: p).anchor {
+                p = CGPoint(x: a.x, y: a.y); drawAnchors[0] = a
+            }
             drawStart = p
             drawBand = (Double(p.x), Double(p.y), Double(p.x), Double(p.y))
             return
@@ -1050,7 +1140,7 @@ final class CanvasView: MTKView {
         if let s = selection, let e = lineEnds(s) {
             let tol = 10 * pxPerPoint
             for i in 0..<2 where hypot(Double(p.x) - e[i * 2], Double(p.y) - e[i * 2 + 1]) <= tol {
-                dragEnd = i; dragStart = p; dragOID = s; lineOverrides[s] = e
+                dragEnd = i; dragStart = p; dragOID = s; lineOverrides[s] = e; dragAnchor = nil
                 return
             }
         }
@@ -1072,13 +1162,13 @@ final class CanvasView: MTKView {
             marqueeStart = p; marqueeAdds = shift && selection != nil
             return
         }
-        if shift {                                   // shift-click: add to or take out of the selection
-            if oid == selection { selectGroup(selectedIDs.filter { $0 != oid }) }
-            else if others.contains(oid) { others.remove(oid) }
-            else { selectGroup([oid] + selectedIDs) }
+        if shift {                                   // shift-click: add to or take out of the selection (a group as a whole)
+            let mates = groupMates(oid)
+            if oid == selection || others.contains(oid) { selectGroup(selectedIDs.filter { !mates.contains($0) }) }
+            else { selectGroup(mates + selectedIDs) }
             return
         }
-        if oid != selection, !others.contains(oid) { selection = oid; onSelect?(oid) }
+        if oid != selection, !others.contains(oid) { selectWithGroup(oid) }
         dragStart = p; dragOID = oid; dragHandle = nil; dragBox = currentBox(oid)
         dragBase = overrides[oid].map { ($0.dx, $0.dy) } ?? (0, 0)
         dragGroup = [:]
@@ -1105,6 +1195,11 @@ final class CanvasView: MTKView {
                     x = Double(s.x) + (x >= Double(s.x) ? side : -side); y = Double(s.y) + (y >= Double(s.y) ? side : -side)
                 }
             }
+            if CanvasView.lineTools.contains(tool) {     // ⌘ places the end freely
+                let (h, a) = event.modifierFlags.contains(.command) ? (nil, nil) : lineAnchor(near: p)
+                anchorHost = h; snapAnchor = a; drawAnchors[1] = a
+                if let a = a { x = a.x; y = a.y }
+            }
             drawBand = (Double(s.x), Double(s.y), x, y)
             return
         }
@@ -1128,6 +1223,9 @@ final class CanvasView: MTKView {
                 let snapped = (ang / (.pi / 12)).rounded() * (.pi / 12)
                 x = ox + len * cos(snapped); y = oy + len * sin(snapped)
             }
+            let (h, a) = event.modifierFlags.contains(.command) ? (nil, nil) : lineAnchor(near: p, excluding: oid)
+            anchorHost = h; snapAnchor = a; dragAnchor = a
+            if let a = a { x = a.x; y = a.y }
             e[end * 2] = x; e[end * 2 + 1] = y
             lineOverrides[oid] = e
             return
@@ -1194,7 +1292,8 @@ final class CanvasView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = []; wrapBand = nil; dragGroup = [:] }
+        defer { dragStart = nil; dragOID = nil; dragHandle = nil; dragBox = nil; dragEnd = nil; guides = []; wrapBand = nil; dragGroup = [:]
+                anchorHost = nil; snapAnchor = nil; dragAnchor = nil }
         if dragGuide != nil { endGuideDrag(); return }
         if marqueeStart != nil {
             marqueeStart = nil
@@ -1215,7 +1314,9 @@ final class CanvasView: MTKView {
             }.map { $0.oid }
             if ids.isEmpty && !marqueeAdds { return }
             let kept = marqueeAdds ? selectedIDs : []
-            selectGroup(kept + ids.filter { !kept.contains($0) })
+            var all = kept
+            for i in ids.flatMap({ groupMates($0) }) where !all.contains(i) { all.append(i) }
+            selectGroup(all)
             return
         }
         if drawTool == "pen" {
@@ -1231,13 +1332,17 @@ final class CanvasView: MTKView {
         }
         if drawStart != nil, let tool = drawTool, let d = drawBand {
             drawStart = nil; drawBand = nil
-            if hypot(d.2 - d.0, d.3 - d.1) >= 6 * pxPerPoint { onDraw?(tool, d.0, d.1, d.2, d.3) }
+            if hypot(d.2 - d.0, d.3 - d.1) >= 6 * pxPerPoint {
+                onDraw?(tool, d.0, d.1, d.2, d.3, CanvasView.lineTools.contains(tool) ? CanvasView.anchorFields(drawAnchors) : [:])
+            }
             drawTool = nil
             return
         }
         if dragEnd != nil, let oid = dragOID, let e = lineOverrides[oid] {
             let o = stop?.lines?[String(oid)] ?? e
-            if hypot(e[0] - o[0], e[1] - o[1]) + hypot(e[2] - o[2], e[3] - o[3]) > 1 { onEndpoints?(oid, e) } else { lineOverrides[oid] = nil }
+            if hypot(e[0] - o[0], e[1] - o[1]) + hypot(e[2] - o[2], e[3] - o[3]) > 1 || dragAnchor != nil {
+                onEndpoints?(oid, e, CanvasView.anchorFields(dragEnd == 0 ? [dragAnchor, nil] : [nil, dragAnchor]))
+            } else { lineOverrides[oid] = nil }
             return
         }
         if let h = dragHandle, h.isSide, let oid = dragOID, let b = dragBox, let w = wrapBand {
@@ -1251,13 +1356,18 @@ final class CanvasView: MTKView {
         } else {
             let dx = o.dx - dragBase.dx, dy = o.dy - dragBase.dy      // this drag alone; earlier moves are already on their way
             let moved = abs(dx) + abs(dy) >= 1
-            if moved { onMove?(oid, dx, dy) }
-            else if dragBase.dx == 0 && dragBase.dy == 0 && o.scale == 1 && o.replacement == nil { overrides[oid] = nil }
-            else { o.dx = dragBase.dx; o.dy = dragBase.dy; overrides[oid] = o }
-            for (m, base) in dragGroup.sorted(by: { $0.key < $1.key }) {      // the rest of the selection went along
-                if moved { onMove?(m, dx, dy) }
-                else if let g = overrides[m], base.dx == 0 && base.dy == 0 && g.scale == 1 && g.replacement == nil { overrides[m] = nil }
-                else if var g = overrides[m] { g.dx = base.dx; g.dy = base.dy; overrides[m] = g }
+            if !moved {
+                if dragBase.dx == 0 && dragBase.dy == 0 && o.scale == 1 && o.replacement == nil { overrides[oid] = nil }
+                else { o.dx = dragBase.dx; o.dy = dragBase.dy; overrides[oid] = o }
+            }
+            let group = dragGroup.sorted(by: { $0.key < $1.key })        // the rest of the selection went along
+            together(moved ? group.count + 1 : 0, "move \(group.count + 1) objects") {
+                if moved { onMove?(oid, dx, dy) }
+                for (m, base) in group {
+                    if moved { onMove?(m, dx, dy) }
+                    else if let g = overrides[m], base.dx == 0 && base.dy == 0 && g.scale == 1 && g.replacement == nil { overrides[m] = nil }
+                    else if var g = overrides[m] { g.dx = base.dx; g.dy = base.dy; overrides[m] = g }
+                }
             }
         }
     }
@@ -1281,7 +1391,7 @@ final class CanvasView: MTKView {
 
     override func keyDown(with event: NSEvent) {
         let n: Double = event.modifierFlags.contains(.shift) ? 10 : 1
-        if event.keyCode == 53, drawTool != nil { drawTool = nil; drawStart = nil; drawBand = nil; penPoints = []; return }
+        if event.keyCode == 53, drawTool != nil { drawTool = nil; drawStart = nil; drawBand = nil; penPoints = []; anchorHost = nil; snapAnchor = nil; return }
         guard let s = selection else { super.keyDown(with: event); return }
         let all = selectedIDs
         switch event.keyCode {
@@ -1291,7 +1401,7 @@ final class CanvasView: MTKView {
         case 125: for id in all { onNudge?(id, 0, n) }
         case 36: onEdit?(s, nil)
         case 51, 117:                                  // highest id first: ids follow creation order, so the rest keep theirs
-            for id in all.sorted(by: >) { onDelete?(id) }
+            together(all.count, "delete \(all.count) objects") { for id in all.sorted(by: >) { onDelete?(id) } }
             others = []
         case 53: selection = nil; onSelect?(nil)
         default: super.keyDown(with: event)
@@ -1390,7 +1500,7 @@ extension CanvasView: NSTextViewDelegate {
         tv.textContainer?.lineFragmentPadding = 0
         tv.textContainer?.widthTracksTextView = false; tv.textContainer?.heightTracksTextView = false
         tv.textContainer?.containerSize = NSSize(width: 1e6, height: 1e6)
-        tv.isHorizontallyResizable = false; tv.isVerticallyResizable = false
+        tv.isHorizontallyResizable = false; tv.isVerticallyResizable = false; tv.clipsToBounds = true
         tv.textColor = c; tv.insertionPointColor = c
         tv.string = text
         tv.bullets = placeholder?.role == "body"
@@ -1480,7 +1590,8 @@ extension CanvasView: NSTextViewDelegate {
         var widest: CGFloat = 0
         lm.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: lm.numberOfGlyphs)) { _, used, _, _, _ in widest = max(widest, used.width) }
         let w = max(widest, 2) + 2
-        if e.align != "left" { tc.containerSize = NSSize(width: w, height: 1e6); lm.ensureLayout(for: tc) }
+        // (left-aligned too: a selection runs to the container's edge, and the editor doesn't clip it)
+        tc.containerSize = NSSize(width: w, height: 1e6); lm.ensureLayout(for: tc)
         let used = lm.usedRect(for: tc)
         let h = max(used.height, lm.defaultLineHeight(for: font))
         let r = slideRect

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 private extension NSToolbarItem.Identifier {
     static let newSlide = NSToolbarItem.Identifier("newSlide")
     static let newBuild = NSToolbarItem.Identifier("newBuild")
+    static let expandAll = NSToolbarItem.Identifier("expandAll")
     static let insText = NSToolbarItem.Identifier("insText")
     static let insFormula = NSToolbarItem.Identifier("insFormula")
     static let insShape = NSToolbarItem.Identifier("insShape")
@@ -31,8 +32,19 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newSlide, .newBuild, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
+        [.newSlide, .newBuild, .expandAll, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
+    /// The Expand All button says what a click does: expand every slide's builds, or collapse them again.
+    func styleExpandAllItem(_ i: NSToolbarItem) {
+        let label = buildsExpandedAll ? "Collapse All" : "Expand All"
+        i.label = label
+        i.toolTip = buildsExpandedAll ? "Fold away the builds listed under every slide" : "List the builds under every slide in the navigator"
+        i.image = NSImage(systemSymbolName: buildsExpandedAll ? "rectangle.compress.vertical" : "rectangle.expand.vertical", accessibilityDescription: label)
+    }
+    func updateExpandAllItem() {
+        if let i = window.toolbar?.items.first(where: { $0.itemIdentifier == .expandAll }) { styleExpandAllItem(i) }
+    }
+
     func toolbarAllowedItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(t) }
 
     func toolbar(_ t: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar: Bool) -> NSToolbarItem? {
@@ -74,6 +86,11 @@ extension MainController: NSToolbarDelegate {
             i.label = "New Build"; i.paletteLabel = "New Build"; i.toolTip = "Add a build after this one, starting from what it shows"
             i.image = symbol("square.stack.3d.up.badge.automatic", "New Build") ?? symbol("square.stack.3d.up", "New Build")
             i.target = self; i.action = #selector(newBuild)
+            return i
+        case .expandAll:
+            let i = NSToolbarItem(itemIdentifier: id)
+            i.paletteLabel = "Expand All"; i.target = self; i.action = #selector(toggleExpandAllBuilds)
+            styleExpandAllItem(i)
             return i
         case .insTable:
             let i = NSMenuToolbarItem(itemIdentifier: id)
@@ -161,6 +178,7 @@ extension MainController: NSToolbarDelegate {
             m.addItem(.separator())
             add("Export PowerPoint (.pptx)…", #selector(exportPowerPoint))
             add("Export Keynote (.key)…", #selector(exportKeynote))
+            add("Export Beamer (.tex)…", #selector(exportBeamer))
             add("Export Movie (.mp4)…", #selector(exportMovie))
             m.addItem(.separator())
             add("Save PDF…", #selector(shareChosen(_:)), 3)
@@ -413,9 +431,10 @@ extension MainController: NSToolbarDelegate {
 
     @objc func importPowerPoint() { runImport(label: "PowerPoint") }
     @objc func importKeynote() { runImport(label: "Keynote") }
+    @objc func importBeamer() { runImport(label: "Beamer (LaTeX)") }
 
     func runImport(label: String) {
-        let exts = ["ppt", "pptx", "key"]
+        let exts = label.hasPrefix("Beamer") ? ["tex", "ltx"] : ["ppt", "pptx", "key"]
         guard confirmClose(for: "importing a presentation") else { return }
         // Folders stay choosable so tagged folders show up under the sidebar's Tags; picking one
         // reopens the panel inside it instead of importing it.
@@ -452,18 +471,20 @@ extension MainController: NSToolbarDelegate {
     }
     @objc func exportPowerPoint() { runExport(kind: "pptx") }
     @objc func exportKeynote() { runExport(kind: "key") }
+    @objc func exportBeamer() { runExport(kind: "beamer") }
 
     func runExport(kind: String) {
         guard let ws = workspace else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = []
-        let ext = kind == "pptx" ? "pptx" : "key"
+        let ext = ["pptx": "pptx", "beamer": "tex"][kind] ?? "key"
         panel.nameFieldStringValue = ws.original.deletingLastPathComponent().lastPathComponent == "slides"
             ? "presentation.\(ext)" : "\(ws.original.lastPathComponent).\(ext)"
-        panel.message = kind == "pptx" ? "Export to PowerPoint" : "Export to Keynote (needs Keynote installed)"
+        panel.message = ["pptx": "Export to PowerPoint", "beamer": "Export to Beamer (LaTeX; pictures go in a -figures folder beside it)"][kind]
+            ?? "Export to Keynote (needs Keynote installed)"
         let builds = NSButton(checkboxWithTitle: "Every build as its own slide", target: nil, action: nil); builds.state = .on
         let mode = NSPopUpButton(frame: .zero, pullsDown: false)
-        mode.addItems(withTitles: ["Editable text boxes (recommended)", "Pictures only (exact look)"])
+        mode.addItems(withTitles: [kind == "beamer" ? "Editable text and LaTeX formulas (recommended)" : "Editable text boxes (recommended)", "Pictures only (exact look)"])
         let box = NSStackView(views: [builds, mode]); box.orientation = .vertical; box.alignment = .leading; box.spacing = 8
         box.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
         panel.accessoryView = box

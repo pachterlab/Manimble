@@ -113,6 +113,10 @@ final class AnimatedPlayer: NSObject {
         root.layer?.addSublayer(counter)
         window.onKey = { [weak self] e in self?.key(e) }
         window.onMouse = { [weak self] e, primary in self?.click(e, primary: primary) }
+        window.overLink = { [weak self] e in
+            guard let self, let p = self.slidePoint(e) else { return false }
+            return self.link(at: p) != nil
+        }
     }
 
     /// `screen`: where the audience display goes; `visible: false` plays without showing a window.
@@ -344,20 +348,29 @@ final class AnimatedPlayer: NSObject {
     /// any other click advances; a right click goes back.
     private func click(_ e: NSEvent, primary: Bool) {
         guard primary else { previous(); return }
-        let vr = current?.layer.videoRect ?? .zero
-        let r = vr.isEmpty ? root.bounds : vr
-        let p = e.locationInWindow
-        let x = (p.x - r.minX) / r.width, y = 1 - (p.y - r.minY) / r.height
-        guard (0...1).contains(x), (0...1).contains(y) else { next(); return }
-        for l in deck.links[String(slides[index].sceneIndex)] ?? [] where l.x0 <= x && x <= l.x1 && l.y0 <= y && y <= l.y1 {
-            if let u = URL(string: l.url) { NSWorkspace.shared.open(u) }
-            return
-        }
+        guard let p = slidePoint(e) else { next(); return }
+        let x = p.x, y = p.y
+        if let u = link(at: p) { NSWorkspace.shared.open(u); return }
         if y >= 0.94, !deck.sections.isEmpty {
             jump(section: min(deck.sections.count - 1, Int(Double(deck.sections.count) * x)))
             return
         }
         next()
+    }
+
+    /// Where an event falls on the slide, as fractions (y from the top); nil off the picture.
+    private func slidePoint(_ e: NSEvent) -> CGPoint? {
+        let vr = current?.layer.videoRect ?? .zero
+        let r = vr.isEmpty ? root.bounds : vr
+        let p = e.locationInWindow
+        let x = (p.x - r.minX) / r.width, y = 1 - (p.y - r.minY) / r.height
+        return (0...1).contains(x) && (0...1).contains(y) ? CGPoint(x: x, y: y) : nil
+    }
+
+    /// The link region of the slide on screen under a point given as fractions of the slide.
+    func link(at p: CGPoint) -> URL? {
+        guard slides.indices.contains(index), !blackedOut else { return nil }
+        return PresentDeck.LinkRegion.url(at: p, in: deck.links[String(slides[index].sceneIndex)] ?? [])
     }
 
     // MARK: Chrome

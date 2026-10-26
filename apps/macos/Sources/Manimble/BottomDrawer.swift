@@ -20,6 +20,9 @@ final class BottomDrawer: NSView {
     /// The + button: open another terminal.
     var onNewTerminal: (() -> Void)?
     var onHide: (() -> Void)?
+    /// The picture button of the notes pages: put pictures in the notes on screen.
+    var onInsertImage: (() -> Void)?
+    private lazy var imageButton = barButton("photo.badge.plus", "Put a picture in the notes (or paste or drop one in)", self, #selector(imagePressed))
 
     init(notes: NSView, buildNotes: NSView, terminal: TerminalPanel) {
         self.notes = notes; self.buildNotes = buildNotes; self.terminal = terminal
@@ -36,7 +39,7 @@ final class BottomDrawer: NSView {
         notesHint.setContentCompressionResistancePriority(.init(100), for: .horizontal)
         let plus = barButton("plus", "Add a terminal (⇧⌥⌘T)", self, #selector(plusPressed))
         let spacer = NSView(); spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let row = NSStackView(views: [strip, plus, spacer, notesHint, terminal.actions,
+        let row = NSStackView(views: [strip, plus, spacer, notesHint, imageButton, terminal.actions,
                                       barButton("chevron.down", "Hide (⌥⌘K notes, ⌥⌘T terminal)", self, #selector(hidePressed))])
         row.spacing = 10; row.alignment = .centerY
         row.setCustomSpacing(6, after: strip)
@@ -74,10 +77,13 @@ final class BottomDrawer: NSView {
         buildNotes.isHidden = p != .buildNotes
         terminal.isHidden = p != .terminal
         notesHint.isHidden = p == .terminal
+        imageButton.isHidden = p == .terminal
         terminal.actions.isHidden = p != .terminal
         updateHint()
         rebuildStrip()
     }
+
+    @objc private func imagePressed() { onInsertImage?() }
 
     private func updateHint() {
         notesHint.stringValue = page == .buildNotes

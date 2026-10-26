@@ -53,6 +53,7 @@ struct FormatInfo: Decodable {
     var columns: Int?
     var lineSpacing: Double?         // manim line_spacing (0.3 = default)
     var valign: String?              // top | mid: where text sits in its frame
+    var link: String?                // hyperlink opened when the text is clicked in a show
 }
 
 struct ObjInfo: Decodable {
@@ -78,6 +79,8 @@ struct ObjInfo: Decodable {
     /// A text frame (x0, y0, x1, y1 in frame px): the box keeps this size whatever is typed, the text sits in it
     /// by its alignment. Text typed into a layout placeholder gets one.
     var frame: [Double]?
+    /// The group the object belongs to (a `Group(...)  # manimble group` line): its members select together.
+    var group: Int?
     var frameBox: Box? { frame.flatMap { $0.count == 4 ? Box(x0: $0[0], y0: $0[1], x1: $0[2], y1: $0[3]) : nil } }
 }
 
@@ -148,6 +151,8 @@ struct SpriteResult: Decodable {
     var error: String?
 }
 
+struct UndoMark: Decodable { var mark: Int }
+
 struct UndoResult: Decodable {
     var ok: Bool?
     var label: String?
@@ -209,9 +214,12 @@ struct DependencyReportResult: Decodable {
 struct DeckSlide: Decodable {
     var scene: String
     var pages: [String]
+    var pending: Bool?          // still rendering in the background: `pages` is empty, `builds` its expected count
+    var builds: Int?
     var error: String?
     var notes: String?
     var buildNotes: [String]?
+    var links: [[PresentDeck.LinkRegion]]?   // each build's clickable regions
 }
 
 struct PageNumberInfo: Decodable {
