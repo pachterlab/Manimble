@@ -75,7 +75,7 @@ final class ScriptPane: NSView {
         column.orientation = .vertical; column.alignment = .leading; column.spacing = 6
         column.translatesAutoresizingMaskIntoConstraints = false
         empty.font = Theme.font(12); empty.textColor = .secondaryLabelColor
-        empty.stringValue = "No script for this build. Add words to speak, pointer moves and pauses; Play ▸ Automatic Presentation plays them build by build."
+        empty.stringValue = "No script for this build. Add words to speak, pointer moves and pauses; Play ▸ Scripted Presentation plays them build by build."
         let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false
         doc.addSubview(column)
         let scroll = NSScrollView()
@@ -102,7 +102,7 @@ final class ScriptPane: NSView {
         holdField.controlSize = .small; holdField.font = Theme.font(11); holdField.alignment = .right
         holdField.stringValue = String(format: "%g", store.hold)
         holdField.target = self; holdField.action = #selector(holdChanged)
-        holdField.toolTip = "How long a build with no script stays up in an automatic presentation"
+        holdField.toolTip = "How long a build with no script stays up in a scripted presentation"
         holdField.widthAnchor.constraint(equalToConstant: 36).isActive = true
         func label(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.font = Theme.font(11); l.textColor = .secondaryLabelColor; return l }
         let voiceRow = NSStackView(views: [label("Voice"), voicePopup, accountButton]); voiceRow.spacing = 6
@@ -470,8 +470,10 @@ final class ScriptState {
     var preview: ScriptPerformer?
     var previewTask: Task<Void, Never>?
     var runner: ScriptRunner?
-    /// The next animated show is an automatic presentation.
+    /// The next animated show is a scripted presentation.
     var autoPending = false
+    /// A movie export with the script, waiting for the engine's movie to lay the narration and pointer over.
+    var movieExport: ScriptMovieExport?
 }
 
 extension MainController {
@@ -632,12 +634,12 @@ extension MainController {
         endScriptPreview(p)
     }
 
-    // MARK: automatic presentation
+    // MARK: scripted presentation
 
     @objc func autoPresentFromBeginning() { autoPresent(fromCurrent: false) }
     @objc func autoPresentFromCurrent() { autoPresent(fromCurrent: true) }
 
-    /// Play ▸ Automatic Presentation: the show (animated or stills, as Play shows it) plays itself, reading each
+    /// Play ▸ Scripted Presentation: the show (animated or stills, as Play shows it) plays itself, reading each
     /// build's script aloud and moving the pointer, then going on to the next build.
     func autoPresent(fromCurrent: Bool) {
         guard player == nil, presenter == nil, animatedPlayer == nil else { return }
@@ -661,7 +663,7 @@ extension MainController {
 
 extension MainController {
     /// MANIMBLE_TEST_SCRIPT=1 with the deck as argument: the Script panel, a step of each kind (the move traced on
-    /// the slide through window events), a step's preview, then an automatic presentation of the stills show;
+    /// the slide through window events), a step's preview, then a scripted presentation of the stills show;
     /// script.log and script-*.png in MANIMBLE_TEST_OUT.
     func scriptTest() {
         let out = ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? NSTemporaryDirectory()
@@ -730,7 +732,7 @@ extension MainController {
             // motion maths: a move takes length/speed seconds and ends on its target
             let mo = ScriptMotion(points: [CGPoint(x: 0, y: 0), CGPoint(x: 0.5, y: 0)], size: CGSize(width: 16, height: 9), speed: 0.5, noise: 1, seed: "x")
             log(String(format: "motion: duration %.2f mid %.3f,%.3f end %.3f,%.3f", mo.duration, mo.point(at: 0.5).x, mo.point(at: 0.5).y, mo.point(at: 1).x, mo.point(at: 1).y))
-            // automatic presentation (stills), every build without a script held 0.5 s
+            // scripted presentation (stills), every build without a script held 0.5 s
             store.setHold(0.5)
             self.autoPresent(fromCurrent: true)
             var seen: [String] = []

@@ -16,10 +16,12 @@ decks (default theme with pdfLaTeX, Madrid with XeLaTeX), see MARGIN, TITLE_X an
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from .importer import _num, _slug
@@ -290,6 +292,7 @@ class Theme:
         self.block_title_bg: str | None = None
         self.block_title_fg = STRUCTURE
         self.block_body_bg: str | None = None
+        self.alert = ALERT                        # \setbeamercolor{alerted text}
         self.frame_keys: dict[str, str] = {}      # \define@key{beamerframe}{key}{\def\macro{#1}}: key -> macro
         self.names: list[str] = []
         self.warnings: list[str] = []
@@ -415,8 +418,29 @@ SUP = dict(zip("0123456789+-=()niaeoxyjklmrstuvwbcdfghpABDEGHIJKLMNOPRTUVW",
                "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱᵃᵉᵒˣʸʲᵏˡᵐʳˢᵗᵘᵛʷᵇᶜᵈᶠᵍʰᵖᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ"))
 SUP.update({"T": "ᵀ", "*": "*", "′": "′", "\u2032": "′"})
 SUB = dict(zip("0123456789+-=()aeoxijklmnprstuvh", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓᵢⱼₖₗₘₙₚᵣₛₜᵤᵥₕ"))
+SCRIPTS = (set(SUP.values()) | set(SUB.values())) - {"*", "′"}
 ACCENTS = {"hat": "\u0302", "bar": "\u0304", "overline": "\u0305", "tilde": "\u0303", "vec": "\u20d7",
            "dot": "\u0307", "ddot": "\u0308", "widehat": "\u0302", "widetilde": "\u0303"}
+
+
+_TEX_CHARS: dict[str, str] = {}
+
+
+def tex_char(c: str) -> str:
+    """A character of text that maths was turned into, as pdfLaTeX can typeset it inside \\textsf (MathTex has no
+    Unicode fonts for ∈, ℕ, ₀ and the thin spaces)."""
+    if not _TEX_CHARS:
+        _TEX_CHARS.update({u: f"$\\{n}$" for n, u in MATH_SYMS.items() if n.isalpha() and len(u) == 1 and ord(u) > 127})
+        _TEX_CHARS.update({u: f"$\\mathbb{{{k}}}$" for k, u in BB.items()})
+        _TEX_CHARS.update({u: f"$^{{{k}}}$" for k, u in SUP.items() if ord(u) > 127 and ord(k[0]) < 128})
+        _TEX_CHARS.update({u: f"$_{{{k}}}$" for k, u in SUB.items()})
+        _TEX_CHARS.update({"\u2009": "\\,", "\u2005": " ", "\u2002": "\\enspace{}", "\u2003": "\\quad{}",
+                           "−": "$-$", "…": "\\ldots{}", "′": "$'$"})
+    if ord(c) < 128:
+        return c
+    if c in _TEX_CHARS:
+        return _TEX_CHARS[c]
+    return " " if c.isspace() else c
 
 
 def math_unicode(s: str, macros: dict) -> list[tuple[str, bool]] | None:
@@ -505,6 +529,8 @@ def math_unicode(s: str, macros: dict) -> list[tuple[str, bool]] | None:
                 return None
             continue
         out.append((c, c.isalpha()))
+        if c == "," and skip_ws(s, i + 1) < len(s):
+            out.append(("\u2009", False))                   # \thinmuskip after punctuation
         i += 1
     return out
 
@@ -644,18 +670,26 @@ class Inline:
 
     def math(self, math: str, style: dict, out: list):
         got = math_unicode(math, self.macros)
+        if got is not None and any(ch in SCRIPTS for ch, _ in got):
+            got = None
         if got is None:
             self.needs_math = True
             out.append(("\x01", dict(style, math=math)))
             return
+        start = len(out)
         for k, (ch, it) in enumerate(got):
-            ch = "−" if ch == "-" else ch
+            ch = {"-": "−", "'": "′"}.get(ch, ch)
             spaced = ch in RELATIONS and 0 < k < len(got) - 1         # TeX's thick space around relations
             if spaced:
                 out.append(("\u2005", dict(style)))
             out.append((ch, dict(style, i=style.get("i") or it)))
             if spaced:
                 out.append(("\u2005", dict(style)))
+        # the group's source, so a line that becomes a MathTex anyway can typeset it as maths again
+        self.groups = getattr(self, "groups", 0) + 1
+        n = len(out) - start
+        for k in range(start, len(out)):
+            out[k] = (out[k][0], dict(out[k][1], mg=(self.groups, math.strip(), k - start, n)))
 
     def command(self, name: str, s: str, j: int, style: dict, out: list) -> int:
         if name in ("(",):
@@ -677,7 +711,9 @@ class Inline:
             a = a or ""
             if a.startswith("\\"):
                 a = TEXT_SYMS.get(a[1:], "")
-            out += [(a[:1] + COMBINING[name] + a[1:], dict(style))] if a else []
+            if a[:1] in "ıȷ" and name in "'`^\"~=":           # \'{\i}: í, one precomposed character
+                a = {"ı": "i", "ȷ": "j"}[a[0]] + a[1:]
+            out += [(unicodedata.normalize("NFC", a[:1] + COMBINING[name]) + a[1:], dict(style))] if a else []
             return j
         if name in TEXT_SYMS:
             if name in ("hspace",):
@@ -792,9 +828,9 @@ class Inline:
                 elif name == "texttt":
                     st["tt"] = True
                 elif name == "alert":
-                    st["c"] = ALERT
+                    st["c"] = self.colors.named.get("alerted text", ALERT)
                 elif name == "structure":
-                    st["c"] = STRUCTURE
+                    st["c"] = self.colors.named.get("structure", STRUCTURE)
                 elif name == "inst":
                     out += [(SUP.get(ch, ch), dict(style)) for ch in body]
                     return j
@@ -821,11 +857,14 @@ class BeamerImport:
         self.colors = Colors()
         self.macros: dict = {}
         self.macro_src: list[str] = []
+        self.sans_math = True                   # beamer sets digits and letters of maths in the sans font
         self.math_pkgs: list[str] = []
+        self.inline_idx: dict[str, int] = {}                # inline maths -> snippet index (its measured width)
         self.graphics_dirs: list[Path] = [src.parent]
         self.meta: dict = {}
         self.snippets: list[tuple[str, str]] = []           # (kind, latex) typeset in one batch
         self.snippet_out: dict[int, tuple[str, float, float]] = {}
+        self.page_items: list = []
         self.n_img = 0
         self.fonts: dict[str, Path | None] = {}
         self.pil: dict = {}
@@ -1055,6 +1094,8 @@ class BeamerImport:
             elif name == "usefonttheme":
                 if a in ("serif",):
                     self.warnings.append("the serif font theme is not reproduced (sans-serif text is used)")
+                if a in ("serif", "professionalfonts"):
+                    self.sans_math = False
             elif name == "setbeamercolor":
                 spec, j = arg(pre, j)
                 d = th.colors.setdefault(a, {})
@@ -1082,6 +1123,9 @@ class BeamerImport:
                     th.block_title_bg = d.get("bg", th.block_title_bg)
                 if a == "block body" and "bg" in d:
                     th.block_body_bg = d["bg"]
+                if a == "alerted text" and d.get("fg"):
+                    th.alert = d["fg"]
+                    self.colors.named["alerted text"] = d["fg"]
             elif name == "setbeamerfont":
                 spec, j = arg(pre, j)
                 f = th.fonts.setdefault(a, {})
@@ -1297,6 +1341,47 @@ class BeamerImport:
         return pt * self.u * MANIM_MATH_EM
 
     # ------------------------------------------------------------ frames
+    BODY_DEFS = re.compile(r"\\(definecolor|colorlet|newcommand|renewcommand|providecommand|DeclareMathOperator|"
+                           r"tikzset|usetikzlibrary|pgfkeys|newlength|def)\*?(?![A-Za-z@])")
+
+    def body_definitions(self, body: str) -> str:
+        """Colours, macros and TikZ styles defined between frames (after \\begin{document}), as preamble lines, so
+        the pictures LaTeX typesets on their own still know them."""
+        outside, i = [], 0
+        pat = re.compile(r"\\begin\{frame\}|\\frame(?![A-Za-z])")
+        while (m := pat.search(body, i)):
+            outside.append(body[i:m.start()])
+            if m.group(0) == "\\frame":
+                _, j = overlay(body, m.end())
+                _, j = opt(body, j)
+                _, j = arg(body, j)
+            else:
+                _, j = env_end(body, m.end(), "frame")
+            i = j
+        outside.append(body[i:])
+        out = []
+        for chunk in outside:
+            for m in self.BODY_DEFS.finditer(chunk):
+                j = m.end()
+                if m.group(1) == "def":                     # \def\name<params>{body}
+                    k = chunk.find("{", j)
+                    if k < 0:
+                        continue
+                    _, j = balanced(chunk, k)
+                else:                                       # the command's [..] and {..} / \name arguments
+                    while True:
+                        k = skip_ws(chunk, j)
+                        if k < len(chunk) and chunk[k] == "[":
+                            _, j = opt(chunk, k)
+                        elif k < len(chunk) and chunk[k] == "{":
+                            _, j = balanced(chunk, k)
+                        elif k < len(chunk) and chunk[k] == "\\" and j == m.end():
+                            _, j = arg(chunk, k)            # \newcommand\name{..}
+                        else:
+                            break
+                out.append(chunk[m.start():j])
+        return "\n" + "\n".join(out) + "\n" if out else ""
+
     def frames(self, body: str) -> list[dict]:
         """The frames of the document, in order: {opts, title, subtitle, body}."""
         out = []
@@ -1428,12 +1513,14 @@ class BeamerImport:
                         "setcounter", "setbeamercolor", "setbeamerfont", "setbeamertemplate", "usebeamercolor",
                         "usebeamerfont", "usebeamertemplate"):
                 _, j = opt(s, j)
-                _, j = arg(s, j)
+                a1, j = arg(s, j)
                 _, j = opt(s, j)
                 _, j = opt(s, j)
                 k = skip_ws(s, j)
                 if name not in ("usebeamercolor", "usebeamerfont", "usebeamertemplate") and k < len(s) and s[k] == "{":
-                    _, j = balanced(s, k)
+                    a2, j = balanced(s, k)
+                    if name == "renewcommand" and (a1 or "").strip() == "\\arraystretch":
+                        ctx["prefix"] = ctx.get("prefix", "") + "\\renewcommand{\\arraystretch}{" + a2.strip() + "}"
                 i = j
                 continue
             if name == "fontsize" and not "".join(buf).strip():
@@ -1472,6 +1559,7 @@ class BeamerImport:
                 f, j = arg(s, j)
                 b = overlay_start(ov, st)
                 add({"t": "image", "file": (f or "").strip(), "opts": o or "", "build": st["vis"] if b is None else b,
+                     "trivlist": bool(ctx.get("trivlist")),
                      "align": ctx["align"], "width": ctx["width"]})
                 i = j
                 continue
@@ -1613,6 +1701,8 @@ class BeamerImport:
                 sub["align"] = "right"
             elif env == "flushleft":
                 sub["align"] = "left"
+            if env in ("center", "flushleft", "flushright", "figure", "figure*", "table", "table*"):
+                sub["trivlist"] = True
             if env in SIZES_11:
                 sub["size"] = self.size(env)
             if env in ("quote", "quotation"):
@@ -1681,14 +1771,16 @@ class BeamerImport:
         # anything else LaTeX draws is typeset with the document's preamble and placed as a picture, at the
         # size in force here
         body, k = env_end(s, j, env)
-        raw = f"\\begin{{{env}}}" + s[body_start:k]
+        raw = ctx.get("prefix", "") + f"\\begin{{{env}}}" + s[body_start:k]
         size = ctx.get("size")
         if size:
             name = next((n for n, pt in SIZES_11.items() if abs(pt * self.base / 11 - size) < 0.05), None)
             raw = ("\\" + name if name else f"\\fontsize{{{size / PT:.2f}}}{{{(ctx.get('pitch') or 1.2 * size) / PT:.2f}}}\\selectfont") + raw
         idx = len(self.snippets)
-        self.snippets.append(("picture", raw))
-        add({"t": "snippet", "idx": idx, "build": st["vis"], "align": ctx["align"], "env": env})
+        page = env == "tikzpicture" and bool(re.match(r"\\begin\{tikzpicture\}\s*\[[^\]]*\boverlay\b", raw[raw.find("\\begin"):]))
+        self.snippets.append(("page" if page else "picture", raw))
+        add({"t": "snippet", "idx": idx, "build": st["vis"], "align": ctx["align"], "env": env, "page": page,
+             "trivlist": bool(ctx.get("trivlist"))})
         return k
 
     def list_items(self, body: str, env: str, st: dict, ctx: dict, ov_dflt: str | None) -> list[dict]:
@@ -1770,7 +1862,10 @@ class BeamerImport:
     # ------------------------------------------------------------ snippets typeset by LaTeX
     def typeset_snippets(self):
         """Typeset every picture snippet (and every display formula, to measure it) in one LaTeX run with the
-        document's preamble; crop each page to its ink. snippet_out[i] = (png name or "", width bp, height bp)."""
+        document's preamble; crop each page to its ink. snippet_out[i] = (png name or "", width bp, height bp).
+        With LaTeX packages missing, a picture LaTeX could not draw becomes a labelled placeholder, and
+        assets/latex_pictures.json keeps what is needed to typeset it again once they are installed."""
+        from .latex_packages import missing_files, MANIFEST
         if not self.snippets:
             return
         pre = self.preamble_src
@@ -1782,54 +1877,85 @@ class BeamerImport:
             return
         pages = []
         for kind, src in self.snippets:
-            if kind == "math":
+            if kind == "inline":
+                src = "{\\normalsize $" + src + "$}"
+            elif kind == "math":
                 src = "$\\displaystyle " + src + "$" if "\\\\" not in src and "&" not in src else \
                       "$\\begin{aligned}" + src + "\\end{aligned}$"
             pages.append("\\begin{frame}[plain]\\centering\n" + src + "\n\\end{frame}")
-        doc = (pre + "\n\\setbeamertemplate{background}{}\\setbeamercolor{background canvas}{bg=white}"
-               "\\setbeamertemplate{navigation symbols}{}\n\\begin{document}\n" + "\n".join(pages) + "\n\\end{document}\n")
-        work = Path(tempfile.mkdtemp(prefix="manimble-beamer-"))
-        (work / "snippets.tex").write_text(doc, encoding="utf-8")
-        try:
-            subprocess.run([tex, "-interaction=nonstopmode", "-output-directory", str(work), str(work / "snippets.tex")],
-                           cwd=self.src.parent, capture_output=True, timeout=600)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            self.warnings.append(f"LaTeX could not typeset the pictures ({exc})")
-            return
-        pdf = work / "snippets.pdf"
-        if not pdf.exists():
-            self.warnings.append("LaTeX could not typeset the TikZ pictures and tables (see the document's preamble)")
-            return
-        try:
-            subprocess.run([ppm, "-r", "288", "-png", str(pdf), str(work / "p")], capture_output=True, timeout=600)
-        except (subprocess.TimeoutExpired, OSError):
-            return
-        from PIL import Image, ImageChops
-        pngs = sorted(work.glob("p-*.png"), key=lambda p: int(p.stem.split("-")[-1]))
-        for idx, png in enumerate(pngs[:len(self.snippets)]):
+        head = latex_head(pre)
+        missing = missing_files(pre)
+        # a missing .sty aborts the whole run: leave those packages out, and count a page with errors (its
+        # commands undefined) as one LaTeX could not draw
+        rasters, work = latex_pages(latex_head(without_packages(pre, missing)) if missing else head, pages,
+                                    self.src.parent, tex, ppm, self.warnings, strict=bool(missing))
+        failed = sum(1 for idx, (kind, _) in enumerate(self.snippets) if kind not in ("math", "inline") and idx not in rasters)
+        if failed:
+            self.warnings.append(f"LaTeX could not typeset {failed} TikZ picture(s) or table(s) "
+                                 + (f"(missing LaTeX packages: {', '.join(missing)})" if missing
+                                    else "(see the document's preamble and packages)"))
+        from PIL import Image
+        manifest = []
+        for idx, (kind, _) in enumerate(self.snippets):
+            png = rasters.get(idx)
+            if png is None:
+                if kind not in ("math", "inline") and missing:
+                    self.n_img += 1
+                    name = f"latex{self.n_img:02d}.png"
+                    # the picture's size is unknown until LaTeX draws it: a generous box it is later fitted into
+                    w, h = (self.W, self.H) if kind == "page" else (self.W - 2 * MARGIN, 0.4 * self.H)
+                    placeholder(self.assets / name, w, h, missing)
+                    self.snippet_out[idx] = (name, w, h)
+                    manifest.append({"name": name, "kind": kind, "page": pages[idx], "ok": False})
+                continue
             im = Image.open(png).convert("RGB")
-            bbox = ImageChops.difference(im, Image.new("RGB", im.size, "white")).getbbox()
-            if not bbox:
+            if kind == "page":
+                self.n_img += 1
+                name = f"latex{self.n_img:02d}.png"
+                im.save(self.assets / name)
+                self.snippet_out[idx] = (name, self.W, self.H)
+                manifest.append({"name": name, "kind": kind, "page": pages[idx], "ok": True})
+                continue
+            got = ink_crop(im)
+            if not got:
                 self.snippet_out[idx] = ("", 0.0, 0.0)
                 continue
-            pad = 4
-            bbox = (max(0, bbox[0] - pad), max(0, bbox[1] - pad), min(im.width, bbox[2] + pad), min(im.height, bbox[3] + pad))
-            w_bp, h_bp = (bbox[2] - bbox[0]) / 4, (bbox[3] - bbox[1]) / 4
-            if self.snippets[idx][0] == "math":
+            im, w_bp, h_bp = got
+            if kind in ("math", "inline"):
                 self.snippet_out[idx] = ("", w_bp - 2, h_bp - 2)
                 continue
             self.n_img += 1
             name = f"latex{self.n_img:02d}.png"
-            im.crop(bbox).save(self.assets / name)
+            im.save(self.assets / name)
             self.snippet_out[idx] = (name, w_bp, h_bp)
+            manifest.append({"name": name, "kind": kind, "page": pages[idx], "ok": True})
         shutil.rmtree(work, ignore_errors=True)
+        if missing:
+            (self.assets / MANIFEST).write_text(json.dumps(
+                {"source": str(self.src), "engine": engine, "head": head, "missing": missing, "pictures": manifest},
+                indent=1), encoding="utf-8")
 
     def collect_math(self, blocks: list[dict]):
-        """Queue every display formula for measuring."""
+        """Queue every display formula, and every piece of inline maths that will be typeset by MathTex, for
+        measuring (inline maths at the normal size; its width scales with the font size)."""
         for b in blocks:
             if b["t"] == "math":
                 b["idx"] = len(self.snippets)
                 self.snippets.append(("math", self.clean_math(b["src"], b.get("env"))))
+            srcs = [b["src"]] if b["t"] == "para" else []
+            if b["t"] == "block" and b.get("title"):
+                srcs.append(b["title"])
+            for src in srcs:
+                try:
+                    chars, needs = self.styled(src, self.size("normalsize"), None)
+                except Exception:                            # noqa: BLE001
+                    continue
+                if not needs:
+                    continue
+                for c, st in chars:
+                    if c == "\x01" and st["math"] not in self.inline_idx:
+                        self.inline_idx[st["math"]] = len(self.snippets)
+                        self.snippets.append(("inline", st["math"]))
             for sub in b.get("blocks", []):
                 self.collect_math([sub])
             for it in b.get("items", []):
@@ -1966,12 +2092,18 @@ class BeamerImport:
         y is the bottom of the previous line box (its baseline + 0.3 of the baseline skip), so consecutive lines
         sit one baseline skip apart; lists and pictures add LaTeX's \\topsep (3pt) above and below."""
         prev = None
+        prev_b: dict | None = None
         for b in blocks:
             t = b["t"]
             if t == "vspace":
+                if prev == "math":
+                    # a \vspace right after a display is attached to the empty line TeX sets after it
+                    pitch = self.pitch(self.size("normalsize"))
+                    y += pitch - 0.2 * self.size("normalsize")
+                    prev = "para"
                 y += b["h"]
                 continue
-            if prev is not None and prev in ("para", "verb") and t in ("list", "block", "math"):
+            if prev is not None and prev in ("para", "verb") and t == "list":
                 y += ITEMSEP * self.base / 11
             if t == "para":
                 y = self.place_para(b, x0, x1, y, placed, ctx)
@@ -1980,16 +2112,16 @@ class BeamerImport:
             elif t == "list":
                 y = self.place_list(b, x0, x1, y, placed, ctx)
             elif t == "math":
-                y = self.place_math(b, x0, x1, y, placed)
+                y = self.place_math(b, x0, x1, y, placed, prev_b)
             elif t in ("image", "snippet"):
-                y = self.place_picture(b, x0, x1, y, placed)
+                y = self.place_picture(b, x0, x1, y, placed, prev_b)
             elif t == "block":
                 y = self.place_block(b, x0, x1, y, placed, ctx)
             elif t == "columns":
                 y = self.place_columns(b, x0, x1, y, placed, ctx)
             elif t == "titlepage":
                 self.place_titlepage(b, placed)
-            prev = t
+            prev, prev_b = t, b
         return y
 
     def styled(self, src: str, size: float, color: str | None, italic=False) -> tuple[list, bool]:
@@ -2002,7 +2134,7 @@ class BeamerImport:
             chars.pop()
         return chars, inl.needs_math
 
-    def wrap(self, chars: list, width: float) -> list[list]:
+    def wrap(self, chars: list, width: float, ragged: bool = False) -> list[list]:
         """Greedy wrap into lines of styled characters; hard breaks stay."""
         lines, cur, i = [], [], 0
         words: list[list] = []
@@ -2036,8 +2168,11 @@ class BeamerImport:
                 continue
             ww = width_of([c for c in wd if c[0] != " "])
             # TeX justifies: every inter-word space may shrink by a third of its width. Text() cannot, so only
-            # a small overrun (2% of the width) is allowed to keep LaTeX's line breaks
-            if cur and cur_w + ww > width + 0.5 + min(shrink, 0.02 * width):
+            # a small overrun (2% of the width) is allowed to keep LaTeX's line breaks; 1% when the line holds
+            # maths, whose spacing is estimated (measured: such lines fitted one word more than LaTeX)
+            has_math = any(c == "\x01" or st.get("mg") for c, st in cur + wd)
+            tol = 0.01 if (ragged or has_math) else 0.02
+            if cur and cur_w + ww > width + 0.5 + (tol * width if ragged else min(shrink, tol * width)):
                 lines.append(cur)
                 cur, cur_w, shrink = [], 0.0, 0.0
             cur = cur + wd
@@ -2049,7 +2184,11 @@ class BeamerImport:
         return [ln for ln in lines] or [[]]
 
     def math_width(self, math: str, st: dict) -> float:
-        return 0.55 * (st.get("size") or self.size("normalsize")) * max(1, len(re.sub(r"\\[A-Za-z]+|[{}^_ ]", "x", math)) * 0.8)
+        size = st.get("size") or self.size("normalsize")
+        meas = self.snippet_out.get(self.inline_idx.get(math, -1))
+        if meas and meas[1] > 0:
+            return meas[1] * size / self.size("normalsize")
+        return 0.55 * size * max(1, len(re.sub(r"\\[A-Za-z]+|[{}^_ ]", "x", math)) * 0.8)
 
     def text_code(self, lines: list[list], size: float, align: str, box_w: float | None, pitch: float | None = None,
                   font: str = "FONT") -> tuple[str, str]:
@@ -2134,9 +2273,11 @@ class BeamerImport:
         pitch = b.get("pitch") or next((st["pitch"] for c, st in chars if st.get("pitch") and st.get("size") == size), None) \
             or self.pitch(size)
         width = x1 - x0
-        lines = self.wrap(chars, width)
+        lines = self.wrap(chars, width, bool(ctx.get("ragged")))
         baseline = y + 0.7 * pitch
         b["_baseline"], b["_size"] = baseline, size
+        b["_last_end"] = x0 + sum(self.measure(c, st) if c != "\x01" else self.math_width(st["math"], st)
+                                  for c, st in lines[-1])
         align = b.get("align") or "left"
         if needs_math:
             for k, ln in enumerate(lines):
@@ -2164,27 +2305,70 @@ class BeamerImport:
         return last + 0.3 * pitch
 
     def math_line(self, line: list, size: float) -> str | None:
-        """A MathTex for one line mixing text and maths LaTeX could not turn into characters."""
-        parts, txt = [], []
+        """A MathTex for one line mixing text and maths LaTeX could not turn into characters. Text runs keep
+        their colour, italics and bold; inline maths that is whole on this line is typeset from its source."""
+        colors = [st.get("c") or TEXT for c, st in line if not c.isspace()]
+        color = max(set(colors), key=colors.count) if colors else TEXT
+        parts, txt = [], []                                 # txt: (char, key) with key = (colour, italic, bold)
+
+        def tex_text(t: str) -> str:
+            out = []
+            for c in unicodedata.normalize("NFC", t.replace("\u00a0", "~")):
+                acc = {"\u0300": "`", "\u0301": "'", "\u0302": "^", "\u0303": "~", "\u0308": '"'}.get(c)
+                if acc and out:                             # ı + U+0301 (García) does not compose: \'{\i}
+                    base = out.pop()
+                    out.append("\\" + acc + "{" + ("\\i" if base == "ı" else base) + "}")
+                elif not unicodedata.combining(c):
+                    out.append("\\" + c if c in "&%$#_{}" else tex_char(c))
+            return "".join(out)
 
         def flush():
-            if txt:
-                t = "".join(txt).replace("\u00a0", "~")
-                t = "".join("\\" + c if c in "&%$#_{}" else c for c in t)
-                parts.append("\\textsf{" + t + "}")
-                txt.clear()
+            if not txt:
+                return
+            runs: list = []
+            for c, key in txt:
+                if runs and runs[-1][0] == key:
+                    runs[-1][1].append(c)
+                else:
+                    runs.append((key, [c]))
+            for (col, it, bf), chars in runs:
+                t = tex_text("".join(chars))
+                if it:
+                    t = "\\textit{" + t + "}"
+                if bf:
+                    t = "\\textbf{" + t + "}"
+                t = "\\textsf{" + t + "}"
+                if col != color:
+                    t = f"\\textcolor[HTML]{{{col[1:]}}}{{{t}}}"
+                parts.append(t)
+            txt.clear()
+        counts: dict = {}
         for c, st in line:
+            if st.get("mg"):
+                counts[st["mg"][0]] = counts.get(st["mg"][0], 0) + 1
+        skip = None
+        for c, st in line:
+            mg = st.get("mg")
+            if mg and mg[0] == skip:
+                continue
             if c == "\x01":
                 flush()
                 parts.append(st["math"])
+            elif mg and mg[2] == 0 and counts.get(mg[0]) == mg[3]:
+                flush()
+                col = st.get("c") or TEXT
+                m = mg[1]
+                parts.append(f"\\textcolor[HTML]{{{col[1:]}}}{{{m}}}" if col != color else m)
+                skip = mg[0]
             else:
-                txt.append(c)
+                txt.append((c, (st.get("c") or TEXT, bool(st.get("i")), bool(st.get("b")))))
         flush()
         tex = "".join(parts).strip()
         if not tex:
             return None
-        color = next((st.get("c") for _, st in line if st.get("c")), TEXT)
-        return f"MathTex({pyraw(tex)}, font_size={_num(self.fs_math(size), 1)}, color=\"{color}\")"
+        # MathTex sets its string in align* (display style): \pmod would get its 18mu display gap
+        tex = re.sub(r"\\pmod\s*(\{[^}]*\}|\\[A-Za-z]+|\S)", r"\\mkern8mu(\\mathrm{mod}\\ \1)", tex)
+        return f"MathTex({pyraw(chr(92) + 'textstyle ' + tex)}, font_size={_num(self.fs_math(size), 1)}, color=\"{color}\")"
 
     def place_verb(self, b: dict, x0: float, y: float, placed: list) -> float:
         size = self.size("small")
@@ -2258,6 +2442,14 @@ class BeamerImport:
                 return
             right = text_x - 0.4 * size
             top = baseline - self.ink_top(label, {"size": size})
+            if it["label"] is not None and "$" in it["label"]:
+                chars, _ = self.styled(it["label"], size, th.structure)
+                code = self.math_line(chars, size)
+                if code:
+                    placed.append((it["build"], f"self.add({code}.move_to(({_num(self.ux(right))}, "
+                                                f"{_num(self.uy(baseline - 0.3 * size))}, 0), aligned_edge=RIGHT))  # manimble",
+                                   top, baseline))
+                    return
             code = (f"Text({label!r}, font=FONT, font_size={_num(self.fs_text(size), 1)}, color=\"{th.structure}\", "
                     f"disable_ligatures=True).move_to(({_num(self.ux(right))}, {_num(self.uy(top))}, 0), aligned_edge=UR)")
             placed.append((it["build"], f"self.add({code})  # manimble", top, baseline))
@@ -2288,25 +2480,47 @@ class BeamerImport:
                 f".set_sheen(0.35, UL).move_to(({_num(self.ux(cx))}, {_num(self.uy(cy))}, 0))")
         placed.append((build, f"self.add({code})  # manimble", cy - r, cy + r))
 
-    def place_math(self, b: dict, x0: float, x1: float, y: float, placed: list) -> float:
+    def place_math(self, b: dict, x0: float, x1: float, y: float, placed: list, prev: dict | None = None) -> float:
+        """A display formula where TeX puts it: a baseline skip plus \\abovedisplayskip (11pt at 11pt) below the
+        line before (the short skips when that line ends left of the formula; an empty line when the display
+        starts a paragraph), \\belowdisplayskip plus a baseline skip to the line after."""
         size = self.size("normalsize")
+        k = self.base / 11
+        pitch = self.pitch(size)
         src = self.clean_math(b["src"], b.get("env"))
+        if not src:
+            return y
         meas = self.snippet_out.get(b.get("idx", -1))
         rows = src.count("\\\\") + 1
         if meas and meas[2] > 0:
-            h = meas[2]
+            w, h = meas[1], meas[2]
         else:
             h = rows * 1.5 * size + (0.6 * size if re.search(r"\\(frac|sum|int|prod)", src) else 0)
-        y += 0.5 * size
-        cy = y + h / 2
-        if not src:
-            return y
+            w = 0.6 * (x1 - x0)
+        # depth below the baseline: brackets, fractions and subscripts reach a quarter em down; a tall or
+        # multi-row display is centred on the maths axis (a quarter em above the baseline)
+        depth = 0.25 * size if re.search(r"[(){}\[\]_]|\\(frac|sum|int|prod|sqrt|binom|left)", src) else 0.06 * size
+        if h > 1.3 * size or rows > 1:
+            depth = max(depth, (h - 0.5 * size) / 2)
+        depth = min(depth, h)
+        ht = h - depth
+        above, below = 11 * PT * k, 11 * PT * k
+        left = (x0 + x1) / 2 - w / 2
+        if prev is not None and prev.get("t") in ("para", "verb"):
+            prev_baseline, prev_depth = y - 0.3 * pitch, 0.2 * size
+            if prev.get("_last_end") is not None and prev["_last_end"] < left - 0.5:
+                above, below = 0.0, 6.5 * PT * k
+        else:
+            prev_baseline, prev_depth = y, 0.0                # the empty first line of the paragraph
+        baseline = prev_baseline + max(pitch, prev_depth + ht) + above
+        cy = baseline + depth - h / 2
         code = (f"MathTex({pyraw(src)}, font_size={_num(self.fs_math(size), 1)}, color=\"{TEXT}\")"
                 f".move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy(cy))}, 0))")
-        placed.append((b["build"], f"self.add({code})  # manimble", y, y + h))
-        return y + h + 0.6 * size
+        placed.append((b["build"], f"self.add({code})  # manimble", baseline - ht, baseline + depth))
+        b["_baseline"], b["_depth"] = baseline, depth
+        return baseline + below + max(pitch, depth + 0.7 * size) - 0.7 * pitch
 
-    def place_picture(self, b: dict, x0: float, x1: float, y: float, placed: list) -> float:
+    def place_picture(self, b: dict, x0: float, x1: float, y: float, placed: list, prev: dict | None = None) -> float:
         if b["t"] == "image":
             got = self.image(b["file"])
             if not got:
@@ -2340,53 +2554,96 @@ class BeamerImport:
             if not name:
                 self.warnings.append(f"a {b.get('env', 'LaTeX')} environment could not be typeset")
                 return y
+            if b.get("page"):                               # remember picture, overlay: drawn on the whole page
+                self.page_items.append((b["build"], f'self.add(ImageMobject(ASSETS / "{name}").set(width={_num(self.FW)})'
+                                                    f'.move_to((0, 0, 0)))  # manimble', 0.0, self.H))
+                return y
             if w > x1 - x0:
                 h, w = h * (x1 - x0) / w, x1 - x0
             obj = f'ImageMobject(ASSETS / "{name}").set(width={_num(w * self.u)})'
         align = b.get("align") or "left"
         cx = {"center": (x0 + x1) / 2, "right": x1 - w / 2}.get(align, x0 + w / 2)
-        sep = ITEMSEP * self.base / 11
-        y += sep
-        placed.append((b["build"], f"self.add({obj}.move_to(({_num(self.ux(cx))}, {_num(self.uy(y + h / 2))}, 0)))  # manimble",
-                       y, y + h))
-        return y + h + sep
+        k = self.base / 11
+        size = self.size("normalsize")
+        pitch = self.pitch(size)
+        # TeX sets the picture as a line of its own: interline glue (at least \lineskip, 1pt) after the line
+        # before, the next line a baseline skip under its bottom; the center environment (a trivlist) adds
+        # \topsep (9pt at 11pt, measured) above and below
+        topsep = 9 * PT * k if b.get("trivlist") else 0.0
+        if prev is None or prev.get("t") not in ("para", "verb", "list"):
+            top = y + topsep + (1 * PT * k if prev is not None else 0.0)
+        else:
+            prev_baseline, prev_depth = y - 0.3 * pitch, 0.2 * size
+            top = prev_baseline + prev_depth + topsep + max(1 * PT * k, pitch - prev_depth - h)
+        placed.append((b["build"], f"self.add({obj}.move_to(({_num(self.ux(cx))}, {_num(self.uy(top + h / 2))}, 0)))  # manimble",
+                       top, top + h))
+        return top + h + topsep + max(1 * PT * k, pitch - 0.69 * size) + 0.69 * size - 0.7 * pitch
 
     def place_block(self, b: dict, x0: float, x1: float, y: float, placed: list, ctx: dict) -> float:
         size = self.size("normalsize")
         th = self.theme
         color = {"alertblock": ALERT, "exampleblock": EXAMPLE}.get(b["kind"], th.structure)
         if th.rounded and th.block_title_bg:
-            # the rounded inner theme: a title bar, a tinted body, rounded corners and a shadow below
+            # the rounded inner theme (beamerboxesrounded): \medskip, then 4bp of which the bar's rounded top
+            # fills 3, the title box (depth at least 1.5pt), a 6pt transition the body overlaps by 1.5pt, 2pt,
+            # the body, 0.5pt, a 3bp rounded bottom, 2bp, \smallskip; in the theme's block colours
+            k = self.base / 11
             pitch = self.pitch(size)
-            title_bg = {"alertblock": "#BF0000", "exampleblock": "#008000"}.get(b["kind"], th.block_title_bg)
-            body_bg = mix(title_bg, "#FFFFFF", 10)
-            y += 0.3 * size
-            top = y
-            start = len(placed)
-            if b.get("title"):
-                head_h = pitch + 0.85
-                self.place_para({"src": b["title"], "build": b["build"], "size": size, "color": th.block_title_fg,
-                                 "align": "left"}, x0, x1, y + 0.11 * pitch, placed, ctx)
-                y = top + head_h
+            kind = b["kind"]
+            variant = (" example" if kind in ("exampleblock", "example", "examples") else
+                       " alerted" if kind == "alertblock" else "")
+            if variant:
+                title_fg, title_bg = th.palette("block title" + variant, "#FFFFFF",
+                                                "#BF0000" if variant == " alerted" else "#006000")
+                _, body_bg = th.palette("block body" + variant, TEXT, None)
             else:
-                head_h = 0.0
-            body = self.layout(b["blocks"], x0, x1, y - 0.2, placed, ctx)
-            bottom = body + 0.1 * pitch
-            w, r = (x1 - x0) * self.u, 4 * PT * self.u
+                title_fg, title_bg, body_bg = th.block_title_fg, th.block_title_bg, th.block_body_bg
+            title_bg = title_bg or th.block_title_bg
+            body_bg = body_bg or mix(title_bg, "#FFFFFF", 10)
+            prev_baseline, prev_depth = y - 0.3 * pitch, 0.2 * size   # y is the previous baseline + 0.3 pitch
+            start = len(placed)
+            sub = dict(ctx, ragged=True)
+            if b.get("title"):
+                tplain = plain(self.styled(b["title"], size, title_fg)[0])
+                ht = self.ink_top(tplain, {"size": size})
+                dp = max((0.25 if re.search(r"[(){}\[\]]", tplain) else 0.2 if re.search(r"[gjpqy;,]", tplain) else 0.0) * size,
+                         1.5 * PT * k)
+                glue = max(1 * PT * k, pitch - prev_depth - ht - dp)
+            else:
+                glue = max(1 * PT * k, pitch - prev_depth - 1.5 * PT * k)
+            top = prev_baseline + prev_depth + 6 * PT * k + glue + 1
+            if b.get("title"):
+                baseline = top + 3 + ht
+                self.place_para({"src": b["title"], "build": b["build"], "size": size, "color": title_fg, "align": "left"},
+                                x0, x1, baseline - 0.7 * pitch, placed, sub)
+                box_bottom = baseline + dp
+                head_bottom = box_bottom + 1 * PT * k
+            else:
+                box_bottom = top + 3 - 4.5 * PT * k
+                head_bottom = None
+            y_body = box_bottom + 6.5 * PT * k + 0.69 * size - 0.7 * pitch
+            end = self.layout(b["blocks"], x0, x1, y_body, placed, sub)
+            bottom = end - 0.3 * pitch + 0.2 * size + 0.5 * PT * k + 3
+            w, r = (x1 - x0) * self.u, 4 * self.u
+            cx = self.ux((x0 + x1) / 2)
             code = []
             if th.shadow:
                 code.append(f"RoundedRectangle(corner_radius={_num(r, 3)}, width={_num(w)}, height={_num((bottom - top) * self.u)}, "
                             f"color=\"#808080\", fill_opacity=0.45, stroke_width=0)"
-                            f".move_to(({_num(self.ux((x0 + x1) / 2) + 0.012)}, {_num(self.uy((top + bottom) / 2) - 0.02)}, 0))")
+                            f".move_to(({_num(cx + 0.012)}, {_num(self.uy((top + bottom) / 2) - 0.02)}, 0))")
             code.append(f"RoundedRectangle(corner_radius={_num(r, 3)}, width={_num(w)}, height={_num((bottom - top) * self.u)}, "
                         f"color=\"{body_bg}\", fill_opacity=1, stroke_width=0)"
-                        f".move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy((top + bottom) / 2))}, 0))")
-            if head_h:
-                code.append(f"Rectangle(width={_num(w)}, height={_num(head_h * self.u)}, color=\"{title_bg}\", fill_opacity=1, "
-                            f"stroke_width=0).move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy(top + head_h / 2))}, 0))")
+                        f".move_to(({_num(cx)}, {_num(self.uy((top + bottom) / 2))}, 0))")
+            if head_bottom is not None:
+                hh = (head_bottom - top) * self.u
+                code.append(f"RoundedRectangle(corner_radius={_num(min(r, hh / 2), 3)}, width={_num(w)}, height={_num(hh)}, "
+                            f"color=\"{title_bg}\", fill_opacity=1, stroke_width=0)"
+                            f".move_to(({_num(cx)}, {_num(self.uy((top + head_bottom) / 2))}, 0))")
+                code.append(f"Rectangle(width={_num(w)}, height={_num(hh / 2)}, color=\"{title_bg}\", fill_opacity=1, "
+                            f"stroke_width=0).move_to(({_num(cx)}, {_num(self.uy(head_bottom - (head_bottom - top) / 4))}, 0))")
             backs = [(b["build"], f"self.add({c})  # manimble", top, bottom) for c in code]
             placed[start:start] = backs
-            return bottom + 0.5 * size
+            return bottom - 3 + 2 + 3 * PT * k + max(1 * PT * k, pitch - 0.69 * size) + 0.69 * size - 0.7 * pitch
         y += 0.2 * size
         if b.get("title"):
             y = self.place_para({"src": b["title"], "build": b["build"], "size": size, "color": color, "align": "left"},
@@ -2693,6 +2950,7 @@ class BeamerImport:
     # ------------------------------------------------------------ the deck
     def run(self, progress=None) -> dict:
         pre, body = self.read()
+        pre += self.body_definitions(body)
         self.preamble(pre)
         self.deck.mkdir(parents=True, exist_ok=True)
         self.assets.mkdir(parents=True, exist_ok=True)
@@ -2730,9 +2988,11 @@ class BeamerImport:
             subtitle = ctx["frame"].get("framesubtitle")
             self.cur_frame = {"title": title, "index": fi, "n_images": 0}
             head: list = []
+            self.page_items = []                            # remember picture, overlay: not part of the body's flow
             title_bottom = self.place_frametitle(fr, title, subtitle, head)
             is_title = any(b["t"] == "titlepage" for b in blocks)
-            if not is_title or th.footline == "custom":
+            is_plain = "plain" in fr["opts"].replace(" ", "").split(",")
+            if (not is_title or th.footline == "custom") and not is_plain:
                 self.place_footline(fi, len(parsed), head)
             self.layout(blocks, th.margin_l, self.W - th.margin_r, 0.0, placed, ctx)
             body_items = [p for p in placed if not is_title]
@@ -2744,14 +3004,22 @@ class BeamerImport:
                     dy = title_bottom + 12.7 * self.base / 11 - top
                 elif "b" in opts:
                     dy = self.H - 12 - bot
-                else:
-                    # beamer leaves 40% of the free space above the content and 60% below (measured)
+                elif th.frametitle_bg:
+                    # beamer leaves 40% of the free space above the content and 60% below (measured with Madrid)
                     dy = (0.4 * self.H + 17 * self.H / 255.12) - 0.4 * (bot - top) - top
+                else:
+                    # beamer: "0pt plus 1fill" above the body and "plus 1.5fill" below, inside the text area left
+                    # under the frame title box (28.7bp at 11pt); the text area is the paper less the footline
+                    # (4pt for the navigation symbols, 12.4pt for a frame number, 12.67pt for infolines)
+                    k = self.base / 11
+                    foot = {"none": 4.0, "infolines": 12.67}.get(th.footline, 12.4) * PT * k
+                    title_h = max(28.7 * k, title_bottom)
+                    dy = title_h + 0.4 * (self.H - foot - title_h - (bot - top)) - top
                     dy = max(dy, title_bottom + 4 - top)
                 if bot + dy > self.H + 2:
                     self.warnings.append(f"frame {fi}: the content runs off the bottom of the slide")
                 placed = [shift(p, dy, self) if p in body_items else p for p in placed]
-            placed = head + placed
+            placed = self.page_items + head + placed
             plain_title = plain(self.styled(title or "", 10, None)[0]) if title else ""
             if not plain_title and any(b["t"] == "titlepage" for b in blocks):
                 plain_title = plain(self.styled(self.meta.get("title", "Title"), 10, None)[0])
@@ -2785,7 +3053,20 @@ class BeamerImport:
         colors = [f"\\definecolor{{{n}}}{{HTML}}{{{c[1:]}}}" for n, c in self.colors.named.items()
                   if n not in XCOLORS and re.fullmatch(r"[A-Za-z0-9]+", n)]
         tpl += colors
-        tpl += ["\\providecommand{\\alert}[1]{\\textcolor{red}{#1}}", "\\providecommand{\\structure}[1]{#1}",
+        if self.sans_math:
+            # beamer's default font theme (beamerbasefont.sty): operators, digits and letters in the sans family
+            tpl += ["\\usepackage{lmodern}",
+                    "\\SetSymbolFont{operators}{normal}{OT1}{\\sfdefault}{m}{n}",
+                    "\\DeclareSymbolFont{numbers}{OT1}{\\sfdefault}{m}{n}",
+                    "\\DeclareSymbolFont{pureletters}{OT1}{\\sfdefault}{m}{it}",
+                    "\\DeclareMathAlphabet{\\mathsf}{OT1}{\\sfdefault}{m}{n}",
+                    "\\DeclareMathAlphabet{\\mathit}{OT1}{\\sfdefault}{m}{it}",
+                    "\\DeclareMathAlphabet{\\mathbf}{OT1}{\\sfdefault}{bx}{n}"]
+            tpl += [f"\\DeclareMathSymbol{{{c}}}\\mathalpha{{numbers}}{{`{c}}}" for c in "0123456789"]
+            tpl += [f"\\DeclareMathSymbol{{{c}}}\\mathalpha{{pureletters}}{{`{c}}}"
+                    for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"]
+        tpl += [f"\\providecommand{{\\alert}}[1]{{\\textcolor[HTML]{{{self.theme.alert[1:]}}}{{#1}}}}",
+                "\\providecommand{\\structure}[1]{#1}",
                 "\\providecommand{\\href}[2]{#2}", "\\providecommand{\\url}[1]{\\texttt{#1}}"]
         template = ""
         if len(tpl) > 1 or self.macro_src:
@@ -2847,6 +3128,142 @@ def pango_fonts() -> list[str]:
         except Exception:                                        # noqa: BLE001
             _PANGO_FONTS = []
     return _PANGO_FONTS
+
+
+def latex_head(pre: str) -> str:
+    """The document's preamble for typesetting pictures on their own: plain white pages."""
+    return (pre + "\n\\setbeamertemplate{background}{}\\setbeamercolor{background canvas}{bg=white}"
+            "\\setbeamertemplate{navigation symbols}{}\n\\begin{document}\n")
+
+
+def without_packages(pre: str, files: list[str]) -> str:
+    """The preamble with the \\usepackage / \\use…theme lines of the missing `files` taken out."""
+    from .latex_packages import THEME_FILE
+    gone = {f for f in files}
+
+    def keep(m):
+        kind, names = m.group(1), [n.strip() for n in m.group(3).split(",")]
+        file = (lambda n: THEME_FILE[kind] + n + ".sty") if kind in THEME_FILE else (lambda n: n + ".sty")
+        rest = [n for n in names if n and file(n) not in gone]
+        return f"\\{kind}{m.group(2) or ''}{{{','.join(rest)}}}" if rest else ""
+    return re.sub(r"\\(usepackage|RequirePackage|usetheme|usecolortheme|useinnertheme|useoutertheme|usefonttheme)"
+                  r"\s*(\[[^\]]*\])?\s*\{([^}]*)\}", keep, pre)
+
+
+def latex_pages(head: str, pages: list[str], cwd: Path, tex: str, ppm: str,
+                warnings: list[str], strict: bool = False) -> tuple[dict[int, Path], Path]:
+    """Typeset `pages` (each a whole frame) after `head` and rasterise them at 288 dpi: ({page index: png}, the
+    work folder, which the caller removes). Pages LaTeX could not typeset are left out; `strict`: so are pages
+    whose run logged an error."""
+    work = Path(tempfile.mkdtemp(prefix="manimble-beamer-"))
+    passes = 2 if any("remember picture" in pg for pg in pages) else 1
+
+    def compile_(stem: str, body: list[str]) -> list[Path]:
+        (work / f"{stem}.tex").write_text(head + "\n".join(body) + "\n\\end{document}\n", encoding="utf-8")
+        try:
+            for _ in range(passes):                     # remember picture needs the .aux of a first run
+                subprocess.run([tex, "-interaction=nonstopmode", "-output-directory", str(work), str(work / f"{stem}.tex")],
+                               cwd=cwd, capture_output=True, timeout=600)
+            pdf = work / f"{stem}.pdf"
+            log = work / f"{stem}.log"
+            if not pdf.exists() or strict and log.exists() and re.search(
+                    r"^! ", log.read_text(encoding="utf-8", errors="replace"), re.M):
+                return []
+            subprocess.run([ppm, "-r", "288", "-png", str(pdf), str(work / stem)], capture_output=True, timeout=600)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            warnings.append(f"LaTeX could not typeset the pictures ({exc})")
+            return []
+        return sorted(work.glob(f"{stem}-*.png"), key=lambda p: int(p.stem.split("-")[-1]))
+
+    got = compile_("p", pages)
+    if got:
+        return dict(enumerate(got[:len(pages)])), work
+    # one picture LaTeX cannot typeset (an undefined colour, a missing package) stops the whole run after 100
+    # errors: typeset each on its own so the rest still come through
+    rasters = {}
+    for idx, page in enumerate(pages):
+        one = compile_(f"s{idx}", [page])
+        if one:
+            rasters[idx] = one[0]
+    return rasters, work
+
+
+def ink_crop(im):
+    """A 288-dpi page cropped to its ink (4 px of white around it): (image, width bp, height bp), or None if blank."""
+    from PIL import Image, ImageChops
+    bbox = ImageChops.difference(im, Image.new("RGB", im.size, "white")).getbbox()
+    if not bbox:
+        return None
+    pad = 4
+    bbox = (max(0, bbox[0] - pad), max(0, bbox[1] - pad), min(im.width, bbox[2] + pad), min(im.height, bbox[3] + pad))
+    return im.crop(bbox), (bbox[2] - bbox[0]) / 4, (bbox[3] - bbox[1]) / 4
+
+
+def placeholder(path: Path, w_bp: float, h_bp: float, missing: list[str]):
+    """A light grey box saying which LaTeX packages the picture is waiting for."""
+    from PIL import Image, ImageDraw, ImageFont
+    w, h = max(40, int(w_bp * 4)), max(40, int(h_bp * 4))
+    im = Image.new("RGB", (w, h), "#F2F2F2")
+    d = ImageDraw.Draw(im)
+    d.rectangle((2, 2, w - 3, h - 3), outline="#B0B0B0", width=4)
+    try:
+        font = ImageFont.load_default(size=max(18, min(w, h) // 9))
+    except TypeError:                                    # Pillow < 10.1
+        font = ImageFont.load_default()
+    names = ", ".join(Path(m).stem for m in missing[:4]) + (" …" if len(missing) > 4 else "")
+    text = f"Needs LaTeX packages:\n{names}"
+    box = d.multiline_textbbox((0, 0), text, font=font, align="center")
+    d.multiline_text(((w - box[2]) / 2, (h - box[3]) / 2), text, fill="#707070", font=font, align="center")
+    im.save(path)
+
+
+def retypeset_pictures(assets: Path) -> dict:
+    """Typeset again the pictures an import left as placeholders (after their LaTeX packages were installed),
+    replacing the placeholder files in place so the slides that show them stay as they are."""
+    from PIL import Image
+    from .latex_packages import missing_files, MANIFEST
+    f = assets / MANIFEST
+    if not f.is_file():
+        return {"ok": True, "updated": 0, "failed": 0}
+    man = json.loads(f.read_text(encoding="utf-8"))
+    todo = [p for p in man.get("pictures", []) if not p.get("ok")]
+    tex, ppm = find_tool(man.get("engine") or "pdflatex"), find_tool("pdftoppm")
+    if tex is None or ppm is None:
+        return {"ok": False, "error": "LaTeX or pdftoppm was not found"}
+    warnings: list[str] = []
+    updated = 0
+    if todo:
+        src = Path(man.get("source") or assets)
+        cwd = src.parent if src.parent.is_dir() else assets
+        rasters, work = latex_pages(man["head"], [p["page"] for p in todo], cwd, tex, ppm, warnings, strict=True)
+        for i, pic in enumerate(todo):
+            png = rasters.get(i)
+            if png is None:
+                continue
+            im = Image.open(png).convert("RGB")
+            got = (im, 0, 0) if pic["kind"] == "page" else ink_crop(im)
+            if not got:
+                continue
+            im = got[0]
+            if pic["kind"] != "page":
+                # the slide sizes the file as it sized the placeholder: draw the picture at its natural size (smaller
+                # if it does not fit) in the middle of a transparent canvas of the placeholder's size
+                with Image.open(assets / pic["name"]) as ph:
+                    cw, ch = ph.size
+                k = min(1.0, cw / im.width, ch / im.height)
+                if k < 1:
+                    im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
+                canvas = Image.new("RGBA", (cw, ch), (255, 255, 255, 0))
+                canvas.paste(im, ((cw - im.width) // 2, (ch - im.height) // 2))
+                im = canvas
+            im.save(assets / pic["name"])
+            pic["ok"] = True
+            updated += 1
+        shutil.rmtree(work, ignore_errors=True)
+    man["missing"] = missing_files(man["head"])
+    f.write_text(json.dumps(man, indent=1), encoding="utf-8")
+    return {"ok": True, "updated": updated, "failed": sum(1 for p in man["pictures"] if not p.get("ok")),
+            "missing": man["missing"]}
 
 
 def find_tool(name: str) -> str | None:

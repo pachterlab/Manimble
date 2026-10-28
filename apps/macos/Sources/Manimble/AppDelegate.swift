@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: MainController! { lastMain ?? controllers.last }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        // Each deck gets its own window, never a tab (macOS merges windows into tabs under "Prefer tabs" or full screen)
+        NSWindow.allowsAutomaticWindowTabbing = false
         buildMenu()
         router.target = { [weak self] in self?.controller }
         func wire(_ menu: NSMenu?) {
@@ -105,6 +107,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationWillTerminate(_ n: Notification) { controllers.forEach { $0.finish() } }
 
+    /// The About panel: name, version (from the bundle), license and authors.
+    @objc func showAbout(_ sender: Any?) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "X.Y.Z"
+        let para = NSMutableParagraphStyle(); para.alignment = .center
+        let credits = NSAttributedString(
+            string: "License: BSD-2\nDeveloped by Joseph Rich and Lior Pachter. 2026",
+            attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                         .foregroundColor: NSColor.labelColor, .paragraphStyle: para])
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "Manimble",
+            .applicationVersion: version,
+            .version: "",                                   // no "(build)" suffix
+            .credits: credits,
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "",
+        ])
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     private func item(_ title: String, _ sel: Selector, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
         i.keyEquivalentModifierMask = mods
@@ -120,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             main.addItem(top)
         }
         add("Manimble", [
-            item("About Manimble", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            item("About Manimble", #selector(showAbout)),
             .separator(),
             item("Install Dependencies…", #selector(MainController.installDependencies), ""),
             item("Choose Python…", #selector(MainController.choosePython), ""),
@@ -339,8 +359,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Play from Beginning", #selector(MainController.playMenuFromBeginning), "p", [.command, .option, .shift]),
             item("Play from Current Slide", #selector(MainController.playMenuFromCurrent), "p", [.command, .option]),
             item("Presenter View", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
-            item("Automatic Presentation", #selector(MainController.autoPresentFromBeginning), "", []),
-            item("Automatic Presentation from Current Slide", #selector(MainController.autoPresentFromCurrent), "", []),
+            item("Scripted Presentation", #selector(MainController.autoPresentFromBeginning), "", []),
+            item("Scripted Presentation from Current Slide", #selector(MainController.autoPresentFromCurrent), "", []),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
             animationsItem,

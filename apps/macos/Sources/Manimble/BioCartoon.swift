@@ -18,6 +18,8 @@ struct BCIcon: Codable, Equatable {
     var svg_key: String?        // set when the icon is published as SVG
     var variant: String?
     var taxa: [BCTaxon]?        // its place in BioCartoon's taxonomy (biocartoon 0.3.4+)
+    var stars: Int?             // how many people starred it, as of the catalog and the last sync (see BCStars)
+    var starred: Bool?          // this install starred it
 
     /// The database the icon is listed under: BioCartoon's own drawings are uploads (source `user`) by "BioCartoon".
     var database: String { source == "user" && author == "BioCartoon" ? "biocartoon" : source }
@@ -237,6 +239,11 @@ enum BioCartoonCLI {
         _ = try await run(exe, ["fetch", id, "--out", dest.path, "--max-side", String(maxSide), "--json"])
     }
 
+    /// Download the icon's SVG as published (fails when it has none).
+    static func fetchSVG(_ exe: String, id: String, to dest: URL) async throws {
+        _ = try await run(exe, ["fetch", id, "--svg", "--out", dest.path, "--json"])
+    }
+
     /// Write the icon into the PNG's metadata (its title, author, license and credit, and the whole record in the
     /// comment), so a picture placed from the catalog keeps its credit wherever the file goes.
     static func tag(_ url: URL, with icon: BCIcon) {
@@ -254,8 +261,24 @@ enum BioCartoonCLI {
     }
     private static let tagPrefix = "biocartoon:"
 
+    /// `tag` for a vector picture: the record in a comment at the end of the SVG (base64, as a comment cannot hold "--").
+    static func tagSVG(_ url: URL, with icon: BCIcon) {
+        guard let json = try? JSONEncoder().encode(icon), let h = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? h.close() }
+        _ = try? h.seekToEnd()
+        try? h.write(contentsOf: Data("<!-- \(svgTagPrefix)\(json.base64EncodedString()) -->\n".utf8))
+    }
+    private static let svgTagPrefix = "biocartoon64:"
+
     /// The catalog icon a picture file was placed from (what `tag` wrote), nil for any other picture.
     static func origin(ofImageAt path: String) -> BCIcon? {
+        if path.lowercased().hasSuffix(".svg") {
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+                  let r = text.range(of: "<!-- " + svgTagPrefix, options: .backwards),
+                  let end = text.range(of: " -->", range: r.upperBound..<text.endIndex),
+                  let data = Data(base64Encoded: String(text[r.upperBound..<end.lowerBound])) else { return nil }
+            return try? JSONDecoder().decode(BCIcon.self, from: data)
+        }
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
         // ImageIO keeps the PNG comment as the EXIF user comment
@@ -344,6 +367,15 @@ enum BioCartoonCLI {
         if let u = Bundle.main.url(forResource: "biocartoon", withExtension: "png"), let img = NSImage(contentsOf: u) { return img }
         return NSImage(systemSymbolName: "paintpalette", accessibilityDescription: "BioCartoon") ?? NSImage()
     }()
+
+    /// The same logo as black-and-white line art (a template image, so it follows the toolbar's tint like the SF Symbols).
+    static let monoLogo: NSImage = {
+        if let u = Bundle.main.url(forResource: "biocartoon-mono", withExtension: "png"), let img = NSImage(contentsOf: u) {
+            img.isTemplate = true
+            return img
+        }
+        return NSImage(systemSymbolName: "paintpalette", accessibilityDescription: "BioCartoon") ?? NSImage()
+    }()
 }
 
 /// Thumbnails, downsampled from the icons' PNGs and kept in memory.
@@ -380,6 +412,184 @@ final class BCThumbs {
     }
 }
 
+/// Stars on catalog icons, shared with the BioCartoon editor. The counts live on BioCartoon's submissions Worker, which
+/// tells installs apart by a random client id; Manimble uses the editor's own id when the editor is installed, so a star
+/// given in either app is the same star. The latest counts go into the editor's usage file (`usage.sqlite`, table `stars`),
+/// which `biocartoon search --sort popular` orders by.
+///
+///   GET  <server>/stars/all                  -> {id: n} for every icon with a star
+///   GET  <server>/stars?ids=a,b&client=<id>  -> {"stars": {id: n}, "mine": [id]}
+///   POST <server>/star {"id", "client", "on"} -> {"id", "stars", "starred"}
+@MainActor
+final class BCStars {
+    static let shared = BCStars()
+    /// Posted when counts or this install's stars change (the object is nil).
+    static let changed = Notification.Name("BCStarsChanged")
+
+    private(set) var counts: [String: Int] = [:]
+    private(set) var mine: Set<String> = []
+    /// Star changes the Worker has not confirmed yet (id -> starred), sent again on the next sync.
+    private var pending: [String: Bool] {
+        get { UserDefaults.standard.dictionary(forKey: "biocartoonPendingStars") as? [String: Bool] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "biocartoonPendingStars") }
+    }
+    private var inFlight: Set<String> = []
+    private var lastSync: Date?
+    private var syncing = false
+    /// Why the last star could not be counted, for the pane's status line.
+    var onProblem: ((String) -> Void)?
+
+    var server: String {
+        let env = ProcessInfo.processInfo.environment["BIOCARTOON_SUBMIT_URL"] ?? ""
+        return (env.isEmpty ? "https://api.biocartoon.com" : env).trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+    }
+
+    private static var appSupport: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0] }
+    static var usageFile: URL { appSupport.appendingPathComponent("biocartoon/usage.sqlite") }
+
+    /// The BioCartoon editor's client id (kept in its settings), else Manimble's own, made once.
+    lazy var client: String = {
+        let ron = Self.appSupport.appendingPathComponent("com.biocartoon.app/app.ron")
+        if let s = try? String(contentsOf: ron, encoding: .utf8),
+           let r = s.range(of: #"client_id\\?":\s*\\?"[0-9a-f]{32}"#, options: .regularExpression) {
+            return String(s[r].suffix(32))
+        }
+        if let saved = UserDefaults.standard.string(forKey: "biocartoonClientId"), saved.count == 32 { return saved }
+        let id = (0..<4).map { _ in String(format: "%08x", UInt32.random(in: .min ... .max)) }.joined()
+        UserDefaults.standard.set(id, forKey: "biocartoonClientId")
+        return id
+    }()
+
+    func count(_ icon: BCIcon) -> Int { counts[icon.id] ?? icon.stars ?? 0 }
+    func isStarred(_ icon: BCIcon) -> Bool { pending[icon.id] ?? (mine.contains(icon.id) || (counts[icon.id] == nil && icon.starred == true)) }
+
+    /// "7", "1k", "1.1k", "10k", "1M": as the editor's tiles show counts.
+    static func format(_ n: Int) -> String {
+        let n = max(0, n)
+        for (unit, size) in [("B", 1_000_000_000), ("M", 1_000_000), ("k", 1000)] where n >= size {
+            let whole = n / size, tenth = (n % size) / (size / 10)
+            return whole < 10 && tenth > 0 ? "\(whole).\(tenth)\(unit)" : "\(whole)\(unit)"
+        }
+        return String(n)
+    }
+
+    /// Fetch every count and which of them are this install's, keep them in the usage file, and send the star changes
+    /// still waiting. At most once every few minutes unless `force`; true when a count or star changed.
+    @discardableResult
+    func sync(force: Bool = false) async -> Bool {
+        if syncing || (!force && lastSync.map { Date().timeIntervalSince($0) < 300 } == true) { return false }
+        syncing = true
+        defer { syncing = false }
+        guard let all = try? await getJSON("\(server)/stars/all") as? [String: Any] else { return false }
+        lastSync = Date()
+        var fresh: [String: Int] = [:]
+        for (id, n) in all { if let n = n as? Int { fresh[id] = n } }
+        var mineNow: Set<String> = []
+        let ids = Array(fresh.keys).sorted()
+        // D1 binds at most 100 values a query and the Worker binds the client with the ids: 100 or more ids is a 500
+        for start in stride(from: 0, to: ids.count, by: 90) {
+            let chunk = ids[start..<min(start + 90, ids.count)].joined(separator: ",")
+            guard let v = try? await getJSON("\(server)/stars?ids=\(Self.escape(chunk))&client=\(client)") as? [String: Any] else { return false }
+            mineNow.formUnion((v["mine"] as? [String]) ?? [])
+        }
+        let changed = fresh != counts || mineNow != mine
+        counts = fresh; mine = mineNow
+        // what this install changed and the Worker hasn't counted yet wins over its answer
+        for (id, on) in pending {
+            if on { mine.insert(id) } else { mine.remove(id) }
+            let base = fresh[id] ?? 0
+            counts[id] = mineNow.contains(id) == on ? base : max(0, base + (on ? 1 : -1))
+        }
+        await writeUsage(full: true)
+        if changed { NotificationCenter.default.post(name: Self.changed, object: nil) }
+        sendPending()
+        return changed
+    }
+
+    /// Star `icon` or take the star back. Shown at once and kept in the usage file; the Worker's count follows now, or
+    /// on a later sync when it can't be reached.
+    func toggle(_ icon: BCIcon) {
+        let id = icon.id
+        guard !id.isEmpty else { return }
+        let on = !isStarred(icon)
+        counts[id] = max(0, count(icon) + (on ? 1 : -1))
+        if on { mine.insert(id) } else { mine.remove(id) }
+        var p = pending; p[id] = on; pending = p
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+        Task { await writeUsage(ids: [id]) }
+        sendPending()
+    }
+
+    private func sendPending() {
+        for (id, on) in pending where !inFlight.contains(id) {
+            inFlight.insert(id)
+            Task { await send(id, on) }
+        }
+    }
+
+    private func send(_ id: String, _ on: Bool) async {
+        var req = URLRequest(url: URL(string: "\(server)/star")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "client": client, "on": on])
+        req.timeoutInterval = 20
+        let answer = try? await URLSession.shared.data(for: req)
+        inFlight.remove(id)
+        guard let data = answer?.0, let v = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }  // offline: stays pending
+        if let e = v["error"] as? String {
+            if e.hasPrefix("Limit reached") { onProblem?("Your star will be counted later. \(e)"); return }
+            // not on the server (one of your own uploads) or refused: the star stays here, uncounted
+            var p = pending; p[id] = nil; pending = p
+            return
+        }
+        guard let n = v["stars"] as? Int else { return }
+        let starred = v["starred"] as? Bool ?? on
+        var p = pending
+        if p[id] == on { p[id] = nil; pending = p }
+        else if p[id] != nil { sendPending(); return }  // changed again while this one was on its way
+        counts[id] = n
+        if starred { mine.insert(id) } else { mine.remove(id) }
+        NotificationCenter.default.post(name: Self.changed, object: nil)
+        await writeUsage(ids: [id])
+    }
+
+    /// Keep the counts in the editor's usage file (for its tiles and the CLI's Popular order): all of them (`full`, rows the
+    /// Worker no longer counts go to 0) or just `ids`.
+    private func writeUsage(full: Bool = false, ids: [String] = []) async {
+        let file = Self.usageFile
+        guard FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path) else { return }
+        let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
+        var sql = "BEGIN;\nCREATE TABLE IF NOT EXISTS stars (id TEXT PRIMARY KEY, n INTEGER NOT NULL, mine INTEGER NOT NULL DEFAULT 0);\n"
+        let rows = full ? Array(counts.keys) : ids
+        if full {
+            let keep = rows.isEmpty ? "''" : rows.map(q).joined(separator: ",")
+            // a star of your own the Worker doesn't know (an upload of yours) stays
+            sql += "UPDATE stars SET n = 0 WHERE n <> 0 AND mine = 0 AND id NOT IN (\(keep));\n"
+        }
+        for id in rows {
+            sql += "INSERT INTO stars (id, n, mine) VALUES (\(q(id)), \(counts[id] ?? 0), \(mine.contains(id) ? 1 : 0)) "
+                + "ON CONFLICT (id) DO UPDATE SET n = excluded.n, mine = excluded.mine;\n"
+        }
+        sql += "COMMIT;\n"
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("manimble-stars-\(UUID().uuidString).sql")
+        guard (try? sql.write(to: tmp, atomically: true, encoding: .utf8)) != nil else { return }
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do { _ = try await BioCartoonCLI.run("/usr/bin/sqlite3", ["-cmd", ".timeout 5000", file.path, ".read \(tmp.path)"], timeout: 30) }
+        catch { NSLog("BioCartoon stars: could not update \(file.path): \(error)") }
+    }
+
+    private func getJSON(_ url: String) async throws -> Any {
+        guard let u = URL(string: url) else { throw URLError(.badURL) }
+        var req = URLRequest(url: u); req.timeoutInterval = 20
+        let (data, _) = try await URLSession.shared.data(for: req)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func escape(_ s: String) -> String {
+        s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-_.,"))) ?? s
+    }
+}
+
 /// A result tile: white card, thumbnail, collection badge. Click inserts the icon; dragging it onto the slide places it there.
 final class BCTile: NSCollectionViewItem, NSDraggingSource {
     static let id = NSUserInterfaceItemIdentifier("bctile")
@@ -387,6 +597,7 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
     var onClick: ((BCIcon) -> Void)?
     private let thumb = NSImageView()
     private let badge = NSTextField(labelWithString: "")
+    private let star = NSButton(title: "", target: nil, action: nil)
     private var downAt: NSPoint?
 
     override func loadView() {
@@ -402,14 +613,38 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
         badge.font = Theme.font(9, .semibold); badge.textColor = .white; badge.alignment = .center
         badge.wantsLayer = true; badge.layer?.cornerRadius = 4; badge.drawsBackground = true
         badge.translatesAutoresizingMaskIntoConstraints = false
-        v.addSubview(thumb); v.addSubview(badge)
+        // upper right: the star and how many starred the icon (gold when you did); a click stars it or takes it back
+        star.isBordered = false; star.imagePosition = .imageTrailing; star.imageHugsTitle = true
+        star.font = Theme.font(9, .semibold); star.contentTintColor = .systemGray
+        star.target = self; star.action = #selector(starPressed)
+        star.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(thumb); v.addSubview(badge); v.addSubview(star)
         NSLayoutConstraint.activate([
             thumb.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8), thumb.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8),
             thumb.topAnchor.constraint(equalTo: v.topAnchor, constant: 8), thumb.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -8),
             badge.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 5), badge.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -5),
             badge.widthAnchor.constraint(equalToConstant: 22), badge.heightAnchor.constraint(equalToConstant: 14),
+            star.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -4), star.topAnchor.constraint(equalTo: v.topAnchor, constant: 3),
         ])
         view = v
+    }
+
+    @objc private func starPressed() {
+        guard let icon = icon else { return }
+        BCInfoTip.shared.hide()
+        BCStars.shared.toggle(icon)
+    }
+
+    /// Show the icon's latest star count and whether you starred it.
+    func refreshStar() {
+        guard let icon = icon else { return }
+        let stars = BCStars.shared, on = stars.isStarred(icon), n = stars.count(icon)
+        star.image = NSImage(systemSymbolName: on ? "star.fill" : "star", accessibilityDescription: on ? "Unstar" : "Star")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        star.contentTintColor = on ? .systemYellow : .systemGray
+        star.attributedTitle = NSAttributedString(string: n > 0 ? BCStars.format(n) : "",
+                                                  attributes: [.font: Theme.font(9, .semibold), .foregroundColor: NSColor.darkGray])
+        star.toolTip = on ? "Starred: click to take your star back" : "Star this icon (shared with the BioCartoon editor)"
     }
 
     func show(_ icon: BCIcon, code: String) {
@@ -417,6 +652,7 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
         badge.stringValue = code
         badge.backgroundColor = BioCartoonCLI.badgeColor(icon.database)
         badge.isHidden = code.isEmpty
+        refreshStar()
         thumb.image = nil
         BCThumbs.shared.image(for: icon) { [weak self] img in
             if self?.icon?.id == icon.id { self?.thumb.image = img }
@@ -446,6 +682,7 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
             guard let o = owner, let icon = o.icon else { return nil }
             let m = NSMenu()
             m.addItem(BCMenuItem("Insert on Slide") { [weak o] in o?.onClick?(icon) })
+            m.addItem(BCMenuItem(BCStars.shared.isStarred(icon) ? "Unstar" : "Star") { BCStars.shared.toggle(icon) })
             m.addItem(.separator())
             m.addItem(BCMenuItem("Copy Name") { BioCartoonCLI.copy(icon.title) })
             if let c = icon.credit, !c.isEmpty { m.addItem(BCMenuItem("Copy Credit") { BioCartoonCLI.copy(c) }) }
@@ -689,10 +926,13 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private var typing: DispatchWorkItem?
     private static let pageSize = 60
     private static let sorts = [("Relevance", "relevance"), ("Popular", "popular"), ("A–Z", "az"), ("Z–A", "za")]
+    /// The sort was picked by hand since the pane opened; until then it follows the search (Popular with
+    /// nothing typed, Relevance once something is).
+    private var sortPicked = false
 
     override init() {
         super.init()
-        let logo = NSImageView(image: BioCartoonCLI.logo)
+        let logo = NSImageView(image: BioCartoonCLI.monoLogo)
         logo.widthAnchor.constraint(equalToConstant: 20).isActive = true
         logo.heightAnchor.constraint(equalToConstant: 20).isActive = true
         let heading = NSTextField(labelWithString: "BioCartoon")
@@ -769,7 +1009,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         sortPopup.controlSize = .small
         sortPopup.font = Theme.font(11)
         sortPopup.addItems(withTitles: Self.sorts.map { $0.0 })
-        sortPopup.selectItem(at: max(0, Self.sorts.firstIndex { $0.1 == UserDefaults.standard.string(forKey: "biocartoonSort") } ?? 0))
+        followSearch()
         sortPopup.target = self; sortPopup.action = #selector(sortChanged)
         status.font = Theme.font(11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
@@ -797,6 +1037,8 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         scroll.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(resized), name: NSView.frameDidChangeNotification, object: scroll)
+        NotificationCenter.default.addObserver(self, selector: #selector(starsChanged), name: BCStars.changed, object: nil)
+        BCStars.shared.onProblem = { [weak self] why in self?.status.stringValue = why }
 
         creditLabel.font = Theme.font(10); creditLabel.textColor = .secondaryLabelColor
         creditLabel.maximumNumberOfLines = 3
@@ -829,7 +1071,20 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     /// The pane came into view: focus the search box and get the command line ready.
     func activate(in window: NSWindow?) {
         window?.makeFirstResponder(search)
-        if exe == nil { locate() }
+        sortPicked = false
+        if followSearch(), exe != nil { reload() }
+        if exe == nil { locate() } else { syncStars() }
+    }
+
+    /// Bring the star counts up to date (shared with the BioCartoon editor); Popular results are put in the new order.
+    private func syncStars() {
+        Task {
+            if await BCStars.shared.sync(), exe != nil, Self.sorts[sortPopup.indexOfSelectedItem].1 == "popular" { reload() }
+        }
+    }
+
+    @objc private func starsChanged() {
+        for case let tile as BCTile in grid.visibleItems() { tile.refreshStar() }
     }
 
     private func locate() {
@@ -852,6 +1107,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             // the first call downloads the catalog, so it goes alone; the dropdowns fill in behind the results
             if let s = try? await BioCartoonCLI.sources(exe) { setSources(s) }
             reload()
+            syncStars()
             async let cats = BioCartoonCLI.categories(exe)
             async let lics = BioCartoonCLI.licenseCounts(exe)
             async let own = BioCartoonCLI.sourceCategories(exe)
@@ -1069,8 +1325,22 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     }
 
     @objc private func sortChanged() {
-        UserDefaults.standard.set(Self.sorts[sortPopup.indexOfSelectedItem].1, forKey: "biocartoonSort")
+        sortPicked = true
         reload()
+    }
+
+    /// Unless the sort was picked by hand, set it for what's typed; true if that changed it. Relevance
+    /// is offered only once something is typed.
+    @discardableResult private func followSearch() -> Bool {
+        let empty = search.stringValue.trimmingCharacters(in: .whitespaces).isEmpty
+        let relevance = Self.sorts.firstIndex { $0.1 == "relevance" }!
+        sortPopup.item(at: relevance)?.isHidden = empty
+        guard !sortPicked || (empty && sortPopup.indexOfSelectedItem == relevance) else { return false }
+        let key = empty ? "popular" : "relevance"
+        let i = Self.sorts.firstIndex { $0.1 == key }!
+        guard sortPopup.indexOfSelectedItem != i else { return false }
+        sortPopup.selectItem(at: i)
+        return true
     }
     @objc private func searchSubmitted() { typing?.cancel(); reload() }
     func controlTextDidChange(_ n: Notification) {
@@ -1086,6 +1356,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
 
     /// Start a new search from the first page.
     func reload() {
+        followSearch()
         requestFacets()
         generation += 1
         results = []; more = false; loading = false
@@ -1234,27 +1505,54 @@ extension MainController {
         let slug = icon.title.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
             .prefix(6).joined(separator: "_")
         let stem = slug.isEmpty ? "biocartoon" : slug
-        var name = stem + ".png", n = 1
-        while FileManager.default.fileExists(atPath: ws.work.appendingPathComponent(name).path) { name = "\(stem)_\(n).png"; n += 1 }
-        let dest = ws.work.appendingPathComponent(name)
+        var base = stem, n = 1
+        while ["png", "svg"].contains(where: { FileManager.default.fileExists(atPath: ws.work.appendingPathComponent("\(base).\($0)").path) }) {
+            base = "\(stem)_\(n)"; n += 1
+        }
+        let png = ws.work.appendingPathComponent(base + ".png"), svg = ws.work.appendingPathComponent(base + ".svg")
         let c = point ?? CGPoint(x: canvas.frameSize.width / 2, y: canvas.frameSize.height / 2)
         busyPill.show("Downloading \(icon.title)…", symbol: nil, tint: nil, spinning: true, cancellable: false)
         Task { @MainActor in
-            let size: CGSize
+            var size: CGSize
+            let dest: URL
             do {
-                try await BioCartoonCLI.fetch(exe, id: icon.id, to: dest)
-                size = await Task.detached { () -> CGSize in
-                    let s = BioCartoonCLI.trimTransparentMargins(dest)
-                    BioCartoonCLI.tag(dest, with: icon)
-                    return s
-                }.value
+                try await BioCartoonCLI.fetch(exe, id: icon.id, to: png)
+                // a vector picture when the icon is published as SVG and manim draws it like the PNG, else the PNG
+                if icon.svg_key != nil, let v = await vectorCopy(exe, icon, png: png, to: svg) {
+                    try? FileManager.default.removeItem(at: png)
+                    BioCartoonCLI.tagSVG(svg, with: icon)
+                    dest = svg; size = v
+                } else {
+                    dest = png
+                    size = await Task.detached { () -> CGSize in
+                        let s = BioCartoonCLI.trimTransparentMargins(png)
+                        BioCartoonCLI.tag(png, with: icon)
+                        return s
+                    }.value
+                }
             } catch { busyPill.hide(); toast("Could not download \(icon.title): \(error)", error: true); return }
             busyPill.hide()
             let half = 1.5 * canvas.unitPx * min(1, size.width / max(size.height, 1))
-            insert(kind: "image", extra: ["file": name, "path": dest.path,
+            insert(kind: "image", extra: ["file": dest.lastPathComponent, "path": dest.path,
                                           "sx": Double(c.x) - half, "sy": Double(c.y), "ex": Double(c.x) + half, "ey": Double(c.y)])
             biocartoonPane?.showCredit(icon)
         }
+    }
+
+    /// The icon's SVG made ready for manim at `dest` (the engine's svg_icon: flattened, even-odd holes kept, strokes
+    /// scaled with the picture), when manim draws it like the catalog's PNG; its size, or nil to keep the PNG.
+    private func vectorCopy(_ exe: String, _ icon: BCIcon, png: URL, to dest: URL) async -> CGSize? {
+        struct Prepared: Decodable { var ok: Bool; var width: Double?; var height: Double?; var why: String? }
+        let raw = FileManager.default.temporaryDirectory.appendingPathComponent("biocartoon-\(UUID().uuidString).svg")
+        defer { try? FileManager.default.removeItem(at: raw) }
+        guard (try? await BioCartoonCLI.fetchSVG(exe, id: icon.id, to: raw)) != nil,
+              let r = try? await engine.call("svg_icon", ["svg": raw.path, "png": png.path, "out": dest.path], as: Prepared.self)
+        else { return nil }
+        guard r.ok, let w = r.width, let h = r.height, w > 0, h > 0 else {
+            NSLog("BioCartoon %@ stays a PNG: %@", icon.id, r.why ?? "?")
+            return nil
+        }
+        return CGSize(width: w, height: h)
     }
 }
 
@@ -1411,6 +1709,15 @@ extension MainController {
             log("pane shown: \(!p.view.isHidden), inspector hidden: \(inspectorScroll?.isHidden == true)")
             await wait("first page") { p.resultCount > 0 || p.offersInstall != nil }
             if let b = p.offersInstall { log("offers \(b): \(p.message)"); log("done"); return }
+            // the star counts come from the Worker and land in the editor's usage file; Popular puts the starred first
+            let stars = BCStars.shared
+            await wait("star sync") { !stars.counts.isEmpty }
+            log("stars: \(stars.counts.count) counted, \(stars.mine.count) mine, client \(stars.client.prefix(6))…")
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await wait("popular") { !p.isLoading && p.resultCount > 0 }
+            log("popular: " + p.allResults.prefix(8).map { "\($0.id) \(stars.count($0))\(stars.isStarred($0) ? "*" : "")" }.joined(separator: ", "))
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            shot(p.view, "biocartoon_stars.png")
             p.type("mitochondria")
             try? await Task.sleep(nanoseconds: 300_000_000)
             await wait("search") { p.resultCount > 0 && p.firstResult?.title.lowercased().contains("mito") == true }
@@ -1467,6 +1774,18 @@ extension MainController {
                     log("upload dry run: ok")
                 } catch { log("upload dry run: \(error)") }
             }
+            // an icon published as SVG that manim draws as it looks (even-odd holes) goes in as a vector picture
+            var vf = BCFilter(); vf.sources = ["healthicons"]; vf.fileTypes = ["svg"]
+            if let exe = p.exe, let vec = try? await BioCartoonCLI.search(exe, query: "ambulance", filter: vf, sort: "relevance", offset: 0, limit: 1).first {
+                let had = images()
+                insertBioCartoon(vec, at: CGPoint(x: canvas.frameSize.width * 0.75, y: canvas.frameSize.height * 0.7))
+                await wait("vector inserted") { images().count > had.count }
+                await queueTail?.value
+                log("vector: \(vec.id) -> \(images().filter { !had.contains($0) })")
+                if let o = scene?.objects?.values.first(where: { $0.kind == "image" && !had.contains($0.image ?? "") }), let path = o.imagePath {
+                    log("vector origin: \(BioCartoonCLI.origin(ofImageAt: path)?.id ?? "-"), placed: \(o.loc)")
+                }
+            } else { log("vector: no SVG icon found") }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             shot(window.contentView, "biocartoon_window.png")
             hideBioCartoon()

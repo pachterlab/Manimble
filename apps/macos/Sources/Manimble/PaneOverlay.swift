@@ -11,11 +11,11 @@ final class AuxPaneView: NSView {
     private static let kinds: [Kind] = [
         Kind(cells: [(0, 1), (1, 1), (2, 1), (3, 1)], box: 4, color: rgb(0.30, 0.82, 0.95)),   // I
         Kind(cells: [(0, 0), (1, 0), (0, 1), (1, 1)], box: 2, color: rgb(1.0, 0.80, 0.25)),    // O
-        Kind(cells: [(1, 0), (0, 1), (1, 1), (2, 1)], box: 3, color: Theme.accent),             // T
+        Kind(cells: [(1, 0), (0, 1), (1, 1), (2, 1)], box: 3, color: rgb(0.62, 0.40, 1.0)),    // T
         Kind(cells: [(1, 0), (2, 0), (0, 1), (1, 1)], box: 3, color: rgb(0.40, 0.85, 0.48)),   // S
         Kind(cells: [(0, 0), (1, 0), (1, 1), (2, 1)], box: 3, color: rgb(1.0, 0.38, 0.45)),    // Z
         Kind(cells: [(0, 0), (0, 1), (1, 1), (2, 1)], box: 3, color: rgb(0.35, 0.55, 1.0)),    // J
-        Kind(cells: [(2, 0), (0, 1), (1, 1), (2, 1)], box: 3, color: Theme.warm),               // L
+        Kind(cells: [(2, 0), (0, 1), (1, 1), (2, 1)], box: 3, color: Theme.accent),             // L
     ]
     private struct Piece { var kind: Int; var rot = 0; var x = 0; var y = 0 }
 
@@ -35,7 +35,7 @@ final class AuxPaneView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = rgb(0.098, 0.102, 0.125).cgColor
+        layer?.backgroundColor = rgb(0.105, 0.105, 0.105).cgColor
         newGame()
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -194,7 +194,7 @@ final class AuxPaneView: NSView {
         let ox = floor((bounds.width - bw - pad - panel) / 2), oy = floor((bounds.height - bh) / 2)
         let well = NSRect(x: ox, y: oy, width: bw, height: bh)
 
-        rgb(0.07, 0.072, 0.09).setFill()
+        rgb(0.075, 0.075, 0.075).setFill()
         NSBezierPath(roundedRect: well.insetBy(dx: -3, dy: -3), xRadius: 6, yRadius: 6).fill()
         NSColor(white: 1, alpha: 0.04).setFill()
         for i in 1..<Self.cols { NSRect(x: ox + CGFloat(i) * c, y: oy, width: 1, height: bh).fill() }

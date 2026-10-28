@@ -15,8 +15,8 @@ ImageDraw.Draw(sh).polygon([(x, y + 10) for x, y in page], fill=(0, 0, 0, 90))
 im = sh.filter(ImageFilter.GaussianBlur(14))
 d = ImageDraw.Draw(im)
 d.polygon(page, fill=(252, 252, 254, 255), outline=(200, 202, 212, 255), width=4)
-# the folded corner, tinted with the logo's violet
-d.polygon([(R - F, T), (R - F, T + F), (R, T + F)], fill=(214, 206, 250, 255), outline=(170, 160, 230, 255), width=4)
+# the folded corner, tinted with the logo's orange
+d.polygon([(R - F, T), (R - F, T + F), (R, T + F)], fill=(255, 222, 200, 255), outline=(240, 170, 120, 255), width=4)
 # the app icon, centered on the page below the fold
 logo = Image.open(os.path.join(ASSETS, "Manimble.icns"))
 logo = logo.convert("RGBA").resize((520, 520), Image.LANCZOS)

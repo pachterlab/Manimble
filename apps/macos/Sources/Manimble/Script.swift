@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 
 /// One action of a slide's presentation script: words to speak, a pointer move, or a pause. Steps belong to one
-/// build of one slide and run in order when the show reaches that build (Play ▸ Automatic Presentation). Like
+/// build of one slide and run in order when the show reaches that build (Play ▸ Scripted Presentation). Like
 /// feedback notes they live in `script.json` beside the deck, not in the Python, so nothing renders.
 struct ScriptStep: Codable, Equatable {
     enum Kind: String, Codable { case speak, move, pause }
@@ -50,7 +50,7 @@ final class ScriptStore {
     /// AVSpeechSynthesisVoice identifier (nil: the system voice).
     private(set) var voice: String?
     private(set) var rate: Float = AVSpeechUtteranceDefaultSpeechRate
-    /// How long a build with no script stays up in an automatic presentation.
+    /// How long a build with no script stays up in a scripted presentation.
     private(set) var hold = 3.0
     var onChange: (() -> Void)?
 
@@ -181,7 +181,7 @@ final class ScriptPointer {
 }
 
 /// Runs steps: speaks with the system's text to speech, glides the pointer, waits. Shared by the editor (a click
-/// on a step plays it) and the automatic presentation. Everything waits a frame at a time so it can be paused
+/// on a step plays it) and the scripted presentation. Everything waits a frame at a time so it can be paused
 /// and stopped at any moment.
 @MainActor
 final class ScriptPerformer: NSObject, AVSpeechSynthesizerDelegate {
@@ -493,9 +493,9 @@ final class ScriptLayer: NSView {
     override func resetCursorRects() { if capturing != nil { addCursorRect(slideRect(), cursor: .crosshair) } }
 }
 
-// MARK: - automatic presentation
+// MARK: - scripted presentation
 
-/// A show the automatic presentation can drive: the stills slideshow or the animated show.
+/// A show the scripted presentation can drive: the stills slideshow or the animated show.
 @MainActor
 protocol ScriptShow: AnyObject {
     var window: PlayerWindow { get }

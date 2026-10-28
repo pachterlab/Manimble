@@ -1,21 +1,23 @@
 import AppKit
 
-/// Manimble's look: quiet neutral surfaces, one electric-violet accent, soft depth.
+/// Manimble's look: quiet neutral surfaces, one orange accent, soft depth.
 enum Theme {
-    static let accent = NSColor(srgbRed: 0.486, green: 0.361, blue: 1.0, alpha: 1)          // #7C5CFF
-    static let accentSoft = NSColor(srgbRed: 0.486, green: 0.361, blue: 1.0, alpha: 0.18)
-    static let warm = NSColor(srgbRed: 1.0, green: 0.424, blue: 0.047, alpha: 1)             // manim-orange, used sparingly
-    static let canvasTop = dynamic(light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.972, alpha: 1),
-                                   dark: NSColor(srgbRed: 0.145, green: 0.150, blue: 0.178, alpha: 1))
+    static let accent = NSColor(srgbRed: 1.0, green: 0.424, blue: 0.047, alpha: 1)          // #FF6C0C
+    static let accentSoft = NSColor(srgbRed: 1.0, green: 0.424, blue: 0.047, alpha: 0.18)
+    static let warm = NSColor(srgbRed: 0.047, green: 0.549, blue: 1.0, alpha: 1)             // #0C8CFF, a blue foil to the accent, used sparingly
+    static let canvasTop = dynamic(light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.965, alpha: 1),
+                                   dark: NSColor(srgbRed: 0.150, green: 0.150, blue: 0.150, alpha: 1))
     /// The stage around the slide, the rulers and the drawer.
-    static let canvasBottom = dynamic(light: NSColor(srgbRed: 0.918, green: 0.918, blue: 0.929, alpha: 1),
-                                      dark: NSColor(srgbRed: 0.075, green: 0.078, blue: 0.098, alpha: 1))
+    static let canvasBottom = dynamic(light: NSColor(srgbRed: 0.918, green: 0.918, blue: 0.918, alpha: 1),
+                                      dark: NSColor(srgbRed: 0.080, green: 0.080, blue: 0.080, alpha: 1))
     /// The code card and the terminals.
-    static let codeBackground = dynamic(light: NSColor(srgbRed: 0.988, green: 0.988, blue: 0.992, alpha: 1),
-                                        dark: NSColor(srgbRed: 0.098, green: 0.102, blue: 0.125, alpha: 1))
+    static let codeBackground = dynamic(light: NSColor(srgbRed: 0.988, green: 0.988, blue: 0.988, alpha: 1),
+                                        dark: NSColor(srgbRed: 0.105, green: 0.105, blue: 0.105, alpha: 1))
     /// Header strips above the code and in the drawer.
-    static let barBackground = dynamic(light: NSColor(srgbRed: 0.945, green: 0.945, blue: 0.955, alpha: 1),
-                                       dark: NSColor(srgbRed: 0.125, green: 0.13, blue: 0.158, alpha: 1))
+    static let barBackground = dynamic(light: NSColor(srgbRed: 0.945, green: 0.945, blue: 0.945, alpha: 1),
+                                       dark: NSColor(srgbRed: 0.132, green: 0.132, blue: 0.132, alpha: 1))
+    /// The slide navigator on the left: a solid gray (no vibrancy, so the wallpaper can't tint it).
+    static let sidebarBackground = dynamic(light: NSColor(white: 0.93, alpha: 1), dark: NSColor(white: 0.17, alpha: 1))
 
     /// A colour that follows the window's light/dark appearance.
     static func dynamic(light: NSColor, dark: NSColor) -> NSColor {

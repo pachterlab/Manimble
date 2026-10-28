@@ -42,6 +42,12 @@ install -m 755 "$ROOT/install_dependencies.sh" "$APP/Contents/Resources/install_
 cp assets/Manimble.icns "$APP/Contents/Resources/manimble.icns"
 cp assets/ManimbleDocument.icns "$APP/Contents/Resources/manimble-document.icns"
 cp assets/biocartoon.png "$APP/Contents/Resources/biocartoon.png"
+# the black-and-white logo comes from the biocartoon repository when it is checked out; else the copy in assets/
+BIOCARTOON_REPO="${BIOCARTOON_REPO:-$HOME/code/biocartoon}"
+if [ -f "$BIOCARTOON_REPO/brand/biocartoon-mono.svg" ]; then
+  swift tools/import_biocartoon_logo.swift "$BIOCARTOON_REPO"
+fi
+cp assets/biocartoon-mono.png "$APP/Contents/Resources/biocartoon-mono.png"
 
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>

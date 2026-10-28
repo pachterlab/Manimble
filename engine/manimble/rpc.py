@@ -75,6 +75,7 @@ def main():
         "export": lambda a: need().export(a),
         "insert": lambda a: need().insert(a),
         "insert_sprite": lambda a: need().insert_sprite(a),
+        "svg_icon": lambda a: need().svg_icon(a),
         "pages": lambda a: need().pages(a),
         "slide": lambda a: need().slide_op(a),
         "deck_pages": lambda a: need().deck_pages(a),
@@ -120,6 +121,42 @@ def main():
         return {"ok": True}
 
     handlers["import"] = import_job
+
+    # LaTeX packages a Beamer import needs: installed only when the user says so in the app
+    def latex_install(a):
+        from . import latex_packages
+
+        def prog(i, n, what):
+            send({"event": "latex_install", "done": i, "total": n, "step": what})
+        return latex_packages.install(a["files"], prog)
+
+    def deck_assets():
+        from pathlib import Path
+        return Path(need().deck).parent / "assets"
+
+    def latex_status(a):
+        """The open deck's LaTeX packages still missing and its pictures still placeholders."""
+        from . import latex_packages
+        f = deck_assets() / latex_packages.MANIFEST
+        if not f.is_file():
+            return {"missing": [], "placeholders": 0}
+        man = json.loads(f.read_text(encoding="utf-8"))
+        return {"missing": latex_packages.absent(man.get("missing", [])),
+                "placeholders": sum(1 for p in man.get("pictures", []) if not p.get("ok")),
+                "source": os.path.basename(man.get("source") or "")}
+
+    def latex_retypeset(a):
+        from .beamer_import import retypeset_pictures
+        return retypeset_pictures(deck_assets())
+
+    def latex_missing(a):
+        from . import latex_packages
+        return latex_packages.missing_in(a["src"])
+
+    handlers["latex_missing"] = latex_missing
+    handlers["latex_install"] = latex_install
+    handlers["latex_status"] = latex_status
+    handlers["latex_retypeset"] = latex_retypeset
     pool = ThreadPoolExecutor(max_workers=8)
 
     def run(req):

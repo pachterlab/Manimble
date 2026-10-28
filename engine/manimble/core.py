@@ -2775,11 +2775,16 @@ class Manimble:
                               f"element_to_mobject={BLANK_CELLS['word' if words else 'math']}).scale(0.7).move_to({origin})")
         if kind == "image":
             iw = fmt(w) if drawn else fmt(float(req.get("width") or 4))     # drawn / placed: the box's width in manim units
-            if preview:
-                codes["image"] = f'ImageMobject({py_str(req["path"])}).set(width={iw}).move_to({origin})'
+            where = (py_str(req["path"]) if preview
+                     else f'str(__import__("pathlib").Path(__file__).resolve().parent / {py_str(req["file"])})')
+            if str(req.get("file") or req.get("path") or "").lower().endswith(".svg"):
+                # a vector picture (svg_icon's copy, 2 units high as made): scaled with its strokes, so a resize keeps
+                # their weight in proportion
+                from .svg_icon import aspect
+                k = float(iw) / (2 * aspect(req["path"]))
+                codes["image"] = f'SVGMobject({where}).scale({fmt(k, 4)}, scale_stroke=True).move_to({origin})'
             else:
-                codes["image"] = (f'ImageMobject(str(__import__("pathlib").Path(__file__).resolve().parent / {py_str(req["file"])}))'
-                                  f'.set(width={iw}).move_to({origin})')
+                codes["image"] = f'ImageMobject({where}).set(width={iw}).move_to({origin})'
         if kind == "pen":
             pts = [p for p in (req.get("points") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
             if len(pts) < 2:
@@ -3330,6 +3335,10 @@ class Manimble:
             return {"ok": True, "merged": n}
 
     # ------------------------------------------------------------ misc
+    def svg_icon(self, req: dict) -> dict:
+        """{svg, png, out}: a manim-ready copy of a BioCartoon SVG when manim draws it like its PNG (svg_icon.prepare)."""
+        return self.aux_worker.request(dict(req, cmd="svg_icon"))
+
     def sprite(self, req: dict) -> dict:
         """Rasterise a single text/formula for instant on-canvas preview."""
         req = dict(req, cmd="sprite", out=str(self.cache_dir / "sprites"))
@@ -3673,7 +3682,9 @@ class Manimble:
         """Write the animated show as one MP4 at `path`: every build of every visible slide (or of the slides named in
         `scenes`, in the order given) plays once, then holds its last frame `hold` seconds (default 2) at `fps`
         (default 30). Slides not yet built at `height` (720, 1080, 1440 or 2160; default 720) are built first, as for
-        `present`. Runs in the background; progress by `export_movie` events, the last one `done` or `error`."""
+        `present`. `holds` ({slide: {build index: seconds}}) overrides the hold of single builds. Runs in the background;
+        progress by `export_movie` events, the last one `done` (its `segments` say where each build sits in the movie)
+        or `error`."""
         if getattr(self, "_presenting", False):
             return {"ok": False, "error": "already building the presentation"}
         path = req.get("path")
@@ -3698,15 +3709,25 @@ class Manimble:
             return {"ok": False, "error": "the hold must be a nonnegative number of seconds"}
         if not 1 <= fps <= 120:
             return {"ok": False, "error": "the frame rate must be between 1 and 120"}
+        holds: dict[tuple[str, int], float] = {}
+        try:
+            for scene, per in (req.get("holds") or {}).items():
+                for build, h in per.items():
+                    holds[(scene, int(build))] = float(h)
+        except (TypeError, ValueError, AttributeError):
+            return {"ok": False, "error": "holds must map slide names to {build: seconds}"}
+        if any(not math.isfinite(h) or h < 0 for h in holds.values()):
+            return {"ok": False, "error": "the hold must be a nonnegative number of seconds"}
         from . import movie
         if movie.find_ffmpeg() is None:
             return {"ok": False, "error": "ffmpeg is needed to write movies; install it (brew install ffmpeg or pip install imageio-ffmpeg) and try again"}
         self._presenting = True
-        threading.Thread(target=self._export_movie_job, args=(selected, path, self._clip_height(req), hold, fps),
+        threading.Thread(target=self._export_movie_job, args=(selected, path, self._clip_height(req), hold, fps, holds),
                          daemon=True).start()
         return {"ok": True}
 
-    def _export_movie_job(self, selected: list[dict], path: str, height: int, hold: float, fps: int):
+    def _export_movie_job(self, selected: list[dict], path: str, height: int, hold: float, fps: int,
+                          holds: dict | None = None):
         self.job_start()
         self._settle()
         emit = self.on_event or (lambda e: None)
@@ -3732,13 +3753,23 @@ class Manimble:
                     if not p.is_file() or not p.is_relative_to(deck):
                         raise ValueError(f"animation clip is missing: {rel}")
                     clips.append({"path": str(p), "kind": kind, "rate": float(slide.get("playback_rate") or 1.0),
-                                  "label": f"{s['name']}" + (f" (build {k})" if len(builds) > 1 else "")})
+                                  "label": f"{s['name']}" + (f" (build {k})" if len(builds) > 1 else ""),
+                                  "scene": s["name"], "build": k - 1,
+                                  "hold": (holds or {}).get((s["name"], k - 1), hold)})
 
             def prog(i, n, label):
                 self.check_cancel()
                 emit({"event": "export_movie", "phase": "encoding", "done": i, "total": n, "scene": label})
-            movie.write_movie(clips, movie.SIZES[height], path, hold=hold, fps=fps, progress=prog, run=self._run_cancellable)
-            emit({"event": "export_movie", "phase": "done", "path": path, "builds": len(clips), "slides": len(selected)})
+            lengths = movie.write_movie(clips, movie.SIZES[height], path, hold=hold, fps=fps, progress=prog,
+                                        run=self._run_cancellable)
+            # where each build sits in the movie (a scripted export lays its narration and pointer over the holds)
+            segments, start = [], 0.0
+            for c, n in zip(clips, lengths):
+                segments.append({"scene": c["scene"], "build": c["build"], "start": start, "end": start + n,
+                                 "hold": c["hold"]})
+                start += n
+            emit({"event": "export_movie", "phase": "done", "path": path, "builds": len(clips), "slides": len(selected),
+                  "segments": segments})
         except Cancelled:
             emit({"event": "export_movie", "phase": "cancelled"})
         except Exception as exc:                          # noqa: BLE001

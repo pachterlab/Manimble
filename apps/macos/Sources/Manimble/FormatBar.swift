@@ -59,7 +59,7 @@ final class FormatBar: NSView {
         b.bezelStyle = .texturedRounded
         b.setButtonType(.pushOnPushOff)        // lit while the script is up in the top-right panel
         b.font = Theme.font(12)
-        b.toolTip = "Script: words to read out and pointer moves for each build, played by Play ▸ Automatic Presentation"
+        b.toolTip = "Script: words to read out and pointer moves for each build, played by Play ▸ Scripted Presentation"
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }()

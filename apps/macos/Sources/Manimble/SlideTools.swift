@@ -464,6 +464,7 @@ extension MainController {
               let box = canvas.stop?.box(of: sel), let ws = workspace, let name = sceneName else {
             toast("Select a picture on the slide first", error: true); return
         }
+        guard !path.lowercased().hasSuffix(".svg") else { toast("Extract Elements works on bitmap pictures, not vector ones", error: true); return }
         guard #available(macOS 14.0, *) else {
             alert("Extracting elements needs macOS 14 or later", "This feature uses the system's subject-lifting models, which arrived with macOS Sonoma.")
             return

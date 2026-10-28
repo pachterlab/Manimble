@@ -165,7 +165,7 @@ private struct Uniforms2 {
     var geo: SIMD4<Float>
 }
 
-private let accentRGB = SIMD4<Float>(0.486, 0.361, 1.0, 1)
+private let accentRGB = SIMD4<Float>(1.0, 0.424, 0.047, 1)
 
 /// A temporary, instant edit shown while the real re-render is still running.
 struct Override {
@@ -462,7 +462,7 @@ final class CanvasView: MTKView {
         b.isBordered = false; b.imagePosition = .imageOnly; b.contentTintColor = .white
         b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
         b.wantsLayer = true; b.layer?.cornerRadius = 13
-        b.layer?.backgroundColor = NSColor(calibratedRed: 0.486, green: 0.361, blue: 1, alpha: 0.92).cgColor
+        b.layer?.backgroundColor = NSColor(srgbRed: 1.0, green: 0.424, blue: 0.047, alpha: 0.92).cgColor
         b.toolTip = "Run the plot's code again and show what it draws now"
         b.isHidden = true
         addSubview(b)
@@ -474,7 +474,7 @@ final class CanvasView: MTKView {
         b.image = CanvasView.pythonGlyph()
         b.isBordered = false; b.imagePosition = .imageOnly
         b.wantsLayer = true; b.layer?.cornerRadius = 13
-        b.layer?.backgroundColor = NSColor(calibratedRed: 0.486, green: 0.361, blue: 1, alpha: 0.92).cgColor
+        b.layer?.backgroundColor = NSColor(srgbRed: 1.0, green: 0.424, blue: 0.047, alpha: 0.92).cgColor
         b.toolTip = "Open the plot's Python code"
         b.isHidden = true
         addSubview(b)
@@ -991,7 +991,7 @@ final class CanvasView: MTKView {
             let fw = Double(frameSize.width), fh = Double(frameSize.height)
             if showGrid, unitPx > 4 {
                 let t = max(1.0, 0.8 * pxPerPoint)
-                let axis = SIMD4<Float>(0.486, 0.361, 1, 0.55), minor = SIMD4<Float>(1, 1, 1, 0.13)
+                let axis = SIMD4<Float>(1.0, 0.424, 0.047, 0.55), minor = SIMD4<Float>(1, 1, 1, 0.13)
                 var k = 0.0
                 while fw / 2 + k * unitPx <= fw + 0.5 {
                     drawSolid(fw / 2 + k * unitPx - t / 2, 0, t, fh, k == 0 ? axis : minor)
@@ -1034,7 +1034,7 @@ final class CanvasView: MTKView {
                 }
             }
             if let d = drawBand, let tool = drawTool, tool != "pen" {
-                let c = SIMD4<Float>(0.486, 0.361, 1, 1)
+                let c = SIMD4<Float>(1.0, 0.424, 0.047, 1)
                 if ["line", "arrow", "darrow"].contains(tool) {
                     segment([d.0, d.1, d.2, d.3], c, max(2.0, 3 * pxPerPoint))
                 } else {
@@ -1070,9 +1070,9 @@ final class CanvasView: MTKView {
                     drawTex(tex, a.x, a.top ? a.y : a.y - h / 2, w, h, map: false)
                 }
             }
-            if let w = wrapBand { outline(w, SIMD4(0.486, 0.361, 1, 1), th * 1.4) }
+            if let w = wrapBand { outline(w, SIMD4(1.0, 0.424, 0.047, 1), th * 1.4) }
             if let g = ghost {
-                outline(Box(x0: g.cx - g.w / 2, y0: g.cy - g.h / 2, x1: g.cx + g.w / 2, y1: g.cy + g.h / 2), SIMD4(0.486, 0.361, 1, 1), th * 1.6)
+                outline(Box(x0: g.cx - g.w / 2, y0: g.cy - g.h / 2, x1: g.cx + g.w / 2, y1: g.cy + g.h / 2), SIMD4(1.0, 0.424, 0.047, 1), th * 1.6)
             }
             for mark in findMarks?() ?? [] where mark.oid != inline?.oid {
                 // the characters of the match when the render has their boxes (and the object is where it rendered),
@@ -1090,13 +1090,13 @@ final class CanvasView: MTKView {
                 for v in stop.visible {
                     let oid = Int(v[0])
                     if oid == selection || others.contains(oid) { continue }
-                    if let b = currentBox(oid) { outline(b, SIMD4(0.486, 0.361, 1, oid == hover ? 0.95 : 0.35), oid == hover ? th * 1.4 : th * 0.7) }
+                    if let b = currentBox(oid) { outline(b, SIMD4(1.0, 0.424, 0.047, oid == hover ? 0.95 : 0.35), oid == hover ? th * 1.4 : th * 0.7) }
                 }
             } else if let h = hover, let b = currentBox(h) {
-                outline(b, SIMD4(0.486, 0.361, 1, 0.95), th * 1.4)
+                outline(b, SIMD4(1.0, 0.424, 0.047, 0.95), th * 1.4)
             }
             if let s = selection, let b = currentBox(s) {
-                outline(b, SIMD4(0.486, 0.361, 1, 1), th * 1.6)
+                outline(b, SIMD4(1.0, 0.424, 0.047, 1), th * 1.6)
                 let hs = 6.5 * pxPerPoint
                 var corners: [(Double, Double)]
                 if let p = lineEnds(s) { corners = [(p[0], p[1]), (p[2], p[3])] }
@@ -1115,11 +1115,11 @@ final class CanvasView: MTKView {
                 }
             }
             for oid in others where oid != selection {
-                if let b = currentBox(oid) { outline(b, SIMD4(0.486, 0.361, 1, 1), th * 1.6) }
+                if let b = currentBox(oid) { outline(b, SIMD4(1.0, 0.424, 0.047, 1), th * 1.6) }
             }
             if let m = marquee {                                   // the rubber band: a faint fill with a thin edge
-                drawSolid(m.x0, m.y0, m.w, m.h, SIMD4(0.486, 0.361, 1, 0.12))
-                outline(m, SIMD4(0.486, 0.361, 1, 0.9), max(1.0, pxPerPoint))
+                drawSolid(m.x0, m.y0, m.w, m.h, SIMD4(1.0, 0.424, 0.047, 0.12))
+                outline(m, SIMD4(1.0, 0.424, 0.047, 0.9), max(1.0, pxPerPoint))
             }
         }
     }

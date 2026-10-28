@@ -26,6 +26,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var sourceFocused = false
     let toastPill = Pill()
     let busyPill = Pill()
+    let latexBanner = LatexBanner()          // a Beamer deck's LaTeX packages are missing (LatexPackages.swift)
     var busyText = "Rendering…" {
         didSet { if busyText != oldValue { busyProgress = nil; renderETA = nil }; if busy > 0 { updateBusyPill() } }
     }
@@ -103,7 +104,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// The deck's feedback notes (Presenter View's Feedback Mode), in `feedback.json` of the working copy.
     var feedback: FeedbackStore?
     var feedbackPane: FeedbackListView?       // the feedback list, in the inspector's place while it is up
-    /// The deck's presentation script (`script.json`), its panel, overlay and automatic presentation.
+    /// The deck's presentation script (`script.json`), its panel, overlay and scripted presentation.
     let script = ScriptState()
     private var presentFrom = 0              // scene (order.txt index) the animated show starts at
     private var presentWithPresenter = false // the animated show opens in Presenter View
@@ -153,6 +154,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.title = "Manimble"
         window.titlebarSeparatorStyle = .line
         window.delegate = self
+        window.tabbingMode = .disallowed        // a new deck opens in its own window, not a tab
         window.isReleasedWhenClosed = false     // closing it closes the deck; the window comes back for the next one
         window.minSize = NSSize(width: 1000, height: 600)
         window.setFrameAutosaveName("manimble.main")
@@ -202,7 +204,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         side.drawsBackground = false
         side.automaticallyAdjustsContentInsets = false
         side.contentInsets = NSEdgeInsets(top: 8, left: 0, bottom: 12, right: 0)
-        let sideBox = NSVisualEffectView(); sideBox.material = .sidebar; sideBox.blendingMode = .behindWindow
+        let sideBox = NSView(); sideBox.wantsLayer = true
+        Theme.layerColors(sideBox) { $0.layer?.backgroundColor = Theme.sidebarBackground.cgColor }
         sideBox.addSubview(side)
         side.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -445,12 +448,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let root = NSView()
         formatBar.translatesAutoresizingMaskIntoConstraints = false
         split.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(formatBar); root.addSubview(split)
+        latexBanner.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(formatBar); root.addSubview(latexBanner); root.addSubview(split)
         NSLayoutConstraint.activate([
             formatBar.leadingAnchor.constraint(equalTo: root.leadingAnchor), formatBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             formatBar.topAnchor.constraint(equalTo: root.topAnchor),
+            latexBanner.leadingAnchor.constraint(equalTo: root.leadingAnchor), latexBanner.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            latexBanner.topAnchor.constraint(equalTo: formatBar.bottomAnchor),
             split.leadingAnchor.constraint(equalTo: root.leadingAnchor), split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            split.topAnchor.constraint(equalTo: formatBar.bottomAnchor), split.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            split.topAnchor.constraint(equalTo: latexBanner.bottomAnchor), split.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         formatBar.find.attachReplaceRow(in: root, below: formatBar)
         return root
@@ -666,6 +672,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 await reloadState()
                 if let first = state?.scenes.first { await selectScene(first.name) }
                 updateDocumentState()
+                await checkLatexPackages()
             } catch { alert("Could not open deck", "\(error)") }
         }
     }
@@ -884,6 +891,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         if ev["event"] as? String == "export_movie" {
+            if finishScriptedMovie(ev) { return }
             let done = (ev["done"] as? Int ?? 0) + 1, total = ev["total"] as? Int ?? 0
             switch ev["phase"] as? String {
             case "building":
@@ -2664,7 +2672,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func presenterViewAnimated() { present(fromCurrent: true, withPresenter: true) }
 
     /// Builds any out-of-date slides with manim, then plays their clips in AnimatedPlayer (see the "ready" event).
-    /// `auto`: an automatic presentation (the script plays it).
+    /// `auto`: a scripted presentation (the script plays it).
     func present(fromCurrent: Bool, withPresenter: Bool = false, auto: Bool = false) {
         guard player == nil, presenter == nil, animatedPlayer == nil else { return }
         closeAnimationPreview()
@@ -2765,7 +2773,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    /// `auto`: an automatic presentation (the script plays it).
+    /// `auto`: a scripted presentation (the script plays it).
     func play(fromCurrent: Bool, auto: Bool = false) {
         guard player == nil, presenter == nil, animatedPlayer == nil else { return }
         closeAnimationPreview()
@@ -3026,7 +3034,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(newBuild):
             return sceneName != nil && scene?.name == sceneName && scene?.stops != nil && player == nil
         case #selector(extractElementsPressed):
-            return objInfo?.kind == "image" && objInfo?.imagePath != nil && player == nil
+            return objInfo?.kind == "image" && objInfo?.imagePath.map { !$0.lowercased().hasSuffix(".svg") } == true && player == nil
         case #selector(slideNumbersPressed):
             return state?.scenes.isEmpty == false && player == nil
         case #selector(toggleNotesPane):

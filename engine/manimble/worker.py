@@ -52,7 +52,7 @@ import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Camera, ORIGIN  # noqa: E402
-from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor, Group  # noqa: E402
+from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor, Group, SVGMobject  # noqa: E402
 from manim import (FadeIn, FadeOut, Create, Uncreate, Write, Unwrite, DrawBorderThenFill, GrowFromCenter,  # noqa: E402
                    GrowFromPoint, GrowFromEdge, GrowArrow, SpinInFromNothing, ReplacementTransform,
                    TransformFromCopy, AnimationGroup, LaggedStart, Transform, MoveToTarget,
@@ -476,6 +476,9 @@ def _track_tables():
 _track_shapes()
 _track_tables()
 _track("image", ImageMobject, lambda s, a, k: str(a[0]) if a else str(k.get("filename_or_array", "")))
+# A vector picture (a BioCartoon icon placed as SVG). Text and MathTex are SVGMobjects too: only the class itself counts.
+_track("image", SVGMobject, lambda s, a, k: str(a[0]) if a else str(k.get("file_name", "")),
+       only=lambda s, line: type(s) is SVGMobject)
 # A freehand pen stroke Manimble wrote (`VMobject(...).set_points_smoothly(...)  # manimble pen`): a plain VMobject,
 # tracked only on that marked line so groups and the VMobjects inside Text and shapes stay untouched.
 _track("shape", VMobject, lambda s, a, k: "Pen", only=lambda s, line: type(s) is VMobject and "# manimble pen" in line)
@@ -901,6 +904,17 @@ def hexcolor(m):
     return None
 
 
+def picture_path(m):
+    """The file a picture shows: an ImageMobject's path, or the SVG of an SVGMobject (absolute)."""
+    p = getattr(m, "path", None)
+    if p is None and isinstance(m, SVGMobject):
+        try:
+            p = m.get_file_path()
+        except Exception:
+            p = None
+    return os.path.abspath(str(p)) if p else None
+
+
 def text_attr(m, name):
     """font_size / font / weight / slant of a Text, or of the Text inside a Paragraph."""
     v = getattr(m, name, None)
@@ -1026,7 +1040,7 @@ def render(req):
             "weight": text_attr(m, "weight") if m._sl_kind == "text" else None,
             "slant": text_attr(m, "slant") if m._sl_kind == "text" else None,
             "color": (hexcolor(m) if m._sl_kind in ("text", "tex") else shape_color(m)) if m._sl_kind != "image" else None,
-            "path": str(getattr(m, "path", "")) if m._sl_kind == "image" and getattr(m, "path", None) else None,
+            "path": picture_path(m) if m._sl_kind == "image" else None,
             "rotation": rotation_deg(m),
             "dims": dims_px(m),
             "frames": m._sl_frames,
@@ -1142,6 +1156,9 @@ def main():
                 res = sprite(req)
             elif req["cmd"] == "latex":
                 res = latex(req)
+            elif req["cmd"] == "svg_icon":
+                from manimble import svg_icon
+                res = svg_icon.prepare(req)
             elif req["cmd"] == "colors":
                 # manim's named colours (WHITE, BLUE_C, ORANGE, ...) as #RRGGBB
                 import manim.utils.color as mc

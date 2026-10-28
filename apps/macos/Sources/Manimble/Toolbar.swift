@@ -124,7 +124,7 @@ extension MainController: NSToolbarDelegate {
         case .insBioCartoon:
             let i = button(id, "BioCartoon", "paintpalette", #selector(showBioCartoon))
             i.toolTip = "Search BioCartoon's science icons and drag them onto the slide"
-            let logo = BioCartoonCLI.logo.copy() as! NSImage
+            let logo = BioCartoonCLI.monoLogo.copy() as! NSImage
             logo.size = NSSize(width: 22, height: 22)
             i.image = logo
             return i
@@ -468,8 +468,10 @@ extension MainController: NSToolbarDelegate {
         save.prompt = "Create Deck"
         save.canCreateDirectories = true
         guard save.runModal() == .OK, let dest = save.url else { return }
-        busyPill.show("Importing…", symbol: nil, tint: nil, spinning: true)
         Task { @MainActor in
+            // Beamer: offer to install the LaTeX packages the file uses that are missing here (never on its own)
+            if label.hasPrefix("Beamer"), !(await offerLatexPackages(for: src, deck: dest)) { return }
+            busyPill.show("Importing…", symbol: nil, tint: nil, spinning: true)
             let r = try? await engine.call("import", ["src": src.path, "dest": dest.path], as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); toast(r?.error ?? "could not start the import", error: true) }
         }
@@ -531,7 +533,8 @@ extension MainController: NSToolbarDelegate {
         let deckName = ws.original.deletingLastPathComponent().lastPathComponent == "slides" ? "presentation" : ws.original.lastPathComponent
         panel.nameFieldStringValue = (slide.map { deckName + "_" + $0 } ?? deckName) + ".mp4"
         panel.message = slide.map { "Export slide \($0) as a movie" } ?? "Export the animated show as a movie"
-        let options = MovieExportOptions(scenes: scenes, currentSlide: slide ?? sceneName, height: animationHeight)
+        let options = MovieExportOptions(scenes: scenes, currentSlide: slide ?? sceneName, height: animationHeight,
+                                         hasScript: !(script.store?.isEmpty ?? true))
         if slide != nil { options.chooseCurrentSlide() }
         panel.accessoryView = options.view
         panel.delegate = options
@@ -541,10 +544,74 @@ extension MainController: NSToolbarDelegate {
         if url.pathExtension.lowercased() != "mp4" { url.appendPathExtension("mp4") }
         var req: [String: Any] = ["path": url.path, "height": options.height, "hold": options.holdSeconds, "fps": options.frameRate]
         if let names { req["scenes"] = names }
+        if options.withScript, let store = script.store {
+            exportScriptedMovie(req, store: store, scenes: names ?? scenes.filter { $0.hidden != true }.map(\.name), to: url)
+            return
+        }
         busyPill.show("Exporting movie…", symbol: nil, tint: nil, spinning: true)
         Task { @MainActor in
             let r = try? await engine.call("export_movie", req, as: UndoResult.self)
             if r?.ok != true { busyPill.hide(); toast(r?.error ?? "could not start the movie export", error: true) }
+        }
+    }
+
+    /// The movie as the scripted presentation plays it: the narration is spoken to files first, the engine encodes
+    /// the show with each build held for its script, and the `done` event hands the movie to `finishScriptedMovie`.
+    func exportScriptedMovie(_ request: [String: Any], store: ScriptStore, scenes: [String], to url: URL) {
+        guard script.movieExport == nil else { toast("A movie is already being exported", error: true); return }
+        let height = request["height"] as? Int ?? 720, fps = request["fps"] as? Int ?? 30
+        let r = canvas.slideRect
+        let aspect = r.height > 0 ? r.width / r.height : 16.0 / 9
+        busyPill.show("Preparing the narration…", symbol: nil, tint: nil, spinning: true)
+        Task { @MainActor in
+            do {
+                let x = try await ScriptMovieExport.prepare(
+                    store: store, scenes: scenes, frame: CGSize(width: height * 16 / 9, height: height), aspect: aspect,
+                    fps: fps, destination: url) { [weak self] i, n in
+                        self?.busyPill.show("Preparing the narration \(i)/\(n)", symbol: nil, tint: nil, spinning: true,
+                                            progress: self?.stepFraction(i, n))
+                    }
+                var req = request
+                req["path"] = x.base.path; req["holds"] = x.holds; req["hold"] = x.unscripted
+                script.movieExport = x
+                busyPill.show("Exporting movie…", symbol: nil, tint: nil, spinning: true)
+                let r = try? await engine.call("export_movie", req, as: UndoResult.self)
+                if r?.ok != true {
+                    x.discard(); script.movieExport = nil
+                    busyPill.hide(); toast(r?.error ?? "could not start the movie export", error: true)
+                }
+            } catch {
+                busyPill.hide(); toast("Could not prepare the narration: \(error.localizedDescription)", error: true)
+            }
+        }
+    }
+
+    /// The engine's `export_movie` event while a scripted export waits on it; true when it was that export's.
+    func finishScriptedMovie(_ ev: [String: Any]) -> Bool {
+        guard let x = script.movieExport else { return false }
+        switch ev["phase"] as? String {
+        case "done":
+            guard ev["path"] as? String == x.base.path else { return false }
+            script.movieExport = nil
+            busyPill.show("Adding the narration and pointer…", symbol: nil, tint: nil, spinning: true)
+            let segments = ev["segments"] as? [[String: Any]] ?? []
+            let slides = ev["slides"] as? Int ?? 0
+            Task { @MainActor in
+                do {
+                    try await x.finish(segments: segments)
+                    busyPill.hide()
+                    toast("Exported \(x.destination.lastPathComponent)" + (slides > 0 ? " (\(slides) slide\(slides == 1 ? "" : "s"))" : ""))
+                    NSWorkspace.shared.activateFileViewerSelecting([x.destination])
+                } catch {
+                    busyPill.hide(); toast("Could not write the movie: \(error.localizedDescription)", error: true)
+                }
+            }
+            return true
+        case "cancelled", "error":
+            x.discard(); script.movieExport = nil
+            return false                                 // the usual toast
+        default:
+            return false
         }
     }
 
@@ -619,8 +686,10 @@ final class MovieExportOptions: NSObject, NSOpenSavePanelDelegate {
     private let resolution = NSPopUpButton(frame: .zero, pullsDown: false)
     private let hold = NSTextField(string: "2")
     private let fps = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let script = NSButton(checkboxWithTitle: "Export with script", target: nil, action: nil)
+    private let note: NSTextField
 
-    init(scenes: [SceneSummary], currentSlide: String?, height: Int) {
+    init(scenes: [SceneSummary], currentSlide: String?, height: Int, hasScript: Bool) {
         self.scenes = scenes
         self.currentSlide = currentSlide
         which.addItems(withTitles: ["All slides", "Current slide" + (currentSlide.map { " (\($0))" } ?? ""), "Some slides…"])
@@ -638,19 +707,34 @@ final class MovieExportOptions: NSObject, NSOpenSavePanelDelegate {
         fps.addItems(withTitles: Self.rates.map { "\($0) fps" }); fps.selectItem(at: 1)
         let holdRow = NSStackView(views: [hold, NSTextField(labelWithString: "seconds on each build’s last frame")]); holdRow.spacing = 6
         func label(_ s: String) -> NSTextField { NSTextField(labelWithString: s) }
+        script.isEnabled = hasScript
+        script.toolTip = hasScript ? "Play the show as Play ▸ Scripted Presentation does: each build’s words spoken and its pointer moves drawn"
+                                   : "This deck has no script yet (Script, top right, adds words and pointer moves)"
         let grid = NSGridView(views: [[label("Slides:"), which], [NSView(), list], [label("Resolution:"), resolution],
-                                      [label("Hold:"), holdRow], [label("Frame rate:"), fps]])
+                                      [label("Hold:"), holdRow], [label("Frame rate:"), fps], [NSView(), script]])
         grid.rowSpacing = 8; grid.columnSpacing = 8
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
-        let note = NSTextField(wrappingLabelWithString: "Every build plays once at its playback rate, hidden slides are left out, and there is no audio. Slides not yet built at this resolution are built first.")
+        note = NSTextField(wrappingLabelWithString: Self.plainNote)
         note.font = .systemFont(ofSize: NSFont.smallSystemFontSize); note.textColor = .secondaryLabelColor
         note.preferredMaxLayoutWidth = 380
         view = NSStackView(views: [grid, note]); view.orientation = .vertical; view.alignment = .leading; view.spacing = 10
         view.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
         super.init()
         which.target = self; which.action = #selector(whichChanged)
+        script.target = self; script.action = #selector(scriptChanged)
     }
+
+    private static let plainNote = "Every build plays once at its playback rate, hidden slides are left out, and there is no audio. Slides not yet built at this resolution are built first."
+    private static let scriptNote = "Every build plays once, then its last frame stays up while its script is spoken and its pointer moves are drawn, as in Play ▸ Scripted Presentation; a build with no script stays up the script’s hold. Hidden slides are left out. Slides not yet built at this resolution are built first."
+
+    @objc private func scriptChanged() {
+        hold.isEnabled = !withScript
+        note.stringValue = withScript ? Self.scriptNote : Self.plainNote
+    }
+
+    /// Lay the deck's script (narration and pointer) over the movie.
+    var withScript: Bool { script.isEnabled && script.state == .on }
 
     @objc private func whichChanged() {
         list.isEnabled = which.indexOfSelectedItem == 2
