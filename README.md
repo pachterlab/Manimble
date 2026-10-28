@@ -8,13 +8,18 @@ Runs on macOS 13+ on both Apple Silicon and Intel Macs (the app is a universal b
 
 ### Precompiled binary
 
-```bash
-curl -L -o /tmp/Manimble-macOS.zip https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip  # Download latest precompiled binary
-ditto -x -k /tmp/Manimble-macOS.zip /Applications/ && rm /tmp/Manimble-macOS.zip  # Unzip and move to Applications
-git clone https://github.com/pachterlab/Manimble.git && cd Manimble && ./setup_python_env.sh  # Install Python/Manim/TeX dependencies
-```
+Download [Manimble-macOS.dmg](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg),
+open it and drag Manimble to Applications. On first launch Manimble looks for what it needs and offers to install
+whatever is missing, with no Homebrew and no Terminal:
 
-See precompiled binaries in [Releases](https://github.com/pachterlab/Manimble/releases)
+- **Python with Manim**: a self-contained Python runtime (about 150 MB to download) in
+  `~/Library/Application Support/Manimble/python`. Skipped when a Python that can import Manim is already found.
+- **LaTeX** for formulas: [TinyTeX](https://yihui.org/tinytex/) (about 80 MB to download) in `~/Library/TinyTeX`,
+  plus the packages Manim uses. An existing TeX installation such as MacTeX is used instead; if it lacks some of
+  those packages they are added to it, which asks for your password because a system TeX lives in a system folder.
+
+Both go into your user Library, so no administrator password is needed otherwise. *Manimble ▸ Install Dependencies…*
+reopens the setup window later. See all releases in [Releases](https://github.com/pachterlab/Manimble/releases).
 
 ### Compile directly
 
@@ -37,7 +42,7 @@ Requirements:
 
 On launch Manimble checks `$MANIMBLE_PYTHON`, your saved choice, its installed Python environment, a checkout-local
 `.venv`, and Python on your login shell's `PATH`. It uses the first one that can import Manim and Pillow, so no
-Python chooser is needed after `install_manimble.sh` completes.
+Python chooser is needed after `install_manimble.sh` completes; with none found it offers to install one.
 
 A deck is a folder of scene classes (`class MySlide(Slide): def construct(self): ...`). If it has an `order.txt`
 (scene names separated by spaces/newlines), only those scenes, in that order, are the slides of the talk;
@@ -265,13 +270,13 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 
 **Terminal**
 - A docked terminal (View ▸ Show Terminal, ⌥⌘T, or the toolbar button) running your login shell in the project repository (the original deck's git root, or its parent folder; View ▸ Terminal Starts in Working Copy switches it to the *working copy*, the folder the slides are rendered from)
-  of the deck, with a "Run claude" shortcut for [Claude Code](https://claude.com/claude-code). Edits made there (by
-  Claude or by hand) are noticed within about two seconds; the slide you are looking at is re-rendered first and
+  of the deck, with a **Run** button that starts an AI coding agent: [Claude Code](https://claude.com/claude-code) by
+  default, or Codex, Gemini CLI or a custom command picked from its ▾ menu. Edits made there (by an agent or by hand) are noticed within about two seconds; the slide you are looking at is re-rendered first and
   refreshes on screen by itself (about 1–3 s in total), the other slides re-render in the background.
 - Several terminals, VS Code style: the + in the terminal header (or View ▸ New Terminal, ⇧⌥⌘T) opens a new tab,
   and once there is more than one terminal they are listed vertically on the right (click to switch, × to kill).
   The split button (View ▸ Split Terminal, ⌘\) opens another shell beside the active one in the same tab; split
-  tabs are grouped in the list with ┌ └ lines. The header's Run claude, restart and kill buttons act on the active
+  tabs are grouped in the list with ┌ └ lines. The header's Run, restart and kill buttons act on the active
   terminal; killing the last one hides the terminal.
 
 **Interface**
@@ -362,8 +367,8 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 - Undo history is kept in memory and lost on quit (the working copy is deleted on close, so use Save).
 - If the app crashes, the working copy is left behind and replaced on the next open of that deck, so unsaved edits
   from a crash are not recovered.
-- The terminals restart (ending any running `claude` sessions) when you open a different deck, and does not remember
-  its scrollback between launches. Claude edits the working copy, so use Save to Original afterwards.
+- The terminals restart (ending any running agent sessions) when you open a different deck, and does not remember
+  its scrollback between launches. Agents edit the working copy, so use Save to Original afterwards.
 - The app is ad-hoc signed, not notarised (the release workflow supports notarization once a
   Developer ID is configured; see `.github/workflows/release.yml`).
 - Re-rendering a slide after an edit takes 0.2–0.8 s (every object is re-created by manim; a slide with 40 formulas
@@ -388,6 +393,100 @@ Manimble.app  (Swift, AppKit, Metal)                 engine/manimble  (Python)
 10. Image tools: replace, crop, mask; SVG and PDF insertion.
 11. Packaging: a Developer ID for notarisation, and an automated test suite.
 
+## FAQ
+
+**Why does rendering take long for some actions?**
+
+Every slide is real Manim (Python) code, so after an edit, Manim runs the slide again to re-create each object.
+Manimble shows your change on the canvas right away and checks it with this re-render in the background, which
+usually takes 0.2–0.8 s per slide. Some actions take longer because they need more of that work:
+
+- **New formulas**: each new LaTeX formula is compiled once by your TeX installation (about 0.5 s), then cached. Slides with many formulas re-render at the slow end of the range.
+- **Playing with animations, previewing animations, and exporting to MP4**: these build the real animations with `manim render`. The first time on a deck, every slide is rendered, which can take minutes. After that, only slides whose code changed are rebuilt.
+- **Higher animation resolution** (1080p, 1440p, 4K): sharper but slower to build. Changing the resolution rebuilds each slide once, the next time it is played or exported.
+- **Deck-wide changes** (applying dark mode or inverted colours to the deck, themes, shared constants such as the font family): every affected slide has to be re-rendered (about a second per slide).
+- **Edits from the terminal or Claude**: the slide on screen re-renders first (about 1–3 s), and the other slides catch up in the background.
+
+**Why should I use Manimble over PowerPoint/Keynote/Google Slides?**
+
+Here are some of the main features that Manimble uniquely supports:
+
+- **Smooth Manim animations**: real animations (write, transform, grow, move) play as video between builds, instead of fixed slide transitions.
+- **Native LaTeX**: formulas are written in LaTeX with a live preview, compiled by your real TeX installation.
+- **Slides as Python**: every slide is readable Manim code, so decks can go in git, be diffed, and be edited by hand, by script, or by an AI agent (e.g., GPT, Claude) in the built-in terminal. Every edit in the app updates that code.
+- **Live Python plots**: Python-generated plots can be made to run and appear on the slide as images, so figures update when the code or data changes.
+- **BioCartoon integration**: search for and insert biology illustrations directly.
+- **Feedback mode**: reviewers can leave feedback on the slides during presenter mode.
+- **Script mode**: write and manage a spoken script for the talk.
+- **Beamer import/export**, alongside PowerPoint/Keynote import and export, so you can move between LaTeX and slide-based workflows.
+
+**Do I need to know Python or Manim to use Manimble?**
+
+No. Moving, resizing, retyping, formatting and inserting text, formulas, images, shapes and tables all happen
+directly on the slide, and Manimble writes the matching Manim code for you. Knowing Python helps if you want custom
+animations or plots. You can edit any slide's code in the source pane, and the slide updates when you do.
+
+**What do I need to install?**
+
+A Mac running macOS 13 or later (Apple Silicon or Intel). Download `Manimble-macOS.dmg` from the
+[latest release](https://github.com/pachterlab/Manimble/releases/latest) and drag Manimble to Applications. On first
+launch, Manimble checks for its dependencies and offers to install whatever is missing:
+
+- **Python with Manim**: a self-contained Python runtime (about 150 MB download).
+- **LaTeX**: [TinyTeX](https://yihui.org/tinytex/) (about 80 MB download), plus the packages Manim uses.
+
+Both are installed in your user Library, so no administrator password is needed. If you already have a Python that
+can import Manim, or a TeX installation such as MacTeX, Manimble uses that instead. You can reopen the setup window
+later with *Manimble ▸ Install Dependencies…*. Windows and Linux support are planned for the future.
+
+**Can I import my existing PowerPoint or Keynote deck?**
+
+Yes. *File ▸ Import* turns a `.pptx` or `.key` file into a new Manimble deck. Text, images, tables, and basic shapes
+and lines all become editable Manim objects. Some things are not imported yet: animations, transitions, gradient or
+picture backgrounds, charts, SmartArt, and mixed colours or sizes within a single paragraph. Text is placed by its
+box, so line breaks can differ slightly from the original, and slides that aren't 16:9 are stretched to 16:9.
+
+**Can I share my slides with people who don't have Manimble?**
+
+Yes. *File ▸ Export To* and the Share menu support:
+
+- **PowerPoint (.pptx) and Keynote (.key)**: one slide per build or per slide. *Editable* mode keeps plain text as real text boxes over a picture of everything else, and *Pictures only* gives the exact rendered frames. Animations become separate slides.
+- **Movie (.mp4)**: the full animated show, or just the slides you pick, at 720p up to 4K (no audio).
+- **PDF and HTML**.
+- **Beamer**, for LaTeX users.
+- **Python**: the whole deck as a single `.py` file.
+
+For other Manimble users, *File ▸ Package for Sharing…* creates one `.manimble` file that includes the media and builds.
+
+**Can I incorporate Manimble's animations into some slides in a PowerPoint/Keynote/Google Slides deck?**
+
+Yes. Export the Manimble slides as a movie (`.mp4`) and insert that into your deck. You can also export as a
+picture (`.png` or `.jpg`) for static slides.
+
+**Can I use Claude Code, Codex, Gemini CLI, or another AI coding assistant to edit my slides?**
+
+Yes. Open the built-in terminal (*View ▸ Show Terminal*, ⌥⌘T) and click the **Run** button in its header. It starts
+Claude Code by default. Click the ▾ beside it to switch to Codex or Gemini CLI, or to enter any other command (for
+example, `aider`). The button remembers your choice and shows its name (**Run claude**, **Run codex**, …). If the
+agent isn't installed, Manimble shows the install command and can type it into the terminal for you. You can also
+run any tool there by hand. Since every slide is Python, the assistant edits the code directly. Manimble notices the changes within about
+2 seconds and re-renders the slide on screen first. Edits made in the terminal go to the working copy, so use
+**Save to Original** afterward to keep them.
+
+**A formula won't render, or I get an error about a missing LaTeX package. What do I do?**
+
+Install the missing package with `tlmgr install <package>` (for example, `tlmgr install ctex` for Chinese text). If
+your TeX was installed system-wide (MacTeX or BasicTeX), use `sudo tlmgr install <package>`. You don't need `sudo`
+for the TinyTeX that Manimble installs. While a slide has a render error, its code stays in the working copy and the
+error appears above the editor. The last good frame stays visible, so you can fix the code and try again.
+
+**Is Manimble free and open source?**
+
+Yes. Manimble is free and open source under the BSD 2-Clause License. The source is at
+[github.com/pachterlab/Manimble](https://github.com/pachterlab/Manimble). Please report bugs and request features on
+[GitHub Issues](https://github.com/pachterlab/Manimble/issues). Include your macOS version, your Mac type (Apple
+Silicon or Intel), and if possible the deck or slide code that causes the problem.
+
 ## License
 
 BSD 2-Clause, see [LICENSE](LICENSE). Manimble links against [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)
@@ -399,13 +498,14 @@ BSD 2-Clause, see [LICENSE](LICENSE). Manimble links against [SwiftTerm](https:/
 engine/                  platform-independent Python engine (rpc, core, srcedit, worker, export, importer)
 docs/protocol.md         the engine's JSON-lines protocol
 apps/macos/              the macOS app: Package.swift, Sources/Manimble (AppKit, Metal, SwiftTerm),
-                         build_app.sh, assets/Manimble.icns, tools/make_icon.py
+                         build_app.sh, make_dmg.sh, assets/Manimble.icns, tools/make_icon.py
+apps/macos/install_dependencies.sh  what the app's first-launch setup window runs to install Python/LaTeX
+apps/macos/tools/build_python_runtime.sh  builds the self-contained Python runtime attached to each release
 install_manimble.sh      installs dependencies and builds ~/Applications/Manimble.app
-setup_python_env.sh      installs just the Python/Manim/TeX dependencies (used by install_manimble.sh,
-                         and standalone for a downloaded prebuilt Manimble.app)
+setup_python_env.sh      installs just the Python/Manim/TeX dependencies with Homebrew (used by install_manimble.sh)
 VERSION                  the app's version; the release workflow checks it against the git tag
 .github/workflows/       CI build on every push, and the tag-triggered release that publishes
-                         Manimble-macOS.zip to GitHub Releases
+                         Manimble-macOS.dmg/.zip and the Python runtimes to GitHub Releases
 apps/windows/            placeholder with notes for a future Windows front end
 examples/hello/deck/     a tiny deck to try Manimble on
 LICENSE                  BSD 2-Clause

@@ -272,6 +272,9 @@ final class PresenterController: NSObject, NSWindowDelegate {
     let source: PresenterSource
     let window: PresenterWindow
     var onExit: (() -> Void)?
+    /// After the show ends, once the presenter window is out of its full-screen Space and gone: the moment to bring
+    /// the editor back (fronting it any sooner lands on the Space the presenter window is leaving).
+    var onGone: (() -> Void)?
     /// "Use Slide Show": the presenter window is gone but the show goes on; the caller takes the source back.
     var onDetach: ((PresenterSource) -> Void)?
     /// Saves notes typed here: the scene, the build (nil for the slide's notes) and the text. `done` says whether
@@ -339,6 +342,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private var thumbCache: [String: NSImage] = [:]   // sidebar pictures by file, kept across sidebar rebuilds
     /// For each slide of the show: its first page (where a thumbnail click goes) and last page (its picture).
     private var slideRange: [(first: Int, last: Int)] = []
+    private var scrolledToPage = -1              // the page the sidebar last scrolled to (it follows the show, not every refresh)
     static let sidebarWidth: CGFloat = 250
     private var started = Date()
     private var accumulated: TimeInterval = 0
@@ -348,6 +352,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
     private var cache: [String: NSImage] = [:]
     private var pendingFrames: Set<String> = []
     private let animated: Bool
+    var isAnimated: Bool { animated }
     private var presenterScreen: NSScreen
     private let sharedScreen: Bool
     /// The window is on its way into native full screen (see `fillScreen`).
@@ -731,16 +736,23 @@ final class PresenterController: NSObject, NSWindowDelegate {
 
     /// One entry per slide: the picture of its last build (a click goes to its first) with every build nested
     /// beneath it (a click goes to that build).
+    /// Slides that finish building while the show runs (the animated show) only change pictures: the panels stay,
+    /// and the list stays where it is scrolled to.
     private func buildSidebar() {
-        slideRange = []
+        var ranges: [(first: Int, last: Int)] = []
         for i in 0..<source.pageCount {
             let p = source.presenterPage(i)
-            if let k = slideRange.indices.last, source.presenterPage(slideRange[k].first).slide == p.slide {
-                slideRange[k].last = i
+            if let k = ranges.indices.last, source.presenterPage(ranges[k].first).slide == p.slide {
+                ranges[k].last = i
             } else {
-                slideRange.append((first: i, last: i))
+                ranges.append((first: i, last: i))
             }
         }
+        let same = !thumbs.isEmpty && ranges.count == slideRange.count
+            && zip(ranges, slideRange).allSatisfy { $0.first == $1.first && $0.last == $1.last }
+        slideRange = ranges
+        if same { loadThumbnails(); return }
+        let scrolled = sidebar.contentView.bounds.origin
         thumbs = slideRange.enumerated().map { k, r in
             let t = SlideThumb(number: k + 1, builds: r.last - r.first + 1)
             t.onClick = { [weak self] in self?.source.go(r.first) }
@@ -762,6 +774,12 @@ final class PresenterController: NSObject, NSWindowDelegate {
             doc.topAnchor.constraint(equalTo: sidebar.contentView.topAnchor),
         ])
         for t in thumbs { t.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true }
+        if scrolled.y > 0 {                             // a rebuild keeps the place in the list
+            sidebar.layoutSubtreeIfNeeded()
+            let maxY = max(0, doc.frame.height - sidebar.contentView.bounds.height)
+            sidebar.contentView.scroll(to: NSPoint(x: 0, y: min(scrolled.y, maxY)))
+            sidebar.reflectScrolledClipView(sidebar.contentView)
+        }
         loadThumbnails()
     }
 
@@ -813,6 +831,8 @@ final class PresenterController: NSObject, NSWindowDelegate {
         let g = AVAssetImageGenerator(asset: asset)
         g.appliesPreferredTrackTransform = true
         g.maximumSize = maxSize
+        // both tolerances: with the default one before, the frame snaps back to the clip's keyframe (often its first)
+        g.requestedTimeToleranceBefore = .zero
         g.requestedTimeToleranceAfter = .zero
         let dur = (try? await asset.load(.duration)) ?? .zero
         let t = CMTimeMaximum(.zero, CMTimeSubtract(dur, CMTime(value: 1, timescale: 30)))
@@ -861,6 +881,13 @@ final class PresenterController: NSObject, NSWindowDelegate {
         refresh()
     }
 
+    /// Clips for slides that were still building when the animated show started.
+    func updateAnimated(_ d: PresentDeck) {
+        guard let p = source as? AnimatedPlayer else { return }
+        p.update(d)
+        refresh()
+    }
+
     func refresh() {
         if source.reloadToken != sidebarToken {
             sidebarToken = source.reloadToken
@@ -893,13 +920,19 @@ final class PresenterController: NSObject, NSWindowDelegate {
         feedbackLayer.relayout()
         markFeedback()
         // the sidebar: outline the current slide and its current build, and keep them in view
-        if let k = slideRange.firstIndex(where: { $0.first <= source.pageIndex && source.pageIndex <= $0.last }) {
-            for (i, t) in thumbs.enumerated() where t.selected != (i == k) { t.selected = i == k }
+        let k = slideRange.firstIndex(where: { $0.first <= source.pageIndex && source.pageIndex <= $0.last })
+        for (i, t) in thumbs.enumerated() {
+            if t.selected != (i == k) { t.selected = i == k }
+            // every other slide's builds too: the one outlined last stays outlined otherwise
+            let b = i == k ? source.pageIndex - slideRange[i].first : -1
+            for (j, p) in t.builds.enumerated() where p.selected != (j == b) { p.selected = j == b }
+        }
+        if let k {
             if let t = thumbs[safe: k] {
                 let b = source.pageIndex - slideRange[k].first
-                for (i, p) in t.builds.enumerated() where p.selected != (i == b) { p.selected = i == b }
                 let target: NSView = t.builds[safe: b] ?? t
-                if t.frame.height > 0 {
+                if t.frame.height > 0, scrolledToPage != source.pageIndex {
+                    scrolledToPage = source.pageIndex
                     let r = target.convert(target.bounds, to: sidebar.documentView).insetBy(dx: 0, dy: -24)
                     sidebar.documentView?.scrollToVisible(r)
                 }
@@ -1056,14 +1089,27 @@ final class PresenterController: NSObject, NSWindowDelegate {
     /// the controller as soon as the show ends, long before the window is out of full screen, and a `[weak self]`
     /// here left the window on screen at its floating size. Looks again a moment later, should the exit transition
     /// have been dropped (the show leaving full screen on the other display at the same moment).
-    private func hideWindow() {
+    private func hideWindow(then done: (() -> Void)? = nil) {
         let w = window
         let userClosing = closing
         func gone() {
             w.orderOut(nil)
             if !userClosing { w.close() }
+            done?()
         }
         func leave(_ tries: Int) {
+            // a window the user closed in full screen: AppKit takes it out of its Space; wait for that before `done`
+            if userClosing, w.styleMask.contains(.fullScreen), let done {
+                w.orderOut(nil)
+                final class Once { var done = false }
+                let once = Once()
+                let go = { if !once.done { once.done = true; done() } }
+                w.once(NSWindow.didExitFullScreenNotification) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { Task { @MainActor in go() } }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { Task { @MainActor in go() } }
+                return
+            }
             guard w.styleMask.contains(.fullScreen), !userClosing, tries > 0 else { gone(); return }
             final class Once { var done = false }
             let once = Once()
@@ -1103,7 +1149,7 @@ final class PresenterController: NSObject, NSWindowDelegate {
         timer?.invalidate(); timer = nil
         window.delegate = nil
         live.playerLayer.player = nil
-        hideWindow()
+        hideWindow(then: onGone)
         onExit?()
     }
 }

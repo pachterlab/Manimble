@@ -35,6 +35,7 @@ import shutil
 DECK = os.path.realpath(sys.argv[1])
 os.chdir(DECK)
 sys.path.insert(0, DECK)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # manimble.darkmode, for theme previews
 # Always compile the deck from source: Python validates cached bytecode by mtime (seconds) and size, so an edit that
 # keeps a file's length (e.g. one digit in a coordinate) within the same second would otherwise run the old code.
 sys.dont_write_bytecode = True
@@ -386,6 +387,13 @@ def _built_by_table(frame):
     return False
 
 
+def _redrawing(f) -> bool:
+    """Whether deck code at frame `f` runs inside an `always_redraw` updater (not the first build of its mobject)."""
+    up = f.f_back
+    return up is not None and up.f_code.co_name == "<lambda>" \
+        and up.f_code.co_filename.replace("\\", "/").endswith("updaters/mobject_update_utils.py")
+
+
 def _track(kind, cls, value_of, only=None):
     """Report every construction of cls by deck code; `only(mobject, source_line)` can restrict that further."""
     orig_init = cls.__init__
@@ -400,6 +408,8 @@ def _track(kind, cls, value_of, only=None):
                 return
             if caller.f_code.co_name == "<lambda>" and _built_by_table(caller):
                 return            # a table's element_to_mobject: the entry is part of the table
+            if caller.f_code.co_name == "<lambda>" and _redrawing(caller):
+                return            # `always_redraw` rebuilding its mobject: the copy is not an object of the slide
             if "_sl_id" in self.__dict__:
                 return
             stack = project_stack(caller)
@@ -508,6 +518,32 @@ def _sl_progress():
         pass
 
 
+def _redraw(updater) -> bool:
+    """Whether an updater is `always_redraw`'s, which rebuilds its mobject from the objects it reads."""
+    return getattr(updater, "__qualname__", "").startswith("always_redraw.")
+
+
+def _flip_colors(scene) -> list:
+    """A theme preview with whites and blacks swapped (theme.py): map every neutral colour on screen as Format ▸ Apply
+    Dark Mode to Deck writes it into the source, except the theme's own colours (the deck takes them as they are);
+    [(mobject, attribute, old array)] to put back after the frame is drawn."""
+    from manimble.darkmode import map_rgb
+    keep = _STATE.get("keep") or set()
+    undo = []
+    for m in extract_mobject_family_members(list_update(scene.mobjects, scene.foreground_mobjects)):
+        for attr in ("fill_rgbas", "stroke_rgbas", "background_stroke_rgbas"):
+            arr = getattr(m, attr, None) if isinstance(m, VMobject) else None
+            if arr is None or not len(arr):
+                continue
+            new = np.array(arr, dtype=float)
+            for row in new:
+                if tuple(int(round(v * 255)) for v in row[:3]) not in keep:
+                    row[:3] = map_rgb(*row[:3])
+            undo.append((m, attr, arr))
+            setattr(m, attr, new)
+    return undo
+
+
 class Slide(Scene):
     """Stand-in for manim_slides.Slide: each next_slide() is a recorded stop."""
 
@@ -563,7 +599,8 @@ class Slide(Scene):
         except _NotSimple:
             return False
         for m in self.mobjects:
-            if m.updaters or any(sub.updaters for sub in m.submobjects):
+            # `always_redraw` lines only rebuild from the objects they read: the end state is the same either way
+            if not all(_redraw(u) for x in (m, *m.submobjects) for u in x.updaters):
                 return False
         for a in flat:
             if a.mobject.updaters:
@@ -598,11 +635,13 @@ class Slide(Scene):
                     self.remove(a.mobject)
                 if getattr(a, "replace_mobject_with_target_in_scene", False):
                     self.replace(a.mobject, a.target_mobject)
+        self.update_mobjects(0)            # as play() does once the animations finish
         return True
 
     def wait(self, *a, **k):
         self._sl_dirty = self._sl_animated = True          # a wait() counts as an animation for manim-slides
         _sl_progress()
+        self.update_mobjects(0)            # as slides_render.py does: see _wait_updated there
         return super().wait(*a, **k)
 
     def add(self, *a, **k):
@@ -620,14 +659,18 @@ class Slide(Scene):
 
     def _sl_stop(self, site=None):
         self._sl_dirty = False
+        self.update_mobjects(0)            # an arrow redrawn from an object moved since the last play() follows it
         r = self.renderer
         n = len(_STATE["stops"])
         out = _STATE["out"]
         fw, fh = config.frame_width, config.frame_height
         cam = r.camera
         # full, exact frame
+        undo = _flip_colors(self) if _STATE.get("flip") else []
         r.update_frame(self, ignore_skipping=True)
         full = np.array(r.get_frame())
+        for m, attr, arr in undo:
+            setattr(m, attr, arr)
         Image.fromarray(full[..., :3].astype("uint8")).save(os.path.join(out, f"stop{n}.png"))
         pw, ph = full.shape[1], full.shape[0]
         members = extract_mobject_family_members(
@@ -644,7 +687,7 @@ class Slide(Scene):
                 continue
             top.add(id(m))
             stack.extend(m.submobjects)
-        vis, sprites, taken, lines, cells = [], [], set(), {}, {}
+        vis, sprites, taken, lines, cells, glyphs = [], [], set(), {}, {}, {}
 
         def box(mob):
             return [(mob.get_left()[0] + fw / 2) / fw * pw, (fh / 2 - mob.get_top()[1]) / fh * ph,
@@ -681,6 +724,10 @@ class Slide(Scene):
                     lines[str(m._sl_id)] = [(a[0] + fw / 2) / fw * pw, (fh / 2 - a[1]) / fh * ph,
                                             (b[0] + fw / 2) / fw * pw, (fh / 2 - b[1]) / fh * ph,
                                             float(m.get_stroke_width()) * 0.01 * pw / fw]
+                if m._sl_kind == "text":
+                    g = glyph_boxes(m, box)
+                    if g:
+                        glyphs[str(m._sl_id)] = g
                 if m._sl_kind == "table" and getattr(m, "row_labels", None) is None and getattr(m, "col_labels", None) is None:
                     try:          # each data cell's area and its entry's ink, for typing into a cell on the slide
                         cells[str(m._sl_id)] = [[i, j] + box(m.get_cell((i + 1, j + 1))) + box(e)
@@ -705,9 +752,42 @@ class Slide(Scene):
         cam.capture_mobjects([m for m in members if id(m) not in taken], include_submobjects=False)
         Image.fromarray(np.array(cam.pixel_array)[..., :3].astype("uint8")).save(os.path.join(out, f"bg{n}.png"))
         _STATE["stops"].append({"png": f"stop{n}.png", "bg": f"bg{n}.png", "visible": vis, "sprites": sprites, "lines": lines,
-                                "cells": cells,
+                                "cells": cells, "glyphs": glyphs,
                                 "site": site})
         _sl_progress()
+
+
+def glyph_boxes(m, box):
+    """The ink box (frame px, rounded) of each non-space character of a tracked Text/Paragraph's value, for
+    highlighting search matches; a ligature's glyph is split evenly among its characters. None when the glyphs
+    cannot be matched up with the characters."""
+    chars = [c for c in m._sl_value if not c.isspace()]
+    leaves = m.family_members_with_points()
+    if not chars or len(leaves) > len(chars):
+        return None
+    runs = None
+    # most fonts join only fi and fl; one that also joins ff, ffi and ffl leaves characters over after that
+    for ligatures in (("fi", "fl"), ("ffi", "ffl", "ff", "fi", "fl")):
+        spare = len(chars) - len(leaves)             # characters drawn as part of a ligature
+        runs, i = [], 0
+        while i < len(chars):
+            n = 1
+            if spare:
+                word = "".join(chars[i:i + 3])
+                lig = next((x for x in ligatures if word.startswith(x) and len(x) - 1 <= spare), None)
+                if lig:
+                    n = len(lig); spare -= n - 1
+            runs.append(n); i += n
+        if not spare:
+            break
+    if spare or len(runs) != len(leaves):
+        return None
+    out = []
+    for leaf, n in zip(leaves, runs):
+        x0, y0, x1, y1 = box(leaf)
+        w = (x1 - x0) / n
+        out += [[round(x0 + k * w, 1), round(y0, 1), round(x0 + (k + 1) * w, 1), round(y1, 1)] for k in range(n)]
+    return out
 
 
 def _offslide_camera(members, pw, ph):
@@ -902,17 +982,39 @@ def render(req):
     purge_project_modules()
     mod = importlib.import_module(req["module"])
     cls = getattr(mod, req["scene"])
-    for attempt in (0, 1):
-        TRACKED.clear(); EVENTS.clear(); PARENTS.clear(); GROUPS.clear()
-        _STATE.update(stops=[], steps=0, t0=time.perf_counter(), times=[])
-        scene = cls(skip_animations=True)
-        try:
-            scene.render()
-            break
-        except FileNotFoundError:
-            # two worker processes share manim's media cache; a half-written file resolves on retry
-            if attempt:
-                raise
+    # a theme preview (theme.py): the theme's constants in every deck module that has them (the slide's own module
+    # alone for a theme on one slide, which shadows them in its construct()), and its background
+    for key, value in (req.get("constants") or {}).items():
+        for m in [mod] if req.get("slide_only") else list(sys.modules.values()):
+            fn = getattr(m, "__file__", None)
+            if fn and in_project(os.path.realpath(fn)) and hasattr(m, key):
+                setattr(m, key, value)
+    _STATE["flip"] = bool(req.get("flip"))
+    _STATE["keep"] = {tuple(int(v[i:i + 2], 16) for i in (1, 3, 5)) for v in (req.get("constants") or {}).values()
+                      if isinstance(v, str) and len(v) == 7 and v.startswith("#")}
+    old_bg = config.background_color
+    if req.get("background"):
+        config.background_color = req["background"]
+    try:
+        for attempt in (0, 1):
+            TRACKED.clear(); EVENTS.clear(); PARENTS.clear(); GROUPS.clear()
+            _STATE.update(stops=[], steps=0, t0=time.perf_counter(), times=[])
+            scene = cls(skip_animations=True)
+            if req.get("force_background"):
+                # the slide's own `self.camera.background_color = ...` is what the theme replaces: ignore it
+                cam, bg = scene.camera, req["background"]
+                cam.__class__ = type("ThemedCamera", (type(cam),), {"background_color": property(
+                    lambda s: ManimColor(bg), lambda s, v: None)})
+                cam.init_background()
+            try:
+                scene.render()
+                break
+            except FileNotFoundError:
+                # two worker processes share manim's media cache; a half-written file resolves on retry
+                if attempt:
+                    raise
+    finally:
+        config.background_color = old_bg
     objects = {}
     for m in TRACKED:
         objects[m._sl_id] = {

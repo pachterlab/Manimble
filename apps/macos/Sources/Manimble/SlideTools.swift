@@ -339,7 +339,7 @@ extension MainController {
 
     /// The Slide Notes and Build Notes tabs of the drawer.
     func buildNotesPane() {
-        for (pane, box) in [(notesPane, notesBox), (buildNotesView, buildNotesBox)] {
+        for (pane, box) in [(notesPane, notesBox), (buildNotesView, buildNotesBox), (altTextView, altTextBox)] {
             pane.wantsLayer = true
             Theme.layerColors(pane) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
             box.font = Theme.font(13)
@@ -359,13 +359,14 @@ extension MainController {
         }
         notesBox.onCommit = { [weak self] text in self?.commitNotes(text) }
         buildNotesBox.onCommit = { [weak self] text in self?.commitBuildNotes(text) }
+        altTextBox.onCommit = { [weak self] text in self?.commitAltText(text) }
     }
 
     @objc func hideNotesPane() { setDrawerOpen(false) }
 
     /// The drawer's picture button: choose pictures and put them in the notes tab on screen, where the typing is.
     func insertNotesImage() {
-        guard let ws = workspace, drawer.page != .terminal else { return }
+        guard let ws = workspace, drawer.page == .notes || drawer.page == .buildNotes else { return }
         let box = drawer.page == .buildNotes ? buildNotesBox : notesBox
         let paths = NoteImages.choose(into: ws.work)
         box.insertImages(paths)
@@ -411,6 +412,22 @@ extension MainController {
             self.lastChanged = res.changed
             self.toast(res.message == "no change" ? "No change" : "Notes saved for build \(target.stop + 1)")
             if self.sceneName == target.scene { await self.loadScene(target.scene, keepStop: true) }
+            await self.reloadState()
+        }
+    }
+
+    /// Save the Alt Text tab's description of the slide (nothing re-renders: it is not drawn).
+    func commitAltText(_ text: String) {
+        guard let name = sceneName else { return }
+        submit { [weak self] in
+            guard let self = self else { return }
+            self.busy += 1
+            let r = try? await self.engine.call("alt_text", ["op": "set", "scene": name, "text": text], as: NotesResult.self)
+            self.busy -= 1
+            guard let res = r, res.ok == true else { self.toast(r?.error ?? "could not save the alt text", error: true); return }
+            self.lastChanged = res.changed
+            self.toast(res.message == "no change" ? "No change" : "Alt text saved")
+            if self.sceneName == name { await self.loadScene(name, keepStop: true) }
             await self.reloadState()
         }
     }
@@ -637,10 +654,12 @@ extension MainController {
         add("New Build", #selector(newBuild))
         add("Duplicate Slide", #selector(duplicateSlide))
         m.addItem(.separator())
-        add(expandTitle, #selector(toggleExpandAllBuilds))
+        add("Export Slide as Movie (.mp4)…", #selector(exportSlideMovie(_:)), navigatorScenes[row].name)
         m.addItem(.separator())
         if selectedSlideIsUnused { add("Restore Slide to Show", #selector(restoreSlide)) }
         else { add(selectedSlideIsHidden ? "Unhide Slide" : "Hide Slide", #selector(toggleHideSlide)) }
+        m.addItem(.separator())
+        add(expandTitle, #selector(toggleExpandAllBuilds))
         m.addItem(.separator())
         add("Delete Slide", #selector(deleteSlide))
         return m
@@ -791,7 +810,8 @@ extension MainController {
             let p = PresenterController(slides: s.slides, links: s.links, scenes: s.scenes, notes: s.notes, buildNotes: s.buildNotes,
                                         startSlide: start, presenterScreen: here, audienceScreen: other)
             showPending = s.pending
-            p.onExit = { [weak self] in self?.presenter = nil; self?.showPending = false; self?.window.makeKeyAndOrderFront(nil) }
+            p.onExit = { [weak self] in self?.presenter = nil; self?.showPending = false }
+            p.onGone = { [weak self] in NSApp.activate(ignoringOtherApps: true); self?.window.makeKeyAndOrderFront(nil) }
             p.onSaveNotes = { [weak self] scene, build, text, done in self?.savePresenterNotes(scene: scene, build: build, text: text, done: done) }
             p.noteImageBase = workspace?.work
             p.feedback = feedback
@@ -885,6 +905,7 @@ extension MainController {
             }
         }
         hideBioCartoon()
+        hideScriptPane()
         inspectorScroll?.isHidden = true
         list.isHidden = false
         formatBar?.feedback.state = .on
@@ -896,7 +917,7 @@ extension MainController {
         formatBar?.feedback.state = .off
         guard let p = feedbackPane, !p.isHidden else { return }
         p.isHidden = true
-        if biocartoonPane?.view.isHidden ?? true { inspectorScroll?.isHidden = false }
+        if (biocartoonPane?.view.isHidden ?? true) && (script.pane?.isHidden ?? true) { inspectorScroll?.isHidden = false }
     }
 }
 

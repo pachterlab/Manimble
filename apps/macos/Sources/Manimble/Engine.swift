@@ -16,8 +16,8 @@ final class Engine {
     private var buffer = Data()
     var onEvent: (([String: Any]) -> Void)?
 
-    /// Prefer an explicit or saved choice, then the environment installed by
-    /// install_manimble.sh, then a checkout-local environment and login PATH.
+    /// Prefer an explicit or saved choice, then the environment the setup window (or
+    /// install_manimble.sh) installed, then a checkout-local environment and login PATH.
     static func findPython() -> String? {
         let fm = FileManager.default
         var candidates: [String] = []
@@ -43,10 +43,19 @@ final class Engine {
         }
         candidates += ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
         var seen = Set<String>()
-        for c in candidates where fm.isExecutableFile(atPath: c) && seen.insert(c).inserted {
+        for c in candidates where fm.isExecutableFile(atPath: c) && !isDeveloperToolsStub(c) && seen.insert(c).inserted {
             if canImportManim(c) { return c }
         }
         return nil
+    }
+
+    /// /usr/bin/python3 (and python) is Apple's shim: on a Mac without the Command Line Tools or Xcode, running it
+    /// shows the "install the command line developer tools" dialog instead of starting a Python.
+    static func isDeveloperToolsStub(_ path: String) -> Bool {
+        guard path.hasPrefix("/usr/bin/python") else { return false }
+        let fm = FileManager.default
+        return !fm.fileExists(atPath: "/Library/Developer/CommandLineTools/usr/bin/python3")
+            && !fm.fileExists(atPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/python3")
     }
 
     private static func canImportManim(_ python: String) -> Bool {
@@ -77,7 +86,7 @@ final class Engine {
         env["MANIMBLE_PYTHON"] = python
         env["PYTHONUNBUFFERED"] = "1"
         let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        env["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin", "/Library/TeX/texbin"] + path.split(separator: ":").map(String.init))
+        env["PATH"] = (["/opt/homebrew/bin", "/usr/local/bin", "/Library/TeX/texbin", Setup.tinyTeXBin] + path.split(separator: ":").map(String.init))
             .reduce(into: [String]()) { result, item in
                 if !result.contains(item) { result.append(item) }
             }

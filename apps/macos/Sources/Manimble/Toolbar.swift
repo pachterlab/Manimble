@@ -11,6 +11,8 @@ private extension NSToolbarItem.Identifier {
     static let insShape = NSToolbarItem.Identifier("insShape")
     static let insTable = NSToolbarItem.Identifier("insTable")
     static let insImage = NSToolbarItem.Identifier("insImage")
+    static let theme = NSToolbarItem.Identifier("theme")
+    static let insPlot = NSToolbarItem.Identifier("insPlot")
     static let insBioCartoon = NSToolbarItem.Identifier("insBioCartoon")
     static let zoom = NSToolbarItem.Identifier("zoom")
     static let share = NSToolbarItem.Identifier("share")
@@ -32,7 +34,7 @@ extension MainController: NSToolbarDelegate {
     }
 
     func toolbarDefaultItemIdentifiers(_ t: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.newSlide, .newBuild, .expandAll, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
+        [.newSlide, .newBuild, .expandAll, .space, .insTable, .insText, .insFormula, .insShape, .insBioCartoon, .insImage, .theme, .insPlot, .flexibleSpace, .zoom, .dark, .space, .terminal, .share]
     }
     /// The Expand All button says what a click does: expand every slide's builds, or collapse them again.
     func styleExpandAllItem(_ i: NSToolbarItem) {
@@ -109,6 +111,16 @@ extension MainController: NSToolbarDelegate {
         case .insText: return button(id, "Text", "textformat", #selector(insertTextPressed))
         case .insFormula: return button(id, "Formula", "function", #selector(insertFormulaPressed))
         case .insImage: return button(id, "Image", "photo", #selector(insertImagePressed))
+        case .theme:
+            let i = NSMenuToolbarItem(itemIdentifier: id)
+            i.label = "Theme"; i.paletteLabel = "Theme"; i.toolTip = "Switch the deck to another theme (font, colours, background)"
+            i.image = symbol("swatchpalette", "Theme") ?? symbol("paintbrush", "Theme"); i.showsIndicator = true
+            i.menu = DeckTheme.menu(target: self)
+            return i
+        case .insPlot:
+            let i = button(id, "Python Plot", "chart.xyaxis.line", #selector(insertPythonPlotPressed))
+            i.toolTip = "Insert a picture drawn by Python code (or a .py file); hover it and press ▶ to run the code again"
+            return i
         case .insBioCartoon:
             let i = button(id, "BioCartoon", "paintpalette", #selector(showBioCartoon))
             i.toolTip = "Search BioCartoon's science icons and drag them onto the slide"
@@ -503,14 +515,25 @@ extension MainController: NSToolbarDelegate {
     /// File ▸ Export To ▸ Movie: the animated show as one MP4 (every build plays, then holds its last frame), built and
     /// encoded by the engine (`export_movie`, progress by events). The Save panel asks which slides, the resolution,
     /// the hold and the frame rate.
-    @objc func exportMovie() {
+    @objc func exportMovie() { runMovieExport(slide: nil) }
+
+    /// The navigator's right-click "Export Slide as Movie…": the same Save panel, opened with that slide chosen.
+    @objc func exportSlideMovie(_ m: NSMenuItem) {
+        guard let name = m.representedObject as? String else { return }
+        runMovieExport(slide: name)
+    }
+
+    /// The movie Save panel; `slide` names the slide the panel starts on (its "Current slide" choice), else the
+    /// whole show is chosen.
+    func runMovieExport(slide: String?) {
         guard let ws = workspace, let scenes = state?.scenes, !scenes.isEmpty else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.mpeg4Movie]
-        panel.nameFieldStringValue = (ws.original.deletingLastPathComponent().lastPathComponent == "slides"
-            ? "presentation" : ws.original.lastPathComponent) + ".mp4"
-        panel.message = "Export the animated show as a movie"
-        let options = MovieExportOptions(scenes: scenes, currentSlide: sceneName, height: animationHeight)
+        let deckName = ws.original.deletingLastPathComponent().lastPathComponent == "slides" ? "presentation" : ws.original.lastPathComponent
+        panel.nameFieldStringValue = (slide.map { deckName + "_" + $0 } ?? deckName) + ".mp4"
+        panel.message = slide.map { "Export slide \($0) as a movie" } ?? "Export the animated show as a movie"
+        let options = MovieExportOptions(scenes: scenes, currentSlide: slide ?? sceneName, height: animationHeight)
+        if slide != nil { options.chooseCurrentSlide() }
         panel.accessoryView = options.view
         panel.delegate = options
         guard panel.runModal() == .OK, var url = panel.url else { return }
@@ -633,6 +656,12 @@ final class MovieExportOptions: NSObject, NSOpenSavePanelDelegate {
     @objc private func whichChanged() {
         list.isEnabled = which.indexOfSelectedItem == 2
         if list.isEnabled { list.window?.makeFirstResponder(list) }
+    }
+
+    /// Start the panel on the "Current slide" choice (a no-op when there is no current slide).
+    func chooseCurrentSlide() {
+        guard currentSlide != nil else { return }
+        which.selectItem(at: 1); whichChanged()
     }
 
     var height: Int { Self.heights[max(0, resolution.indexOfSelectedItem)] }

@@ -1207,6 +1207,7 @@ extension MainController {
             biocartoonPane = p
         }
         hideFeedbackPane()
+        hideScriptPane()
         p.view.isHidden = false
         inspectorScroll?.isHidden = true
         if let right = mainSplit?.subviews.last, right.isHidden { right.isHidden = false; mainSplit?.adjustSubviews() }
@@ -1237,7 +1238,7 @@ extension MainController {
         while FileManager.default.fileExists(atPath: ws.work.appendingPathComponent(name).path) { name = "\(stem)_\(n).png"; n += 1 }
         let dest = ws.work.appendingPathComponent(name)
         let c = point ?? CGPoint(x: canvas.frameSize.width / 2, y: canvas.frameSize.height / 2)
-        busyPill.show("Downloading \(icon.title)…", symbol: nil, tint: nil, spinning: true)
+        busyPill.show("Downloading \(icon.title)…", symbol: nil, tint: nil, spinning: true, cancellable: false)
         Task { @MainActor in
             let size: CGSize
             do {
@@ -1310,7 +1311,7 @@ extension MainController {
                 guard r == .alertFirstButtonReturn, let self = self else { return }
                 let v = form.values
                 UserDefaults.standard.set(v.credit, forKey: "biocartoonCredit")
-                self.busyPill.show("Submitting \(v.title)…", symbol: nil, tint: nil, spinning: true)
+                self.busyPill.show("Submitting \(v.title)…", symbol: nil, tint: nil, spinning: true, cancellable: false)
                 Task { @MainActor in
                     do {
                         try await BioCartoonCLI.upload(exe, file: path, title: v.title, credit: v.credit, license: v.license,

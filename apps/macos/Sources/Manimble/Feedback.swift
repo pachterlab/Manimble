@@ -413,7 +413,10 @@ final class FeedbackListView: NSView {
         let head = NSStackView(views: [prev, counter, next, clear])
         head.orientation = .horizontal; head.alignment = .centerY; head.spacing = 6
         head.translatesAutoresizingMaskIntoConstraints = false
+        // an explicit height: a separator has no intrinsic one, and the layout otherwise sometimes gives the rule
+        // the whole pane (a vertical line down the middle, the controls at the bottom, the list squeezed to nothing)
         let rule = NSBox(); rule.boxType = .separator; rule.translatesAutoresizingMaskIntoConstraints = false
+        rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
         column.orientation = .vertical; column.alignment = .leading; column.spacing = 2
         column.translatesAutoresizingMaskIntoConstraints = false
         let doc = FlippedView(); doc.translatesAutoresizingMaskIntoConstraints = false

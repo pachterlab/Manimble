@@ -37,6 +37,7 @@ struct StopInfo: Decodable {
     var lines: [String: [Double]]?   // oid -> [sx, sy, ex, ey, strokePx]
     var xforms: [String: [Double]]?  // oid -> [a, b, c, d, tx, ty]: an attached line's sprite mapped to follow an optimistic move
     var cells: [String: [[Double]]]? // table oid -> [row, col, cell x0, y0, x1, y1, entry ink x0, y0, x1, y1] per data cell
+    var glyphs: [String: [[Double]]]? // text oid -> [x0, y0, x1, y1] of each non-space character of its value
 }
 
 struct SharedInfo: Decodable {
@@ -81,6 +82,8 @@ struct ObjInfo: Decodable {
     var frame: [Double]?
     /// The group the object belongs to (a `Group(...)  # manimble group` line): its members select together.
     var group: Int?
+    /// A line redrawn from the objects its ends are attached to (`always_redraw`): those objects' oids.
+    var follows: [Int]?
     var frameBox: Box? { frame.flatMap { $0.count == 4 ? Box(x0: $0[0], y0: $0[1], x1: $0[2], y1: $0[3]) : nil } }
 }
 
@@ -108,8 +111,11 @@ struct SceneData: Decodable {
     var error: String?
     var notes: String?               // speaker notes (self.next_slide(notes=...) at the top of construct)
     var buildNotes: [String]?        // each build's own notes (Presenter View shows them under the slide's)
+    var altText: String?             // what the slide shows, for people who cannot see it (`alt_text = "..."` on its class)
     var placeholders: [Placeholder]? // empty layout boxes ("Click to add title"), drawn by the editor only
     var font: String?                // the deck's FONT constant
+    var textColor: String?           // the deck theme's TEXT_COLOR (manimble/themes), new text's colour
+    var theme: String?               // the deck's THEME name
     var optimistic: Bool?            // a move/resize shown before its verifying render: the exact frames are stale
 }
 
@@ -174,6 +180,21 @@ extension StopInfo {
     func box(of oid: Int) -> Box? {
         for v in visible where Int(v[0]) == oid { return Box(x0: v[1], y0: v[2], x1: v[3], y1: v[4]) }
         return nil
+    }
+    /// The ink of non-space characters `from..<to` of a text object, one box per line it spans; nil when the render
+    /// has no character boxes for it.
+    func glyphBoxes(_ oid: Int, _ from: Int, _ to: Int) -> [Box]? {
+        guard let g = glyphs?[String(oid)], from >= 0, to <= g.count, from < to else { return nil }
+        var out: [Box] = []
+        for v in g[from..<to] where v.count == 4 {
+            let b = Box(x0: v[0], y0: v[1], x1: v[2], y1: v[3])
+            // a character on the line of the box before it (its middle within that box's height) joins that box
+            if var last = out.last, b.x0 >= last.x0 - 1, b.cy > last.y0, b.cy < last.y1 {
+                last.x1 = max(last.x1, b.x1); last.y0 = min(last.y0, b.y0); last.y1 = max(last.y1, b.y1)
+                out[out.count - 1] = last
+            } else { out.append(b) }
+        }
+        return out.isEmpty ? nil : out
     }
     /// The data cell of a table under a frame-pixel point: (row, col, cell area, entry ink).
     func tableCell(_ oid: Int, at p: CGPoint) -> (row: Int, col: Int, cell: Box, ink: Box)? {

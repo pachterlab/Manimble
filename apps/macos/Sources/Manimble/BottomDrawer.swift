@@ -4,10 +4,11 @@ import AppKit
 /// ("Slide Notes | Build Notes | Terminal 1 | Terminal 2 … | +"), so there is only one divider between it and the slide.
 /// Slide notes go with every build of the slide, build notes with the build on screen only.
 final class BottomDrawer: NSView {
-    enum Page { case notes, buildNotes, terminal }
+    enum Page { case notes, buildNotes, altText, terminal }
     private(set) var page: Page = .notes
     private let notes: NSView
     private let buildNotes: NSView
+    private let altText: NSView
     let terminal: TerminalPanel
     private let strip = NSStackView()
     private let notesHint = NSTextField(labelWithString: "")
@@ -24,8 +25,8 @@ final class BottomDrawer: NSView {
     var onInsertImage: (() -> Void)?
     private lazy var imageButton = barButton("photo.badge.plus", "Put a picture in the notes (or paste or drop one in)", self, #selector(imagePressed))
 
-    init(notes: NSView, buildNotes: NSView, terminal: TerminalPanel) {
-        self.notes = notes; self.buildNotes = buildNotes; self.terminal = terminal
+    init(notes: NSView, buildNotes: NSView, altText: NSView, terminal: TerminalPanel) {
+        self.notes = notes; self.buildNotes = buildNotes; self.altText = altText; self.terminal = terminal
         super.init(frame: .zero)
         wantsLayer = true
         Theme.layerColors(self) { $0.layer?.backgroundColor = Theme.canvasBottom.cgColor }
@@ -47,7 +48,7 @@ final class BottomDrawer: NSView {
         bar.addSubview(row)
 
         let body = NSView()
-        for v in [notes, buildNotes, terminal] { v.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(v) }
+        for v in [notes, buildNotes, altText, terminal] { v.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(v) }
         for v in [bar, body] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: leadingAnchor), bar.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -58,7 +59,7 @@ final class BottomDrawer: NSView {
             body.topAnchor.constraint(equalTo: bar.bottomAnchor), body.bottomAnchor.constraint(equalTo: bottomAnchor),
             heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
         ])
-        for v in [notes, buildNotes, terminal] {
+        for v in [notes, buildNotes, altText, terminal] {
             NSLayoutConstraint.activate([
                 v.leadingAnchor.constraint(equalTo: body.leadingAnchor), v.trailingAnchor.constraint(equalTo: body.trailingAnchor),
                 v.topAnchor.constraint(equalTo: body.topAnchor), v.bottomAnchor.constraint(equalTo: body.bottomAnchor),
@@ -75,9 +76,10 @@ final class BottomDrawer: NSView {
         page = p
         notes.isHidden = p != .notes
         buildNotes.isHidden = p != .buildNotes
+        altText.isHidden = p != .altText
         terminal.isHidden = p != .terminal
         notesHint.isHidden = p == .terminal
-        imageButton.isHidden = p == .terminal
+        imageButton.isHidden = p == .terminal || p == .altText
         terminal.actions.isHidden = p != .terminal
         updateHint()
         rebuildStrip()
@@ -86,9 +88,14 @@ final class BottomDrawer: NSView {
     @objc private func imagePressed() { onInsertImage?() }
 
     private func updateHint() {
-        notesHint.stringValue = page == .buildNotes
-            ? "only for this build" + (buildLabel.isEmpty ? "" : " (\(buildLabel))") + ", shown under the slide notes in Presenter View  ·  ⌘↵ or click away to save"
-            : "for every build of this slide, shown in Presenter View and by Manim Slides  ·  ⌘↵ or click away to save"
+        switch page {
+        case .buildNotes:
+            notesHint.stringValue = "only for this build" + (buildLabel.isEmpty ? "" : " (\(buildLabel))") + ", shown under the slide notes in Presenter View  ·  ⌘↵ or click away to save"
+        case .altText:
+            notesHint.stringValue = "describes this slide for people who cannot see it; read by screen readers in PowerPoint exports, never shown in Presenter View  ·  ⌘↵ or click away to save"
+        default:
+            notesHint.stringValue = "for every build of this slide, shown in Presenter View and by Manim Slides  ·  ⌘↵ or click away to save"
+        }
     }
 
     private func rebuildStrip() {
@@ -97,6 +104,8 @@ final class BottomDrawer: NSView {
                                            selected: page == .notes, onSelect: { [weak self] in self?.show(.notes) }, onClose: nil))
         strip.addArrangedSubview(DrawerTab(title: "Build Notes", tip: "Speaker notes for the build on screen only",
                                            selected: page == .buildNotes, onSelect: { [weak self] in self?.show(.buildNotes) }, onClose: nil))
+        strip.addArrangedSubview(DrawerTab(title: "Alt Text", tip: "A description of this slide for people who cannot see it",
+                                           selected: page == .altText, onSelect: { [weak self] in self?.show(.altText) }, onClose: nil))
         let active = page == .terminal ? terminal.activeTabIndex : nil
         let titles = terminal.tabTitles
         if titles.isEmpty {        // no shell yet: Terminal 1 starts one

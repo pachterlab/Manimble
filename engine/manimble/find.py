@@ -46,6 +46,14 @@ def _substitute(pat: re.Pattern, s: str, repl: str, regex: bool, only: int | Non
     return "".join(out)
 
 
+def _glyph_span(s: str, h: re.Match) -> list:
+    """The match as a range of the text's non-space characters: the indices into a stop's `glyphs` boxes of the
+    object (worker.glyph_boxes), which the canvas highlights."""
+    def ink(i):
+        return sum(not c.isspace() for c in s[:i])
+    return [ink(h.start()), ink(h.end())]
+
+
 def _record(m, name: str, fresh: bool) -> dict | None:
     if fresh:
         rec = m.fresh_record(name)
@@ -114,12 +122,14 @@ def find(m, req: dict) -> dict:
             editable = m.planner.text_target(o).kind == "node"
             for i, h in enumerate(hits):
                 out.append({"scene": s["name"], "oid": int(oid), "stop": stop, "index": i, "kind": o["kind"],
-                            "value": shown, "match": h.group(0), "editable": editable})
+                            "value": shown, "match": h.group(0), "editable": editable,
+                            "start": h.start(), "end": h.end(), "glyphs": _glyph_span(shown, h)})
         if req.get("notes"):
             for kind, k, _, node in _notes(m, s["name"], data["stops"]):
                 for i, h in enumerate(_matches(pat, node.value)):
                     out.append({"scene": s["name"], "oid": -1, "stop": k, "index": i, "kind": kind,
-                                "value": node.value, "match": h.group(0), "editable": True})
+                                "value": node.value, "match": h.group(0), "editable": True,
+                                "start": h.start(), "end": h.end()})
     return {"ok": True, "matches": out}
 
 

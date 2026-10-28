@@ -118,6 +118,31 @@ final class MultilineTextBox: NSScrollView, NSTextViewDelegate {
         editor.textStorage?.setAttributedString(NoteImages.attributed(s, base: imageBase, attributes: attrs, maxWidth: imageWidth))
     }
 
+    /// Highlight characters `from..<to` (Unicode scalars) of `value`, the text the box shows, as a search match and
+    /// scroll them into view; nil `value` clears it. Pictures make the box's text differ from `value`, so the match
+    /// is found again in it by its text and how many times that came before.
+    func highlight(in value: String?, from: Int, to: Int) {
+        guard let lm = editor.layoutManager else { return }
+        let text = editor.string as NSString
+        lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: text.length))
+        let scalars = Array((value ?? "").unicodeScalars)
+        guard value != nil, from >= 0, from < to, to <= scalars.count else { return }
+        func str(_ s: ArraySlice<Unicode.Scalar>) -> String { var u = String.UnicodeScalarView(); u.append(contentsOf: s); return String(u) }
+        let match = str(scalars[from..<to]), before = str(scalars[..<from]) as NSString
+        var n = 0, at = NSRange(location: 0, length: before.length)
+        while case let r = before.range(of: match, range: at), r.location != NSNotFound {
+            n += 1; at = NSRange(location: r.location + 1, length: before.length - r.location - 1)
+        }
+        var found = NSRange(location: NSNotFound, length: 0), from16 = 0
+        for _ in 0...n {
+            found = text.range(of: match, range: NSRange(location: from16, length: text.length - from16))
+            guard found.location != NSNotFound else { return }
+            from16 = found.location + 1
+        }
+        lm.addTemporaryAttribute(.backgroundColor, value: NSColor.findHighlightColor.withAlphaComponent(0.8), forCharacterRange: found)
+        editor.scrollRangeToVisible(found)
+    }
+
     /// Pictures at most this wide: the box's text width, up to 360 pt.
     private var imageWidth: CGFloat { min(360, max(80, (editor.textContainer?.size.width ?? 360) - 12)) }
 

@@ -167,12 +167,18 @@ final class SlidePlayer: NSObject {
 
     /// The hyperlink under a point of the show window, if the page on screen has one there.
     private func link(inWindow p: NSPoint) -> URL? {
-        guard pages.indices.contains(index), !blackedOut, !pages[index].links.isEmpty, let img = image(pages[index].path) else { return nil }
-        let b = content.frame
-        let aspect = CGFloat(img.width) / CGFloat(max(1, img.height))
-        let w = min(b.width, b.height * aspect), h = w / aspect
-        let r = CGRect(x: b.midX - w / 2, y: b.midY - h / 2, width: w, height: h)
+        guard pages.indices.contains(index), !blackedOut, !pages[index].links.isEmpty else { return nil }
+        let r = slideRectOnScreen
         return link(at: CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height))
+    }
+
+    /// Where the page on screen is drawn in the window (16:9 until its picture is in).
+    var slideRectOnScreen: CGRect {
+        let img = pages.indices.contains(index) ? image(pages[index].path) : nil
+        let b = content.frame
+        let aspect = img.map { CGFloat($0.width) / CGFloat(max(1, $0.height)) } ?? 16 / 9
+        let w = min(b.width, b.height * aspect), h = w / aspect
+        return CGRect(x: b.midX - w / 2, y: b.midY - h / 2, width: w, height: h)
     }
 
     /// slides: for each slide the PNG of every build. `screen`: where the audience display goes; `visible: false`

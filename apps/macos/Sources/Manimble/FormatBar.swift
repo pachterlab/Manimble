@@ -49,6 +49,20 @@ final class FormatBar: NSView {
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }()
+    /// Left of View Feedback: the presentation script (words to speak, pointer moves, pauses) in the top-right panel.
+    let script: NSButton = {
+        let b = NSButton(title: "Script", target: nil, action: nil)
+        b.image = NSImage(systemSymbolName: "scroll", accessibilityDescription: "Script")
+            ?? NSImage(systemSymbolName: "text.alignleft", accessibilityDescription: "Script")
+        b.imagePosition = .imageLeading
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        b.bezelStyle = .texturedRounded
+        b.setButtonType(.pushOnPushOff)        // lit while the script is up in the top-right panel
+        b.font = Theme.font(12)
+        b.toolTip = "Script: words to read out and pointer moves for each build, played by Play ▸ Automatic Presentation"
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
     /// Right of View Feedback: search (and replace) the text of every slide.
     let find = FindBar()
     var alignButtons: [(String, NSButton)] {
@@ -131,12 +145,15 @@ final class FormatBar: NSView {
         stack.setCustomSpacing(2, after: sizeField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        addSubview(script)
         addSubview(feedback)
         addSubview(find)
         let line = hairline(); line.translatesAutoresizingMaskIntoConstraints = false
         addSubview(line)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(lessThanOrEqualTo: feedback.leadingAnchor, constant: -8),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(lessThanOrEqualTo: script.leadingAnchor, constant: -8),
+            script.trailingAnchor.constraint(equalTo: feedback.leadingAnchor, constant: -6),
+            script.centerYAnchor.constraint(equalTo: centerYAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             feedback.trailingAnchor.constraint(equalTo: find.leadingAnchor, constant: -8),
             feedback.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -298,6 +315,7 @@ extension MainController {
         bar.guideV.target = self; bar.guideV.action = #selector(addVerticalGuide)
         bar.guideH.target = self; bar.guideH.action = #selector(addHorizontalGuide)
         bar.feedback.target = self; bar.feedback.action = #selector(viewFeedback(_:))
+        bar.script.target = self; bar.script.action = #selector(viewScript(_:))
         wireFindBar(bar.find)
         return bar
     }

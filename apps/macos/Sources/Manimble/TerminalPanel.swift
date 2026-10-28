@@ -34,15 +34,22 @@ final class TerminalPanel: NSView {
     var onChange: (() -> Void)?
     /// Buttons acting on the active terminal, shown in the drawer's header while a terminal tab is up.
     let actions = NSStackView()
+    private let runButton = NSButton(title: "", target: nil, action: nil)
+    /// Agent commands found on the login shell's PATH; nil until the first check finishes.
+    private var installed: Set<String>?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         Theme.layerColors(self) { $0.layer?.backgroundColor = Theme.codeBackground.cgColor }
-        let claude = NSButton(title: "Run claude", target: self, action: #selector(runClaude))
-        claude.bezelStyle = .inline; claude.controlSize = .small; claude.font = Theme.font(11, .medium)
-        claude.contentTintColor = Theme.accent
-        for v in [claude,
+        runButton.target = self; runButton.action = #selector(runAgent)
+        runButton.bezelStyle = .inline; runButton.controlSize = .small; runButton.font = Theme.font(11, .medium)
+        runButton.contentTintColor = Theme.accent
+        let chooser = barButton("chevron.down", "Choose the AI coding agent", self, #selector(chooseAgent(_:)))
+        chooser.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
+        let run = NSStackView(views: [runButton, chooser]); run.spacing = 2
+        updateRunButton()
+        for v in [run,
                   barButton("square.split.2x1", "Split terminal (⌘\\)", self, #selector(splitPressed)),
                   barButton("arrow.clockwise", "Restart shell", self, #selector(restartPressed)),
                   barButton("trash", "Kill terminal", self, #selector(killPressed))] { actions.addArrangedSubview(v) }
@@ -73,7 +80,7 @@ final class TerminalPanel: NSView {
     /// Start the first shell, or restart every open shell in a new folder (another deck was opened).
     func start(in dir: String, original o: String?) {
         directory = dir; original = o
-        if tabs.isEmpty { addTab() } else { allSessions.forEach { $0.start(in: dir, original: o) } }
+        if tabs.isEmpty { addTab(); checkInstalled() } else { allSessions.forEach { $0.start(in: dir, original: o) } }
     }
 
     /// Open a new tab with a fresh shell and switch to it.
@@ -168,10 +175,122 @@ final class TerminalPanel: NSView {
     func contents() -> String { active?.contents() ?? "" }
     func focus() { active?.focus() }
 
-    @objc private func runClaude() { active?.type("claude\r"); active?.focus() }
+    // MARK: Run agent
+
+    private var agent: String {
+        get { UserDefaults.standard.string(forKey: "terminal.agent") ?? "claude" }
+        set { UserDefaults.standard.set(newValue, forKey: "terminal.agent"); updateRunButton() }
+    }
+    private func updateRunButton() {
+        let name = agent.split(separator: " ").first.map(String.init) ?? agent
+        runButton.title = "Run \(name)"
+        runButton.toolTip = "Type `\(agent)` into the active terminal"
+    }
+
+    /// Which agents are on the PATH of an interactive login shell (where nvm, npm and Homebrew usually add themselves).
+    private func checkInstalled(then done: (() -> Void)? = nil) {
+        let names = Set(AIAgent.all.map(\.command) + [agent.split(separator: " ").first.map(String.init) ?? agent])
+        let script = "for c in \(names.sorted().joined(separator: " ")); do command -v $c >/dev/null 2>&1 && echo \"@@$c\"; done"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process(), out = Pipe()
+            p.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+            p.arguments = ["-ilc", script]
+            var env = ProcessInfo.processInfo.environment
+            let extra = [NSHomeDirectory() + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+            env["PATH"] = (extra + (env["PATH"] ?? "/usr/bin:/bin").split(separator: ":").map(String.init)).joined(separator: ":")
+            p.environment = env
+            p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
+            var found: Set<String>?
+            if (try? p.run()) != nil {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
+                let data = out.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                if p.terminationReason == .exit {
+                    found = Set((String(data: data, encoding: .utf8) ?? "").split(separator: "\n")
+                        .filter { $0.hasPrefix("@@") }.map { String($0.dropFirst(2)) })
+                }
+            }
+            DispatchQueue.main.async { if let f = found { self.installed = f }; done?() }
+        }
+    }
+
+    @objc private func runAgent() {
+        let cmd = agent, name = cmd.split(separator: " ").first.map(String.init) ?? cmd
+        let go = { [weak self] in
+            guard let self = self else { return }
+            if let i = self.installed, !i.contains(name) { self.offerInstall(name) } else { self.active?.type(cmd + "\r"); self.active?.focus() }
+        }
+        if installed == nil || installed?.contains(name) == false { checkInstalled(then: go) } else { go() }
+    }
+
+    /// The agent isn't on the PATH: say how to get it, and type the install command (unsent) if there is one.
+    private func offerInstall(_ name: String) {
+        let a = AIAgent.all.first { $0.command == name }
+        let alert = NSAlert()
+        alert.messageText = "\(a?.title ?? name) isn't installed"
+        alert.informativeText = a.map { "Install it with:\n\n\($0.install)\n\nthen sign in the first time you run it." }
+            ?? "`\(name)` wasn't found on your shell's PATH."
+        if a != nil { alert.addButton(withTitle: "Type Install Command") }
+        alert.addButton(withTitle: a != nil ? "Cancel" : "OK")
+        guard let w = window else { return }
+        alert.beginSheetModal(for: w) { [weak self] r in
+            guard let self = self, let a = a, r == .alertFirstButtonReturn else { return }
+            self.active?.type(a.install); self.active?.focus()
+        }
+    }
+
+    @objc private func chooseAgent(_ sender: NSButton) {
+        let menu = NSMenu()
+        for a in AIAgent.all {
+            let title = a.title + (installed.map { $0.contains(a.command) ? "" : "  (not installed)" } ?? "")
+            let item = NSMenuItem(title: title, action: #selector(pickAgent(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = a.command; item.state = agent == a.command ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let isCustom = !AIAgent.all.contains { $0.command == agent }
+        let custom = NSMenuItem(title: isCustom ? "Custom: \(agent)…" : "Custom Command…", action: #selector(customAgent), keyEquivalent: "")
+        custom.target = self; custom.state = isCustom ? .on : .off
+        menu.addItem(custom)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 4), in: sender)
+        if installed == nil { checkInstalled() }
+    }
+
+    @objc private func pickAgent(_ item: NSMenuItem) {
+        guard let c = item.representedObject as? String else { return }
+        agent = c; runAgent()
+    }
+
+    @objc private func customAgent() {
+        let alert = NSAlert()
+        alert.messageText = "Custom agent command"
+        alert.informativeText = "Typed into the active terminal by the Run button, e.g. `aider` or `claude --model opus`."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+        field.stringValue = agent
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Use"); alert.addButton(withTitle: "Cancel")
+        guard let w = window else { return }
+        alert.beginSheetModal(for: w) { [weak self] r in
+            let c = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let self = self, r == .alertFirstButtonReturn, !c.isEmpty else { return }
+            self.agent = c; self.checkInstalled()
+        }
+        DispatchQueue.main.async { w.attachedSheet?.makeFirstResponder(field) }
+    }
+
     @objc private func splitPressed() { splitActive() }
     @objc private func restartPressed() { active?.start(in: directory, original: original); active?.focus() }
     @objc private func killPressed() { if let a = active { kill(a) } }
+}
+
+/// The coding agents the terminal's Run button knows how to start.
+private struct AIAgent {
+    let title, command, install: String
+    static let all = [
+        AIAgent(title: "Claude Code", command: "claude", install: "curl -fsSL https://claude.ai/install.sh | bash"),
+        AIAgent(title: "Codex (OpenAI)", command: "codex", install: "npm install -g @openai/codex"),
+        AIAgent(title: "Gemini CLI (Google)", command: "gemini", install: "npm install -g @google/gemini-cli"),
+    ]
 }
 
 private extension NSSplitView {

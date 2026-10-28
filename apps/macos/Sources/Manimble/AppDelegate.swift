@@ -1,24 +1,60 @@
 import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var controller: MainController!
+    /// One controller per deck window, like PowerPoint; the main menu acts on the frontmost one.
+    private var controllers: [MainController] = []
+    private weak var lastMain: MainController?
+    private let router = MenuRouter()
     private var launchURLs: [URL] = []     // decks handed over before the window exists
+
+    /// The deck window menu commands go to: the main window's, else the one used last.
+    var controller: MainController! { lastMain ?? controllers.last }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
-        controller = MainController()
+        router.target = { [weak self] in self?.controller }
         func wire(_ menu: NSMenu?) {
             for it in menu?.items ?? [] {
-                if let a = it.action, controller.responds(to: a) { it.target = controller }
+                if let a = it.action, MainController.instancesRespond(to: a) { it.target = router }
                 wire(it.submenu)
             }
         }
         wire(NSApp.mainMenu)
-        controller.showWindow()
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeMainNotification, object: nil, queue: .main) { [weak self] n in
+            MainActor.assumeIsolated {
+                guard let self = self, let w = n.object as? NSWindow else { return }
+                if let c = self.controllers.first(where: { $0.window === w }) { self.lastMain = c }
+            }
+        }
+        let c = MainController()
+        controllers.append(c)
+        c.showWindow()
         NSApp.activate(ignoringOtherApps: true)
         // a deck given at launch wins over the last one; the engine opens it once it is running
-        if let u = (launchURLs + commandLineDecks()).first { controller.openProject(at: u) }
-        controller.start()
+        if let u = (launchURLs + commandLineDecks()).first { c.openProject(at: u) }
+        c.start()
+    }
+
+    /// File ▸ New Deck… with a deck already open: a second window with its own engine, cascaded off the current one.
+    @MainActor func openInNewWindow(deck: String) {
+        let previous = controller
+        let c = MainController()
+        controllers.append(c)
+        c.showWindow()
+        if let f = previous?.window.frame, previous?.window.isVisible == true {
+            c.window.setFrame(f.offsetBy(dx: 26, dy: -26), display: false)
+        }
+        lastMain = c
+        c.open(deck: deck)      // held until the engine is up
+        c.start()
+    }
+
+    /// A deck window closed: drop it unless it is the last one, which stays around for the next deck.
+    @MainActor func windowClosed(_ c: MainController) {
+        guard controllers.count > 1, let i = controllers.firstIndex(where: { $0 === c }) else { return }
+        controllers.remove(at: i)
+        c.finish()
+        if lastMain === c { lastMain = nil }
     }
 
     /// `open -a Manimble <deck>`, a drop on the Dock icon, Finder's Open With.
@@ -48,9 +84,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        controller.confirmClose(for: "quitting") ? .terminateNow : .terminateCancel
+        for c in controllers {
+            if c.workspace != nil || c.sourceDraft != nil { c.window.makeKeyAndOrderFront(nil) }
+            if !c.confirmClose(for: "quitting") { return .terminateCancel }
+        }
+        return .terminateNow
     }
-    func applicationWillTerminate(_ n: Notification) { controller?.finish() }
+    func applicationWillTerminate(_ n: Notification) { controllers.forEach { $0.finish() } }
 
     private func item(_ title: String, _ sel: Selector, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
@@ -69,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("Manimble", [
             item("About Manimble", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
+            item("Install Dependencies…", #selector(MainController.installDependencies), ""),
             item("Choose Python…", #selector(MainController.choosePython), ""),
             .separator(),
             item("Hide Manimble", #selector(NSApplication.hide(_:)), "h"),
@@ -116,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Find Next", #selector(MainController.findNext(_:)), ""),
             item("Find Previous", #selector(MainController.findPrevious(_:)), ""),
         ])
+        let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: ""); themeItem.submenu = DeckTheme.menu(target: nil)
         let shapes = NSMenu(title: "Shape")
         for (title, kind) in [("Rectangle", "rectangle"), ("Rounded Rectangle", "rounded"), ("Circle", "circle"), ("Ellipse", "ellipse"),
                               ("Triangle", "triangle"), ("Line", "line"), ("Arrow", "arrow"), ("Double Arrow", "darrow")] {
@@ -154,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             { let i = item("Word Table…", #selector(MainController.insertTablePressed), "", []); i.representedObject = "word"; return i }(),
             { let i = item("Math Table…", #selector(MainController.insertTablePressed), "", []); i.representedObject = "math"; return i }(),
             item("Image…", #selector(MainController.insertImagePressed), "i", [.command, .shift]),
+            item("Python Plot…", #selector(MainController.insertPythonPlotPressed), "", []),
             item("Extract Elements from Image…", #selector(MainController.extractElementsPressed), "", []),
             .separator(),
             item("Slide Numbers…", #selector(MainController.slideNumbersPressed), "", []),
@@ -231,6 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             columnsItem,
             .separator(),
             item("Background…", #selector(MainController.formatBackground), "", []),
+            themeItem,
             .separator(),
             item("Apply Dark Mode to Deck…", #selector(MainController.applyDarkMode), "", []),
             item("Apply Inverted Colors to Deck…", #selector(MainController.applyInvertColors), "", []),
@@ -282,6 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Play from Beginning", #selector(MainController.playMenuFromBeginning), "p", [.command, .option, .shift]),
             item("Play from Current Slide", #selector(MainController.playMenuFromCurrent), "p", [.command, .option]),
             item("Presenter View", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
+            item("Automatic Presentation", #selector(MainController.autoPresentFromBeginning), "", []),
+            item("Automatic Presentation from Current Slide", #selector(MainController.autoPresentFromCurrent), "", []),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
             animationsItem,
@@ -294,5 +340,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let top = NSMenuItem(); top.submenu = win; main.addItem(top)
         NSApp.windowsMenu = win
         NSApp.mainMenu = main
+    }
+}
+
+/// Target of the main menu's deck commands: forwards each one (and its validation) to the frontmost deck window's
+/// controller, so items keep their explicit target instead of going through the key window's responder chain.
+final class MenuRouter: NSObject {
+    var target: () -> MainController? = { nil }
+    override func responds(to s: Selector!) -> Bool { super.responds(to: s) || MainController.instancesRespond(to: s) }
+    override func forwardingTarget(for s: Selector!) -> Any? {
+        MainController.instancesRespond(to: s) ? target() : super.forwardingTarget(for: s)
     }
 }

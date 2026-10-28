@@ -1,7 +1,8 @@
 #!/bin/bash
 # Install the Homebrew, Python and TeX dependencies Manimble's engine needs, without building
-# the app. install_manimble.sh runs this when building from source; run it on its own after
-# downloading a prebuilt Manimble.app from a GitHub Release (https://github.com/pachterlab/Manimble/releases).
+# the app. install_manimble.sh runs this when building from source. A prebuilt Manimble.app from a
+# GitHub Release doesn't need it: its first-launch setup window installs what is missing
+# (apps/macos/install_dependencies.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$PWD"

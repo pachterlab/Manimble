@@ -3,8 +3,11 @@
 #   Release:  bump VERSION, commit, then  git tag v0.1.0 && git push origin v0.1.0
 #   Dry run:  Actions -> release -> Run workflow (builds the app as a workflow artifact only)
 #
-# The asset keeps the same name in every release, so this link always points at the newest one:
+# The assets keep the same names in every release, so these links always point at the newest ones:
+#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip
+# Each release also carries Manimble-python-arm64.tar.gz and Manimble-python-x86_64.tar.gz, the Python runtimes
+# (manim included) that the app's first-launch setup window downloads (apps/macos/install_dependencies.sh).
 #
 # Signing and notarization are optional and turn on when these repository secrets exist (a paid
 # Apple Developer ID account): APPLE_CERTIFICATE (base64 .p12 "Developer ID Application" cert),
@@ -22,7 +25,23 @@ permissions:
   contents: write
 
 jobs:
+  # The Python runtime is native code, so each architecture is built on its own kind of runner.
+  runtime:
+    strategy:
+      matrix:
+        runner: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: apps/macos/tools/build_python_runtime.sh out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.runner }}
+          path: out/Manimble-python-*.tar.gz
+          if-no-files-found: error
+
   release:
+    needs: runtime
     runs-on: macos-latest
     # `secrets` can't be read in a step's `if:`, so expose whether signing is configured here.
     env:
@@ -75,10 +94,34 @@ jobs:
           mkdir -p out
           ditto -c -k --keepParent apps/macos/Manimble.app out/Manimble-macOS.zip
 
+      - name: Make the disk image
+        env:
+          MANIMBLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: apps/macos/make_dmg.sh apps/macos/Manimble.app out/Manimble-macOS.dmg
+
+      - name: Notarize the disk image
+        if: env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit out/Manimble-macOS.dmg --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          xcrun stapler staple out/Manimble-macOS.dmg
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: out
+          merge-multiple: true
+
       - uses: actions/upload-artifact@v4
         with:
           name: Manimble-macOS
-          path: out/Manimble-macOS.zip
+          path: |
+            out/Manimble-macOS.zip
+            out/Manimble-macOS.dmg
+            out/Manimble-python-*.tar.gz
           if-no-files-found: error
 
       - name: Publish the GitHub Release
@@ -86,5 +129,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.zip --repo "$GITHUB_REPOSITORY" \
+          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.dmg out/Manimble-macOS.zip out/Manimble-python-*.tar.gz --repo "$GITHUB_REPOSITORY" \
             --title "Manimble ${GITHUB_REF_NAME#v}" --generate-notes

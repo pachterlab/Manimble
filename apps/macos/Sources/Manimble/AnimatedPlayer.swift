@@ -19,6 +19,8 @@ struct PresentSlide: Decodable {
     var revRate: Double
     var notes: String
     var buildNotes: String?
+    /// Still building: an image page showing the editor's still (`file`), or a "Building…" card when it has none.
+    var pending: Bool?
 }
 
 struct PresentDeck: Decodable {
@@ -73,6 +75,7 @@ final class AnimatedPlayer: NSObject {
     private let still = CALayer()
     private let progress = CALayer()
     private let counter = CATextLayer()
+    private let placeholder = CATextLayer()      // over a page still building that has no still yet
     private var deck = PresentDeck(slides: [], sections: [], links: [:])
     private var index = 0
     private var generation = 0
@@ -85,6 +88,8 @@ final class AnimatedPlayer: NSObject {
     var onExit: (() -> Void)?
     /// Called after every slide change and play/pause/end (Presenter View mirrors the audience display).
     var onChange: (() -> Void)?
+    /// Bumped whenever `update` replaces the pages, so Presenter View rebuilds its sidebar.
+    private(set) var reloadToken = 0
 
     private var slides: [PresentSlide] { deck.slides }
 
@@ -111,6 +116,12 @@ final class AnimatedPlayer: NSObject {
         counter.frame = CGRect(x: root.bounds.width - 220, y: 14, width: 204, height: 18)
         counter.autoresizingMask = [.layerMinXMargin]
         root.layer?.addSublayer(counter)
+        placeholder.fontSize = 26; placeholder.foregroundColor = NSColor(white: 1, alpha: 0.55).cgColor
+        placeholder.alignmentMode = .center; placeholder.contentsScale = screen.backingScaleFactor
+        placeholder.frame = CGRect(x: 0, y: root.bounds.midY - 20, width: root.bounds.width, height: 40)
+        placeholder.autoresizingMask = [.layerWidthSizable, .layerMinYMargin, .layerMaxYMargin]
+        placeholder.isHidden = true
+        root.layer?.addSublayer(placeholder)
         window.onKey = { [weak self] e in self?.key(e) }
         window.onMouse = { [weak self] e, primary in self?.click(e, primary: primary) }
         window.overLink = { [weak self] e in
@@ -134,6 +145,28 @@ final class AnimatedPlayer: NSObject {
         show(slides.firstIndex(where: { $0.sceneIndex >= startScene }) ?? 0, .play)
     }
 
+    /// The pages again, as slides that were still building when the show started get their clips (`present`
+    /// "update" events). The show stays on the slide and build it is showing; a page that was a placeholder
+    /// comes back at the end of its clip, so the picture on screen does not jump back to the build's start.
+    func update(_ d: PresentDeck) {
+        guard !d.slides.isEmpty else { return }
+        let old = currentSlide
+        deck = d
+        reloadToken += 1
+        var i = min(index, slides.count - 1)
+        if let o = old {
+            i = slides.firstIndex { $0.scene == o.scene && $0.index == o.index }
+                ?? slides.firstIndex { $0.scene == o.scene } ?? slides.firstIndex { $0.number >= o.number } ?? slides.count - 1
+        }
+        index = i
+        if old?.pending == true, slides[i].pending != true || slides[i].file != old?.file {
+            show(i, .end)
+        } else {
+            updateChrome()
+            onChange?()
+        }
+    }
+
     // MARK: Loading clips
 
     private func show(_ i: Int, _ mode: Mode) {
@@ -144,6 +177,8 @@ final class AnimatedPlayer: NSObject {
         let gen = generation, slide = slides[i]
         updateChrome()
         discard(pending); pending = nil
+        placeholder.string = "Building slide \(slide.number + 1)…"
+        placeholder.isHidden = blackedOut || slide.pending != true || slide.file != nil
         if slide.kind == "image" {
             discard(current); current = nil
             setStill(slide.file.flatMap(loadImage))
@@ -152,7 +187,11 @@ final class AnimatedPlayer: NSObject {
             return
         }
         let path = mode == .reverse ? (slide.revFile ?? slide.file) : slide.file
-        guard let p = path, FileManager.default.fileExists(atPath: p) else { return }
+        guard let p = path, FileManager.default.fileExists(atPath: p) else {
+            finished = true                          // nothing to play: count the page as settled so stepping and scripts go on
+            onChange?()
+            return
+        }
         let next = Deck()
         next.layer.frame = root.bounds
         next.layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
@@ -242,6 +281,23 @@ final class AnimatedPlayer: NSObject {
 
     private func loadImage(_ path: String) -> CGImage? { DarkMode.cgImage(path: path) }
 
+    /// The build on screen, and whether it has finished playing (a looping one counts once it is up).
+    var currentSlide: PresentSlide? { slides.indices.contains(index) ? slides[index] : nil }
+    var isSettled: Bool { finished || (currentSlide?.loop == true && current != nil && pending == nil) }
+
+    /// Where the slide is drawn in the window: the clip's picture, else the still's, else a 16:9 fit.
+    var slideRectOnScreen: CGRect {
+        if let v = current?.layer.videoRect, v.width > 0, current?.layer.superlayer != nil { return v }
+        let b = root.bounds
+        var aspect: CGFloat = 16 / 9
+        if let c = still.contents, CFGetTypeID(c as CFTypeRef) == CGImage.typeID {
+            let img = c as! CGImage
+            aspect = CGFloat(img.width) / CGFloat(max(1, img.height))
+        }
+        let w = min(b.width, b.height * aspect), h = w / aspect
+        return CGRect(x: b.midX - w / 2, y: b.midY - h / 2, width: w, height: h)
+    }
+
     // MARK: Navigation
 
     func next() { if index == slides.count - 1 { if finished { exit() } } else { show(index + 1, .play) } }
@@ -305,7 +361,7 @@ final class AnimatedPlayer: NSObject {
         let file = (p?.currentItem?.asset as? AVURLAsset)?.url.lastPathComponent ?? "-"
         let t = p.map { String(format: "%.2f", $0.currentTime().seconds) } ?? "-"
         let st = p.map { ["paused", "waiting", "playing"][$0.timeControlStatus.rawValue] } ?? "-"
-        return "slide \(index + 1)/\(slides.count) \(s.scene)#\(s.index) file=\(file) t=\(t) \(st) finished=\(finished) pending=\(pending != nil) layers=\(root.layer?.sublayers?.count ?? 0)"
+        return "slide \(index + 1)/\(slides.count) \(s.scene)#\(s.index) file=\(file) t=\(t) \(st) finished=\(finished) pending=\(pending != nil) building=\(slides.filter { $0.pending == true }.count) layers=\(root.layer?.sublayers?.count ?? 0)"
     }
 
     func jump(section k: Int) {
@@ -335,6 +391,7 @@ final class AnimatedPlayer: NSObject {
                 current?.layer.opacity = blackedOut ? 0 : 1
                 CATransaction.commit()
                 if slides[index].kind == "image" { setStill(blackedOut ? nil : slides[index].file.flatMap(loadImage)) }
+                placeholder.isHidden = blackedOut || slides[index].pending != true || slides[index].file != nil
                 onChange?()
             case "p": showProgress.toggle(); updateChrome()
             case "n": // next scene, skipping the rest of this one's stops

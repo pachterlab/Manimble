@@ -714,14 +714,53 @@ class Planner:
             while stmt is not None and not isinstance(stmt, ast.stmt):
                 stmt = src.parent.get(stmt)
         elif _func_name(call) not in self.LINE_CALLS:
-            return None
+            call = self._redrawn(call)           # `always_redraw(lambda: Arrow(a, b, ...))`: the call inside
+            if call is None:
+                return None
         if stmt is None or len(call.args) < 2 or any(isinstance(a, ast.Starred) for a in call.args[:2]):
             return None
         return src, call, stmt
 
+    @classmethod
+    def _redrawn(cls, call):
+        """The line constructor inside `always_redraw(lambda: Arrow(a, b, ...).set_color(...))`, or None."""
+        if _func_name(call) != "always_redraw" or len(call.args) != 1 or not isinstance(call.args[0], ast.Lambda) \
+                or call.args[0].args.args:
+            return None
+        node = call.args[0].body
+        while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Call):
+            node = node.func.value
+        return node if isinstance(node, ast.Call) and _func_name(node) in cls.LINE_CALLS else None
+
     def plan_line_ends(self, src: Src, call, ends: list) -> list[Edit]:
         """New expressions for the first two arguments of `call` (see `line_end_site`); None keeps one as written."""
         return [Edit(src.rel, *src.span(call.args[i]), e) for i, e in enumerate(ends) if e is not None]
+
+    def plan_redraw(self, src: Src, call) -> list[Edit]:
+        """Wrap the line made by `call` (see `line_end_site`) in `always_redraw(lambda: ...)`, so ends that read an
+        object (`box.get_right()`) follow it wherever it goes later, in every build and through animations. Nothing
+        when it is wrapped already, or its ends are set by a later `put_start_and_end_on`, or it is made in a loop
+        (the lambda would read the loop variable's last value)."""
+        if _func_name(call) not in self.LINE_CALLS or src.in_loop(call):
+            return []
+        top = src.chain_top(call)
+        lam = src.parent.get(top)
+        if isinstance(lam, ast.Lambda) and isinstance(src.parent.get(lam), ast.Call) \
+                and _func_name(src.parent.get(lam)) == "always_redraw":
+            return []
+        a, b = src.span(top)
+        return [Edit(src.rel, a, a, "always_redraw(lambda: "), Edit(src.rel, b, b, ")")]
+
+    def redrawn(self, obj: dict) -> set[str]:
+        """The variables read by a line made by `always_redraw(lambda: ...)` (it follows those objects); empty
+        for any other line."""
+        try:
+            _, call, _, _ = self._creation(obj)
+        except EditError:
+            return set()
+        if self._redrawn(call) is None:
+            return set()
+        return {n.id for n in ast.walk(call.args[0].body) if isinstance(n, ast.Name)}
 
     # ----------------------------------------------------------- moving
     def plan_move(self, obj: dict, dx: float, dy: float) -> list[tuple[str, list[Edit]]]:
@@ -1051,7 +1090,7 @@ class Planner:
         "RemoveTextLetterByLetter", "ShowIncreasingSubsets", "ShowSubmobjectsOneByOne",
     }
 
-    def plan_delete(self, obj: dict) -> list[Edit]:
+    def plan_delete(self, obj: dict, nth: tuple[int, int] | None = None) -> list[Edit]:
         """Remove an element from the slide.
 
         An element that is a bare expression (`self.add(Circle())`, `self.play(FadeIn(Text("x")))`,
@@ -1059,8 +1098,17 @@ class Planner:
         assignment, its own statements (`t.shift(...)`) and every place it is shown (`self.add(t)`, `FadeIn(t)`,
         `VGroup(a, t)`), as long as nothing else depends on it. When other code uses it (`SurroundingRectangle(t)`,
         `t.get_right()`, `Transform(t, ...)`) the name and its statements stay, so that code keeps working, and only
-        the places that show it are removed; the re-render then checks that it is really gone."""
+        the places that show it are removed; the re-render then checks that it is really gone.
+
+        One of the elements a comprehension makes (`VGroup(*[SurroundingRectangle(c) for c in cells])`) is removed by
+        writing the comprehension out item by item without it; `nth` is (its place, how many there are) among the
+        objects made at that call."""
         src, call, top, stmt = self._creation(obj)
+        comp = src.parent.get(top)
+        if isinstance(comp, (ast.ListComp, ast.GeneratorExp)) and comp.elt is top and nth is not None:
+            edit = self._unroll_without(src, comp, *nth)
+            if edit is not None:
+                return [edit]
         body = _body_of(src, stmt)
         var = _assigned_name(stmt, top)
         if var is None:
@@ -1107,6 +1155,64 @@ class Planner:
         if not edits:
             raise EditError("could not find where this element is shown; remove it in the source instead")
         return self._keep_block(src, body, _disjoint(edits))
+
+    @staticmethod
+    def _unroll_without(src: Src, comp, skip: int, count: int) -> Edit | None:
+        """The comprehension written out as its items, item `skip` left out. Only a plain one qualifies: a single
+        `for name in <iterable>` with no condition, over a name or attribute (indexed as `cells[0]`), a list or
+        tuple literal, or range() of constants, that makes `count` items."""
+        if len(comp.generators) != 1:
+            return None
+        gen = comp.generators[0]
+        if gen.ifs or gen.is_async or not isinstance(gen.target, ast.Name):
+            return None
+        it, var = gen.iter, gen.target.id
+        if isinstance(it, (ast.Name, ast.Attribute)):
+            base = src.text(it)
+            values = [f"{base}[{i}]" for i in range(count)]
+        elif isinstance(it, (ast.List, ast.Tuple)) and not any(isinstance(e, ast.Starred) for e in it.elts):
+            values = [src.text(e) if isinstance(e, (ast.Name, ast.Attribute, ast.Constant, ast.Subscript, ast.Call))
+                      else f"({src.text(e)})" for e in it.elts]
+        elif (isinstance(it, ast.Call) and _func_name(it) == "range" and not it.keywords
+              and all(isinstance(a, ast.Constant) and isinstance(a.value, int) for a in it.args)):
+            values = [str(v) for v in range(*(a.value for a in it.args))]
+        else:
+            return None
+        if len(values) != count or not 0 <= skip < count:
+            return None
+        uses = [n for n in ast.walk(comp.elt) if isinstance(n, ast.Name) and n.id == var]
+        if any(not isinstance(n.ctx, ast.Load) for n in uses) or any(
+                isinstance(n, (ast.Lambda, ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp))
+                for n in ast.walk(comp.elt)):
+            return None                              # the name is rebound inside the item: not a plain substitution
+        a0, _ = src.span(comp.elt)
+        text = src.text(comp.elt).encode("utf-8")
+        items = []
+        for i, value in enumerate(values):
+            if i == skip:
+                continue
+            out = text
+            for n in sorted(uses, key=lambda n: src.span(n)[0], reverse=True):
+                na, nb = src.span(n)
+                out = out[:na - a0] + value.encode("utf-8") + out[nb - a0:]
+            items.append(out.decode("utf-8"))
+        ca, cb = src.span(comp)
+        call = src.parent.get(comp)
+        # `VGroup(f(x) for x in xs)`: the generator's span takes in the call's own parentheses
+        own = isinstance(comp, ast.GeneratorExp) and isinstance(call, ast.Call) and src.span(call.func)[1] == ca
+        bare = isinstance(comp, ast.GeneratorExp) and isinstance(call, ast.Call) and not own
+        if comp.elt.lineno == comp.lineno:
+            body = ", ".join(items)
+        else:                                        # one item per line, as the comprehension was laid out
+            line = src.data[src.line_starts[comp.end_lineno - 1]:].split(b"\n", 1)[0].decode("utf-8")
+            close = line[:len(line) - len(line.lstrip())]
+            pad = " " * comp.elt.col_offset
+            body = "\n" + "".join(f"{pad}{t},\n" for t in items) + close
+        if own:
+            return Edit(src.rel, ca, cb, "(*[" + body + "])")
+        if bare:
+            return Edit(src.rel, ca, cb, "*[" + body + "]")
+        return Edit(src.rel, ca, cb, "[" + body + "]")
 
     def _cut_stmt(self, src: Src, stmt) -> Edit:
         a, b = _stmt_lines(src, stmt)

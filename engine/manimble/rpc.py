@@ -15,8 +15,8 @@ import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from . import find
-from .core import Manimble
+from . import find, theme
+from .core import Cancelled, Manimble
 
 _out = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8")
 sys.stdout = sys.stderr
@@ -50,6 +50,14 @@ def main():
     def present(a):
         return need().present(a)
 
+    cancel_import = threading.Event()          # an import runs before a deck is open: cancelled here
+
+    def cancel(a):
+        """The busy pill's X: stop the import, build, export or edit the app is waiting on."""
+        cancel_import.set()
+        s = app["s"]
+        return s.cancel() if s else {"ok": True, "killed": False}
+
     handlers = {
         "open": open_deck,
         "state": lambda a: need().api_state(a.get("current")),
@@ -73,6 +81,7 @@ def main():
         "background": lambda a: need().background(a),
         "page_numbers": lambda a: need().page_numbers(a),
         "notes": lambda a: need().notes(a),
+        "alt_text": lambda a: need().alt_text(a),
         "placeholder": lambda a: need().placeholder(a),
         "insert_many": lambda a: need().insert_many(a),
         "delete_build": lambda a: need().delete_build(a),
@@ -82,12 +91,18 @@ def main():
         "darkmode": lambda a: need().dark_mode(a),
         "find": lambda a: find.find(need(), a),
         "replace": lambda a: find.replace(need(), a),
+        "theme": lambda a: theme.apply(need(), a),
+        "cancel": cancel,
     }
     def import_job(a):
         from . import importer
 
         def go():
+            cancel_import.clear()
+
             def prog(i, n, what):
+                if cancel_import.is_set():
+                    raise Cancelled("cancelled")
                 send({"event": "import", "phase": "building", "done": i, "total": n, "scene": what})
             try:
                 if a["src"].lower().endswith((".tex", ".ltx")):
@@ -95,6 +110,9 @@ def main():
                     r = import_beamer(a["src"], a["dest"], prog)
                 else:
                     r = importer.import_presentation(a["src"], a["dest"], prog)
+            except Cancelled:
+                send({"event": "import", "phase": "cancelled"})
+                return
             except Exception as exc:                          # noqa: BLE001
                 r = {"ok": False, "error": str(exc)}
             send({"event": "import", "phase": "done" if r.get("ok") else "error", **{k: v for k, v in r.items() if k != "ok"}})

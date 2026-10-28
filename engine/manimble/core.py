@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import copy
 import difflib
 import hashlib
@@ -26,6 +27,13 @@ HERE = Path(__file__).resolve().parent
 
 # ------------------------------------------------------------------ worker
 
+class Cancelled(Exception):
+    """The job was cancelled from the app (the busy pill's X)."""
+
+
+CANCELLED = "cancelled"
+
+
 class WorkerProc:
     """A long-lived manim process speaking JSON lines."""
 
@@ -41,6 +49,8 @@ class WorkerProc:
         self.lock = threading.Lock()
         self.proc = None
         self.renders = 0            # renders by the current process: its first one pays the imports and caches
+        self.active = False         # a request is waiting for the process's reply
+        self.killed = False         # `kill` ended the request in flight: it reports "cancelled", not a retry
 
     def _start(self):
         self.renders = 0
@@ -56,26 +66,46 @@ class WorkerProc:
     def request(self, req: dict, on_progress=None) -> dict:
         """`on_progress` gets the worker's interim {"step": n} lines (renders only) before the reply."""
         with self.lock:
-            for attempt in (0, 1):
-                if self.proc is None or self.proc.poll() is not None:
-                    self._start()
-                try:
-                    self.proc.stdin.write(json.dumps(req) + "\n")
-                    self.proc.stdin.flush()
-                    while True:
-                        line = self.proc.stdout.readline()
-                        if not line:
-                            break
-                        obj = json.loads(line)
-                        if "progress" in obj and len(obj) == 1:
-                            if on_progress:
-                                on_progress(obj["progress"])
-                            continue
-                        return obj
-                except (BrokenPipeError, OSError):
-                    pass
-                self.proc = None
-            return {"error": "render worker died"}
+            self.killed = False
+            try:
+                for attempt in (0, 1):
+                    if self.proc is None or self.proc.poll() is not None:
+                        self._start()
+                    try:
+                        self.proc.stdin.write(json.dumps(req) + "\n")
+                        self.proc.stdin.flush()
+                        self.active = True
+                        while True:
+                            line = self.proc.stdout.readline()
+                            if not line:
+                                break
+                            obj = json.loads(line)
+                            if "progress" in obj and len(obj) == 1:
+                                if on_progress:
+                                    on_progress(obj["progress"])
+                                continue
+                            return obj
+                    except (BrokenPipeError, OSError):
+                        pass
+                    self.proc = None
+                    if self.killed:
+                        return {"error": CANCELLED}
+                return {"error": "render worker died"}
+            finally:
+                self.active = False
+
+    def kill(self) -> bool:
+        """End the request in flight (if any) at once: it returns {"error": "cancelled"} and the next request
+        starts a fresh process. Takes no lock, so it works while `request` holds it."""
+        proc = self.proc
+        if not self.active or proc is None or proc.poll() is not None:
+            return False
+        self.killed = True
+        try:
+            proc.kill()
+        except OSError:
+            return False
+        return True
 
     def close(self):
         if self.proc and self.proc.poll() is None:
@@ -118,6 +148,8 @@ class Manimble:
         self._settling = False
         self.scene_locks: dict = {}             # one render per scene at a time
         self.edit_worker = WorkerProc(python, self.deck, "interactive", media_root)   # edits never wait behind background renders
+        self._cancel = threading.Event()        # set by `cancel`: jobs stop at their next check (see `check_cancel`)
+        self._job_procs: set = set()            # subprocesses of cancellable jobs (manim builds, ffmpeg), to kill
         self.scenes: list[dict] = []            # ordered scene descriptors (the slides of the talk)
         self.all_scenes: list[dict] = []        # every scene class found, including ones not in order.txt
         self.results: dict[str, dict] = {}      # name -> {"key","dir","data"} or {"error"}
@@ -142,6 +174,41 @@ class Manimble:
         self.render_worker.close()
         self.aux_worker.close()
         self.edit_worker.close()
+
+    # -------------------------------------------------------- cancelling
+    def cancel(self) -> dict:
+        """Stop whatever the app is waiting on: the busy pill's X. Sets the cancel flag (long jobs check it between
+        slides and give up with "cancelled"), kills the build or encode subprocess running, and kills the interactive
+        worker's render in flight (its request returns "cancelled"; the slide keeps its last result). Background
+        pre-rendering of other slides carries on."""
+        self._cancel.set()
+        for proc in list(self._job_procs):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        killed = self.edit_worker.kill()
+        return {"ok": True, "killed": killed}
+
+    def job_start(self):
+        """A cancellable job begins: an earlier, unused cancel request no longer counts."""
+        self._cancel.clear()
+
+    def check_cancel(self):
+        if self._cancel.is_set():
+            raise Cancelled(CANCELLED)
+
+    def _run_cancellable(self, args: list, **kw) -> int:
+        """Run a subprocess that `cancel` may kill; returns its exit code (raises Cancelled if it was killed)."""
+        self.check_cancel()
+        proc = subprocess.Popen(args, **kw)
+        self._job_procs.add(proc)
+        try:
+            proc.wait()
+        finally:
+            self._job_procs.discard(proc)
+        self.check_cancel()
+        return proc.returncode
 
     # ----------------------------------------------------------- scenes
     def refresh_scenes(self):
@@ -225,7 +292,13 @@ class Manimble:
                         a = src.off(node.lineno, node.col_offset)
                         b = src.off(node.end_lineno, node.end_col_offset)
                         if node.name == s["name"]:
-                            h.update(data[a:b])
+                            alt = self._alt_text_stmt(node)     # alt text never changes the picture
+                            if alt is None:
+                                h.update(data[a:b])
+                            else:
+                                c, d = _stmt_lines(src, alt)
+                                h.update(data[a:c])
+                                h.update(data[d:b])
                         spans.append((a, b))
                 keep = bytearray(data)
                 for a, b in sorted(spans, reverse=True):
@@ -342,6 +415,8 @@ class Manimble:
                         res["timeline"] = [round((lead + f * inner) / wall, 4) for f in res.get("timeline", [])]
                         res["duration"] = round(wall, 3)
                 dependencies = sorted(set(res.get("dependencies", [])))
+                if res.get("error") == CANCELLED:
+                    return {"key": key, "error": CANCELLED, "dir": sub, "cancelled": True}
                 if "error" in res:
                     rec = {"key": key, "error": res["error"], "dir": sub,
                            "dependencies": dependencies, "dependencies_scanned": True}
@@ -578,7 +653,8 @@ class Manimble:
             with self.cv:
                 if name in self.queue:
                     self.queue.remove(name)
-            self.render_now(name, interactive=True)
+            if self.render_now(name, interactive=True).get("cancelled"):
+                return {"name": name, "status": "cancelled", "error": CANCELLED}
         deadline = time.time() + 120
         while wait and self.status(name) in ("pending", "stale", "queued", "rendering") and time.time() < deadline:
             if (self.results.get(name) or {}).get("optimistic"):
@@ -600,6 +676,12 @@ class Manimble:
         for o in data["objects"].values():
             k = (o["frames"][-1]["file"], tuple(o["frames"][-1]["pos"]))
             counts[k] = counts.get(k, 0) + 1
+        named: dict = {}                     # variable -> the objects its statement makes, for lines that follow them
+        if any(o["kind"] == "line" for o in data["objects"].values()):
+            for oid, o in data["objects"].items():
+                if o["kind"] != "line":
+                    for n in self.planner.names_of(o):
+                        named.setdefault(n, []).append(int(oid))
         objects = {}
         for oid, o in data["objects"].items():
             k = (o["frames"][-1]["file"], tuple(o["frames"][-1]["pos"]))
@@ -630,6 +712,11 @@ class Manimble:
                     info["imagePath"] = o["path"]
             else:
                 info["shape"] = o["value"]
+                if o["kind"] == "line" and named:
+                    # redrawn every frame: the canvas moves its ends along while one of these is dragged
+                    hosts = sorted({h for n in self.planner.redrawn(o) for h in named.get(n, [])})
+                    if hosts:
+                        info["follows"] = hosts
             objects[oid] = info
         base = str(self.cache_dir / name / rec["dir"]) + "/"
         s = self.scene(name)
@@ -640,12 +727,14 @@ class Manimble:
                 "sprites": [dict(sp, file=base + sp["file"]) for sp in st["sprites"]],
                 "lines": st.get("lines", {}),
                 "cells": st.get("cells", {}),
+                "glyphs": st.get("glyphs", {}),
                 "xforms": st.get("xforms", {}),
             } for st in data["stops"]],
             "objects": objects,
             "source": self.api_source(name),
             "notes": self._notes_of(name),
             "buildNotes": self._build_notes_of(name, data["stops"]),
+            "altText": self._alt_text_of(name),
             "optimistic": bool(rec.get("optimistic")),
             "placeholders": [{"line": p["line"], "role": p["role"], "size": p["size"],
                               "prompt": self.PLACEHOLDER_PROMPTS.get(p["role"], "Click to add text"),
@@ -653,6 +742,8 @@ class Manimble:
                                       (p["box"][2] + fw / 2) * pw / fw, (fh / 2 - p["box"][3]) * ph / fh]}
                              for p in self._placeholders(name)],
             "font": self._font_value(),
+            "textColor": self._text_color_value(),
+            "theme": self._theme_value(),
         }
 
     def api_source(self, name: str) -> dict:
@@ -828,7 +919,7 @@ class Manimble:
                     attempts = [(label, self.planner.plan_table(obj, req["rows"]))]
                 elif op == "delete":
                     label = "delete element"
-                    attempts = [("removed it from the slide's code", self.planner.plan_delete(obj))]
+                    attempts = [("removed it from the slide's code", self.planner.plan_delete(obj, self._nth(data, oid)))]
                 elif op == "endpoints":
                     label = "line ends"
                     cx = lambda px: (px - pw / 2) * ux          # noqa: E731
@@ -859,7 +950,9 @@ class Manimble:
                         if any(ends):
                             how = (f"attached the {'ends' if attached > 1 else 'end'} to the object" if attached
                                    else "moved the line's ends in its own call")
-                            attempts.insert(0, (how, self.planner.plan_line_ends(src, call, ends) + extra))
+                            # an attached line is redrawn every frame, so its ends follow the object when it moves later
+                            redraw = self.planner.plan_redraw(src, call) if attached else []
+                            attempts.insert(0, (how, self.planner.plan_line_ends(src, call, ends) + redraw + extra))
                 elif op == "resize":
                     label = "resize"
                     ratio = float(req["ratio"])
@@ -1043,6 +1136,14 @@ class Manimble:
         return {"ok": False, "error": "Could not apply this change: " + last_error}
 
     @staticmethod
+    def _nth(data, oid):
+        """(place, count) of the object among those made at the same call, in the order they were made."""
+        site = lambda o: (o["frames"][-1]["file"], o["frames"][-1]["pos"]) if o.get("frames") else None  # noqa: E731
+        me = site(data["objects"][oid])
+        same = sorted((int(k) for k, o in data["objects"].items() if site(o) == me), key=int)
+        return (same.index(int(oid)), len(same)) if me else None
+
+    @staticmethod
     def _sibling_count(data, obj, op):
         if op not in ("move", "resize", "endpoints", "size", "rotate"):
             return None
@@ -1060,8 +1161,11 @@ class Manimble:
         if not edits:
             return None
         # found before the patch lands: object positions in the record are those of the source as rendered. A
-        # one-build move shifts the object around its build only, after everything laid out from it was made.
-        attached = set() if req.get("one_build") else self._attached_lines(rec["data"], obj)
+        # one-build move shifts the object around its build only, after everything laid out from it was made, so
+        # only lines redrawn every frame (`always_redraw`) follow it there.
+        attached = self._attached_lines(rec["data"], obj)
+        if req.get("one_build"):
+            attached = {k for k in attached if self.planner.redrawn(rec["data"]["objects"][k])}
         try:
             written = self.project.apply(edits)
             self._sig_at = 0
@@ -1179,6 +1283,11 @@ class Manimble:
                             c[i] = tx(k, c[i])
                         for i in (3, 5, 7, 9):
                             c[i] = ty(k, c[i])
+            for k, boxes in st.get("glyphs", {}).items():
+                if k in centres:
+                    for g in boxes:
+                        g[0], g[2] = tx(k, g[0]), tx(k, g[2])
+                        g[1], g[3] = ty(k, g[1]), ty(k, g[3])
             for k in attached:
                 ln = st.get("lines", {}).get(k)
                 if not ln or k in centres or not hosts:
@@ -1781,6 +1890,8 @@ class Manimble:
                 font = ", font=FONT" if self._font_const() else ""
                 color = req.get("color")
                 c = f", color={py_str(color)}" if isinstance(color, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", color) else ""
+                if self._text_color():              # a themed deck: its colour beats the app's contrast guess
+                    c = ", color=TEXT_COLOR"
                 if role == "title":
                     at, edge = (x0 + pad, (y0 + y1) / 2), "LEFT"
                 else:
@@ -1937,12 +2048,12 @@ class Manimble:
         self.enqueue(name, front=True)
 
     def _is_preamble(self, src, st) -> bool:
-        """Statements that stay at the top of construct(): docstring, background, slide number, speaker notes."""
+        """Statements that stay at the top of construct(): docstring, background, theme, slide number, speaker notes."""
         if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str):
             return True
         a, b = _stmt_lines(src, st)
         text = src.data[a:b].decode("utf-8")
-        if self.BG_MARK in text or self.PAGE_MARK in text or self.NOTES_MARK in text:
+        if self.BG_MARK in text or self.PAGE_MARK in text or self.NOTES_MARK in text or "# manimble theme" in text:
             return True
         return isinstance(st, ast.Assign) and len(st.targets) == 1 and ast.unparse(st.targets[0]) == "self.camera.background_color"
 
@@ -2293,6 +2404,81 @@ class Manimble:
             self.enqueue_all()
             return {"ok": True, "message": "speaker notes", "changed": self.last_changed}
 
+    # ------------------------------------------------------------- alt text
+    def _alt_text_stmt(self, cls):
+        """The `alt_text = "..."` class attribute that describes the slide for people who cannot see it."""
+        for st in cls.body:
+            if (isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name)
+                    and st.targets[0].id == "alt_text" and isinstance(st.value, ast.Constant)
+                    and isinstance(st.value.value, str)):
+                return st
+        return None
+
+    def _scene_class(self, name: str):
+        s = self.scene(name)
+        src = self.project.src(s["file"])
+        cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name), None)
+        if cls is None:
+            raise EditError(f"{name} is not a class in {s['file']}")
+        return src, cls
+
+    def _alt_text_of(self, name: str) -> str:
+        try:
+            st = self._alt_text_stmt(self._scene_class(name)[1])
+            return st.value.value if st else ""
+        except Exception:                           # noqa: BLE001
+            return ""
+
+    def alt_text(self, req: dict) -> dict:
+        """A slide's alt text: op=get -> {text}; op=set writes `alt_text = "..."` at the top of its class (removed
+        for empty text). Not drawn and left out of the scene's key, so nothing re-renders."""
+        from .srcedit import Edit
+        op = req.get("op", "get")
+        name = req["scene"]
+        self.refresh_scenes()
+        if op == "get":
+            return {"text": self._alt_text_of(name)}
+        with self.edit_lock:
+            self._settle()
+            text = str(req.get("text") or "").strip()
+            try:
+                src, cls = self._scene_class(name)
+            except (EditError, KeyError) as exc:
+                return {"ok": False, "error": str(exc)}
+            st = self._alt_text_stmt(cls)
+            if st is not None:
+                if st.value.value == text:
+                    return {"ok": True, "message": "no change"}
+                if text:
+                    a, b = src.span(st.value)
+                    edit = Edit(src.rel, a, b, py_str(text))
+                else:
+                    a, b = _stmt_lines(src, st)
+                    edit = Edit(src.rel, a, b, "")
+            else:
+                if not text:
+                    return {"ok": True, "message": "no change"}
+                first = cls.body[0]
+                doc = isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
+                indent = " " * first.col_offset
+                line = indent + f"alt_text = {py_str(text)}\n"
+                if doc:                             # after the class docstring
+                    at = src.line_starts[first.end_lineno] if first.end_lineno < len(src.line_starts) else len(src.data)
+                    lead = "\n" if at == len(src.data) and not src.data.endswith(b"\n") else ""
+                    edit = Edit(src.rel, at, at, lead + line)
+                elif first.lineno == cls.lineno:    # `class A(Slide): pass` on one line
+                    return {"ok": False, "error": f"{name}'s class is on one line; give it a body first"}
+                else:
+                    at = src.line_starts[first.lineno - 1]
+                    edit = Edit(src.rel, at, at, line)
+            try:
+                written = self.project.apply([edit])
+                self._sig_at = 0
+            except Exception as exc:                # noqa: BLE001
+                return {"ok": False, "error": f"could not patch source: {exc}"}
+            self._commit("alt text", written)
+            return {"ok": True, "message": "alt text", "changed": self.last_changed}
+
     # -------------------------------------------------------- build notes
     BUILD_NOTES_MARK = "# manimble build notes"
 
@@ -2461,7 +2647,8 @@ class Manimble:
             with self.cv:
                 if name in self.queue:
                     self.queue.remove(name)
-            self.render_now(name, interactive=True)
+            if self.render_now(name, interactive=True).get("cancelled"):
+                return
         deadline = time.time() + 120
         while self.status(name) in ("pending", "stale", "queued", "rendering") and time.time() < deadline:
             time.sleep(0.05)
@@ -2514,6 +2701,22 @@ class Manimble:
     def _font_const(self) -> bool:
         return bool(self.project.top_level_assigns("FONT"))
 
+    def _text_color_value(self) -> str | None:
+        """The deck theme's TEXT_COLOR (see manimble/themes), when it is a plain '#RRGGBB' string."""
+        hits = self.project.top_level_assigns("TEXT_COLOR")
+        v = hits[0][1].value if hits and isinstance(hits[0][1], ast.Constant) else None
+        return v if isinstance(v, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", v) else None
+
+    def _theme_value(self) -> str | None:
+        """The deck's THEME name (manimble/themes), when it has one."""
+        hits = self.project.top_level_assigns("THEME")
+        return hits[0][1].value if hits and isinstance(hits[0][1], ast.Constant) and isinstance(hits[0][1].value, str) else None
+
+    def _text_color(self, preview: bool = False) -> str | None:
+        """Source for new text in the theme's colour: the constant's name, or for a preview its value."""
+        v = self._text_color_value()
+        return None if v is None else py_str(v) if preview else "TEXT_COLOR"
+
     def _font_value(self) -> str | None:
         """The deck's FONT constant, when it is a plain string."""
         hits = self.project.top_level_assigns("FONT")
@@ -2538,6 +2741,8 @@ class Manimble:
                     font = f", font={py_str(hits[0][1].value)}"
             else:
                 font = ", font=FONT"
+        ink = self._text_color(preview) or "WHITE"   # the theme's text colour for text, formulas and shapes
+        tc = "" if ink == "WHITE" else f", color={ink}"
         origin = "(0, 0, 0)"
         # drawn on the canvas: start/end in frame pixels -> manim units
         a, b = (-1.5, 0.0), (1.5, 0.0)
@@ -2551,16 +2756,16 @@ class Manimble:
         pa, pb = ends[0] or pa, ends[1] or pb            # ends attached to objects (`rect.get_right()`)
         drawn = req.get("sx") is not None
         codes = {
-            "text": f'Text("Text", font_size=36{font}).move_to({origin})',
-            "formula": f'MathTex({py_tex(req.get("tex") or "x^2 + y^2 = z^2", True)}, font_size=48).move_to({origin})',
-            "rectangle": f'Rectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color=WHITE, stroke_width=4).move_to({origin})',
-            "rounded": f'RoundedRectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, corner_radius=0.25, color=WHITE, stroke_width=4).move_to({origin})',
-            "circle": f'Circle(radius={fmt(min(w, h) / 2) if drawn else 1}, color=WHITE, stroke_width=4).move_to({origin})',
-            "ellipse": f'Ellipse(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color=WHITE, stroke_width=4).move_to({origin})',
-            "triangle": f'Triangle(color=WHITE, stroke_width=4).scale(1.2).move_to({origin})',
-            "line": f'Line({pa}, {pb}, color=WHITE, stroke_width=4)',
-            "arrow": f'Arrow({pa}, {pb}, buff=0, color=WHITE)',
-            "darrow": f'DoubleArrow({pa}, {pb}, buff=0, color=WHITE)',
+            "text": f'Text("Text", font_size=36{font}{tc}).move_to({origin})',
+            "formula": f'MathTex({py_tex(req.get("tex") or "x^2 + y^2 = z^2", True)}, font_size=48{tc}).move_to({origin})',
+            "rectangle": f'Rectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color={ink}, stroke_width=4).move_to({origin})',
+            "rounded": f'RoundedRectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, corner_radius=0.25, color={ink}, stroke_width=4).move_to({origin})',
+            "circle": f'Circle(radius={fmt(min(w, h) / 2) if drawn else 1}, color={ink}, stroke_width=4).move_to({origin})',
+            "ellipse": f'Ellipse(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color={ink}, stroke_width=4).move_to({origin})',
+            "triangle": f'Triangle(color={ink}, stroke_width=4).scale(1.2).move_to({origin})',
+            "line": f'Line({pa}, {pb}, color={ink}, stroke_width=4)',
+            "arrow": f'Arrow({pa}, {pb}, buff=0, color={ink})',
+            "darrow": f'DoubleArrow({pa}, {pb}, buff=0, color={ink})',
         }
         if kind == "table":
             r, c = max(1, int(req.get("rows", 3))), max(1, int(req.get("cols", 3)))
@@ -2569,7 +2774,7 @@ class Manimble:
             codes["table"] = (f"{'Table' if words else 'MathTable'}({data}, include_outer_lines=True, "
                               f"element_to_mobject={BLANK_CELLS['word' if words else 'math']}).scale(0.7).move_to({origin})")
         if kind == "image":
-            iw = fmt(w) if drawn else "4"           # drawn / placed: the box's width in manim units
+            iw = fmt(w) if drawn else fmt(float(req.get("width") or 4))     # drawn / placed: the box's width in manim units
             if preview:
                 codes["image"] = f'ImageMobject({py_str(req["path"])}).set(width={iw}).move_to({origin})'
             else:
@@ -2616,7 +2821,9 @@ class Manimble:
                 if kind in ("line", "arrow", "darrow") and (req.get("startAnchor") or req.get("endAnchor")):
                     ends, extra = self._anchored_ends(rec["data"], scene, line, [req.get("startAnchor"), req.get("endAnchor")])
                     if extra or any(ends):
-                        edit, line = self.planner.plan_insert(scene, si, nstops, self._insert_code(kind, req, ends=ends), site)
+                        # redrawn every frame, so the attached ends follow the objects when they move later
+                        code = f"always_redraw(lambda: {self._insert_code(kind, req, ends=ends)})"
+                        edit, line = self.planner.plan_insert(scene, si, nstops, code, site)
                         # naming an object (`shape1 = ...` + `self.add(shape1)`) above the insert pushes it down
                         src = self.project.src(edit.rel)
                         line += sum(e.text.count("\n") - src.data[e.start:e.end].count(b"\n")
@@ -2659,12 +2866,13 @@ class Manimble:
 
     def insert_many(self, req: dict) -> dict:
         """Insert several elements (`items`: one dict per element, as for `insert`) at the same build as one undo step.
-        `replace_image` ({oid, file}) also points that picture at another file in the deck folder, in the same step."""
+        `replace_image` ({oid, file}) also points that picture at another file in the deck folder, in the same step
+        (with no items it is the whole step: a Python plot run again)."""
         with self.edit_lock:
             self._settle()
             name = req["scene"]
             items = [it for it in (req.get("items") or []) if isinstance(it, dict) and it.get("kind")]
-            if not items:
+            if not items and not req.get("replace_image"):
                 return {"ok": False, "error": "nothing to insert"}
             rec = self.fresh_record(name)
             if "error" in rec:
@@ -2700,8 +2908,8 @@ class Manimble:
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
             kinds = {it["kind"] for it in items}
-            what = f"{len(items)} {next(iter(kinds))}s" if len(kinds) == 1 else f"{len(items)} elements"
-            self._commit(f"insert {what}", written)
+            what = (f"{len(items)} {next(iter(kinds))}s" if len(kinds) == 1 else f"{len(items)} elements") if items else "new picture"
+            self._commit(f"insert {what}" if items else "replace picture", written)
             return {"ok": True, "message": f"inserted {what}", "file": edits[0].rel, "changed": self.last_changed}
 
     def delete_build(self, req: dict) -> dict:
@@ -2928,6 +3136,8 @@ class Manimble:
         named = {}
         if mode == "invert":
             named = self.aux_worker.request({"cmd": "colors"}).get("colors") or {}
+        if not req.get("_nested"):
+            self.job_start()
         with self.edit_lock:
             self._settle()
             self.refresh_scenes()
@@ -2935,14 +3145,21 @@ class Manimble:
             total = 2 * len(names)
 
             def prog(i, name):
+                self.check_cancel()
                 emit({"event": "darkmode", "phase": "building", "done": i, "total": total, "scene": name, "mode": mode})
 
             before = {}
-            for i, n in enumerate(names):
-                prog(i, n)
-                rec = self.fresh_record(n)
-                if "data" in rec:
-                    before[n] = rec["data"]["objects"]
+            try:
+                for i, n in enumerate(names):
+                    prog(i, n)
+                    rec = self.fresh_record(n)
+                    if rec.get("cancelled"):
+                        raise Cancelled(CANCELLED)
+                    if "data" in rec:
+                        before[n] = rec["data"]["objects"]
+            except Cancelled:
+                self.enqueue_all()
+                return {"ok": False, "error": CANCELLED}
             edits, _ = dm.plan_literals(self.project, self.deck, mode, named)
             written = {}
             try:
@@ -2966,8 +3183,13 @@ class Manimble:
             broken = []
             self.refresh_scenes()
             for i, n in enumerate(names):
-                prog(len(names) + i, n)
+                try:
+                    prog(len(names) + i, n)
+                except Cancelled:
+                    return undo_all(CANCELLED)
                 rec = self.render_now(n, interactive=True)
+                if rec.get("cancelled"):
+                    return undo_all(CANCELLED)
                 if "error" in rec:
                     if n in before:
                         broken.append(n)
@@ -3012,8 +3234,14 @@ class Manimble:
                     print(f"dark mode: could not insert colours: {exc}", file=sys.stderr)
                 if w2:
                     self.refresh_scenes()
-                    failed = [n for n in sorted({n for _, n in inserts.values()})
-                              if "error" in self.render_now(n, interactive=True)]
+                    failed = []
+                    for n in sorted({n for _, n in inserts.values()}):
+                        rec = self.render_now(n, interactive=True)
+                        if rec.get("cancelled") or self._cancel.is_set():
+                            self._restore(w2, 0)
+                            return undo_all(CANCELLED)
+                        if "error" in rec:
+                            failed.append(n)
                     if failed:
                         self._restore(w2, 0)
                         self._sig_at = 0
@@ -3116,11 +3344,13 @@ class Manimble:
         return {"ok": True}
 
     def _export_job(self, req: dict):
+        self.job_start()
         self._settle()
         from . import export as ex
         emit = self.on_event or (lambda e: None)
         try:
             def prog(i, n, name):
+                self.check_cancel()
                 emit({"event": "export", "phase": "building", "done": i, "total": n, "scene": name})
             builds, editable = bool(req.get("builds", True)), bool(req.get("editable", True))
             if req["kind"] == "pptx":
@@ -3135,8 +3365,11 @@ class Manimble:
                 if r.get("ok"):
                     emit({"event": "export", "phase": "keynote"})
                     r = ex.pptx_to_keynote(tmp, req["path"])
+            self.check_cancel()
             emit({"event": "export", "phase": "done" if r.get("ok") else "error", "path": req["path"], "error": r.get("error"),
                   "pdfError": r.get("pdfError")})
+        except Cancelled:
+            emit({"event": "export", "phase": "cancelled"})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "export", "phase": "error", "error": str(exc)})
         finally:
@@ -3146,20 +3379,37 @@ class Manimble:
     def present(self, req: dict | None = None) -> dict:
         """Build whatever slides are out of date, then hand their clips to the app's native animated player.
 
-        Runs in the background and reports through events: {"event": "present", "phase": ...}; the last one is
-        {"phase": "ready", "slides": [...], "sections": [...], "links": {...}}. Needs manim and manim_slides in the
-        Python environment, but not Qt: nothing here imports the Manim Slides presenter."""
-        if getattr(self, "_presenting", False):
-            return {"ok": False, "error": "already building the presentation"}
+        Runs in the background and reports through events: {"event": "present", "phase": ...}. The show can start
+        with {"phase": "ready", "slides": [...], "sections": [...], "links": {...}}. Needs manim and manim_slides in
+        the Python environment, but not Qt: nothing here imports the Manim Slides presenter.
+
+        With `current` (a scene name) and `ahead`, `ready` comes once `current` and the `ahead - 1` visible slides
+        after it are built. The slides still building are in it as `pending` image pages (their editor still when
+        it is up to date, else no file), and they keep building, `BUILD_SLOTS` at a time, continuing in show order
+        after the window and then from the top. Each finished one sends {"phase": "update", "slides": [...]} with
+        the whole list again; one that fails sends {"phase": "failed", "scene", "error"} and is left out. A
+        `present` while that background pass runs lets the builds in flight finish and starts again from there."""
         req = req or {}
-        if req.get("scene"):
-            try:
-                self.scene(req["scene"])
-            except KeyError:
-                return {"ok": False, "error": f"unknown slide: {req['scene']}"}
-        self._presenting = True
-        threading.Thread(target=self._present_job, args=(req.get("scene"), self._clip_height(req)), daemon=True).start()
+        height = self._clip_height(req)
+        with self._present_lock:
+            if getattr(self, "_presenting", False):
+                if getattr(self, "_present_bg", False) and not req.get("scene"):
+                    self._present_restart = (req.get("current"), req.get("ahead"), height)
+                    return {"ok": True}
+                return {"ok": False, "error": "already building the presentation"}
+            if req.get("scene"):
+                try:
+                    self.scene(req["scene"])
+                except KeyError:
+                    return {"ok": False, "error": f"unknown slide: {req['scene']}"}
+            self._presenting = True
+        threading.Thread(target=self._present_job, args=(req.get("scene"), height, req.get("current"), req.get("ahead")),
+                         daemon=True).start()
         return {"ok": True}
+
+    @property
+    def _present_lock(self) -> threading.Lock:
+        return self.__dict__.setdefault("_present_lock_", threading.Lock())
 
     def animation_preview(self, req: dict) -> dict:
         """Build one scene and send its clips to the native editor player."""
@@ -3185,6 +3435,7 @@ class Manimble:
         return h if h in self.CLIP_SIZES else 720
 
     def _animation_preview_job(self, name: str, height: int = 720):
+        self.job_start()
         self._settle()
         emit = self.on_event or (lambda e: None)
         try:
@@ -3209,14 +3460,34 @@ class Manimble:
             if not clips:
                 raise ValueError(f"{name} has no animation clips to play")
             emit({"event": "animation_preview", "phase": "ready", "scene": name, "clips": clips})
+        except Cancelled:
+            emit({"event": "animation_preview", "phase": "cancelled"})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "animation_preview", "phase": "error", "error": str(exc)})
         finally:
             self._presenting = False
 
-    def _build_animation_slides(self, selected: list[dict], event: str, height: int = 720) -> bool:
+    # How many slides build at once. A manim run keeps about one core busy, and the editor's background renders
+    # and the show itself need the rest.
+    BUILD_SLOTS = max(1, min(3, (os.cpu_count() or 2) // 2))
+
+    def _build_media(self, slot: int) -> str:
+        """Slot 0 builds in the deck's ../media as it always has. The others get media dirs of their own (LaTeX's
+        cleanup deletes every non-SVG file in its tex dir, so two runs sharing one break each other); they all
+        share SVGs through the editor workers' pool (MANIMBLE_SHARED_MEDIA, read by slides_render.py)."""
+        return "../media" if slot == 0 else str(self.cache_dir / "media" / f"build-{slot}")
+
+    def _build_animation_slides(self, selected: list[dict], event: str, height: int = 720, progress=None) -> bool:
         """Build the selected scenes with manim where their code (or the resolution asked for) changed since the
-        last build. The stamp file keeps each scene's key, with "@<height>p" added for builds above 720p."""
+        last build, `BUILD_SLOTS` at a time, in the order given. The stamp file keeps each scene's key, with
+        "@<height>p" added for builds above 720p.
+
+        Without `progress` a failed build stops everything (the others are killed) and returns False. With it,
+        `progress(todo, running, built, failed)` is called before each build starts and after each one ends (and
+        every quarter second while builds run): `todo` is the list of scenes still to start, which it may reorder
+        or empty, `running` the names building, `built` the name just finished (else None), and `failed` a dict
+        name -> log tail. It returns the names whose failure is fatal (none, for the show); other failures go in
+        `failed` (and a `failed` event) and the pass goes on."""
         emit = self.on_event or (lambda e: None)
         deck = Path(self.deck)
         slides_dir = deck / "slides"
@@ -3236,39 +3507,166 @@ class Manimble:
                 return height != 720 or self.scene_key(s) != self.baseline_keys.get(s["name"])
             return have != key_of(s)
 
-        stale = [s for s in selected if is_stale(s)]
-        log = self.cache_dir / "present.log"
-        for i, s in enumerate(stale):
-            emit({"event": event, "phase": "building", "done": i, "total": len(stale), "scene": s["name"]})
+        todo = [s for s in selected if is_stale(s)]
+        total = len(todo)
+        env = os.environ.copy()
+        env["MANIMBLE_SHARED_MEDIA"] = str(Path(self.render_worker.media_dir).parent / "shared")
+        logs = self.cache_dir / "present-logs"
+        logs.mkdir(exist_ok=True)
+
+        def build(s, slot):
+            # what `manim-slides render` runs, without going through its CLI (slides_render.py: manim's command
+            # line, with a slide that plays no animation still building). Cancelling kills it (Cancelled).
+            log = logs / f"{s['name']}.log"
             with open(log, "w") as lf:
-                # what `manim-slides render` runs, without going through its CLI
-                r = subprocess.run([self.python, "-m", "manim", "render", "--disable_caching", "-r", self.CLIP_SIZES[height],
-                                    "--media_dir", "../media", s["file"], s["name"]],
-                                   cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT)
-            if r.returncode != 0:
-                emit({"event": event, "phase": "error", "error": f"Building {s['name']} failed:\n{log.read_text()[-700:]}"})
-                return False
-            built[s["name"]] = key_of(s)
-            stamp.write_text(json.dumps(built))
+                code = self._run_cancellable([self.python, str(Path(__file__).with_name("slides_render.py")), "render",
+                                              "--disable_caching", "-r", self.CLIP_SIZES[height],
+                                              "--media_dir", self._build_media(slot), s["file"], s["name"]],
+                                             cwd=self.deck, stdout=lf, stderr=subprocess.STDOUT, env=env)
+            return code, log.read_text()[-700:] if code != 0 else ""
+
+        failed: dict = {}
+        fatal = {s["name"] for s in todo}
+        running: dict = {}                         # future -> (scene, slot, key at start)
+        free = list(range(self.BUILD_SLOTS))
+        done = 0
+        just_built = None
+        abort = None
+        with concurrent.futures.ThreadPoolExecutor(self.BUILD_SLOTS) as pool:
+            try:
+                while True:
+                    if progress is not None and abort is None:
+                        fatal = progress(todo, [r[0]["name"] for r in running.values()], just_built, failed)
+                    just_built = None
+                    while todo and free and abort is None:
+                        self.check_cancel()
+                        s, slot = todo.pop(0), free.pop(0)
+                        emit({"event": event, "phase": "building", "done": done, "total": total, "scene": s["name"],
+                              "running": len(running) + 1})
+                        running[pool.submit(build, s, slot)] = (s, slot, key_of(s))
+                    if not running:
+                        break
+                    finished, _ = concurrent.futures.wait(running, timeout=0.25,
+                                                          return_when=concurrent.futures.FIRST_COMPLETED)
+                    for fut in finished:
+                        s, slot, key = running.pop(fut)
+                        free.append(slot)
+                        code, tail = fut.result()          # Cancelled when the build was cancelled
+                        if abort is not None:
+                            continue
+                        done += 1
+                        if code != 0:
+                            if s["name"] in fatal:
+                                abort = f"Building {s['name']} failed:\n{tail}"
+                                for proc in list(self._job_procs):     # the other builds: no use finishing them
+                                    try:
+                                        proc.kill()
+                                    except OSError:
+                                        pass
+                            else:
+                                failed[s["name"]] = tail
+                                emit({"event": event, "phase": "failed", "scene": s["name"],
+                                      "error": f"Building {s['name']} failed:\n{tail}"})
+                            continue
+                        built[s["name"]] = key
+                        stamp.write_text(json.dumps(built))
+                        just_built = s["name"]
+            finally:
+                if running and abort is None:              # Cancelled: make sure nothing keeps running
+                    for proc in list(self._job_procs):
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+        if abort is not None:
+            emit({"event": event, "phase": "error", "error": abort})
+            return False
         for s in selected:
             if (slides_dir / f"{s['name']}.json").exists():
                 built.setdefault(s["name"], key_of(s))
         stamp.write_text(json.dumps(built))
         return True
 
-    def _present_job(self, only_scene: str | None = None, height: int = 720):
+    def _present_job(self, only_scene: str | None = None, height: int = 720, current: str | None = None,
+                     ahead: int | None = None):
+        if not getattr(self, "_present_restarted", False):
+            self.job_start()
+        self._present_restarted = False
         self._settle()
         emit = self.on_event or (lambda e: None)
+        restart = None
         try:
-            selected = [self.scene(only_scene)] if only_scene else list(self.visible_scenes())
-            if not self._build_animation_slides(selected, "present", height):
+            if only_scene or ahead is None:
+                selected = [self.scene(only_scene)] if only_scene else list(self.visible_scenes())
+                if not self._build_animation_slides(selected, "present", height):
+                    return
+                self.check_cancel()
+                emit({"event": "present", "phase": "ready", "onlyScene": only_scene,
+                      "slides": self._present_slides(selected), **self._present_extras()})
                 return
-            emit({"event": "present", "phase": "ready", "onlyScene": only_scene,
-                  "slides": self._present_slides(selected), **self._present_extras()})
+            self.refresh_scenes()
+            selected = list(self.visible_scenes())
+            names = [s["name"] for s in selected]
+            if current not in names:
+                # a hidden slide: start at the next visible one after it
+                order = [s["name"] for s in self.scenes]
+                at = order.index(current) if current in order else 0
+                current = next((n for n in order[at:] if n in names), names[0] if names else None)
+            start = names.index(current) if current in names else 0
+            window = set(names[start:start + max(1, int(ahead))])
+            rank = {n: i for i, n in enumerate(names[start:] + names[:start])}
+            state = {"shown": False, "extras": None}
+
+            def deck(pending, failed):
+                if state["extras"] is None or not pending:
+                    state["extras"] = self._present_extras()
+                return {"slides": self._present_slides([s for s in selected if s["name"] not in failed], pending),
+                        **state["extras"]}
+
+            def progress(todo, running, just_built, failed):
+                nonlocal restart
+                with self._present_lock:
+                    if self._present_restart is not None:
+                        restart, self._present_restart = self._present_restart, None
+                if restart is not None:
+                    todo.clear()                           # let the builds in flight finish, then start over
+                    return set()
+                todo.sort(key=lambda s: rank.get(s["name"], len(rank)))
+                pending = {s["name"] for s in todo} | set(running)
+                if not state["shown"]:
+                    if window & pending:                   # a slide that fails is skipped, as the stills show does
+                        return set()
+                    state["shown"] = True
+                    with self._present_lock:
+                        self._present_bg = True
+                    emit({"event": "present", "phase": "ready", "onlyScene": None, **deck(pending, failed)})
+                elif just_built is not None:
+                    emit({"event": "present", "phase": "update", **deck(pending, failed)})
+                return set()
+
+            with self._present_lock:
+                self._present_restart = None
+            if not self._build_animation_slides(selected, "present", height, progress=progress):
+                return
+            if restart is None:
+                emit({"event": "present", "phase": "built"})
+        except Cancelled:
+            restart = None
+            emit({"event": "present", "phase": "cancelled"})
         except Exception as exc:                          # noqa: BLE001
+            restart = None
             emit({"event": "present", "phase": "error", "error": str(exc)})
         finally:
-            self._presenting = False
+            with self._present_lock:
+                self._present_bg = False
+                if restart is None and getattr(self, "_present_restart", None) is not None:
+                    restart, self._present_restart = self._present_restart, None   # asked for after the last build
+                if restart is None:
+                    self._presenting = False
+            if restart is not None:
+                self._present_restarted = True
+                threading.Thread(target=self._present_job, args=(None, restart[2], restart[0], restart[1] or 3),
+                                 daemon=True).start()
 
     # ------------------------------------------------------- movie (.mp4) export
     def export_movie(self, req: dict) -> dict:
@@ -3302,13 +3700,14 @@ class Manimble:
             return {"ok": False, "error": "the frame rate must be between 1 and 120"}
         from . import movie
         if movie.find_ffmpeg() is None:
-            return {"ok": False, "error": "ffmpeg is needed to write movies; install it (brew install ffmpeg) and try again"}
+            return {"ok": False, "error": "ffmpeg is needed to write movies; install it (brew install ffmpeg or pip install imageio-ffmpeg) and try again"}
         self._presenting = True
         threading.Thread(target=self._export_movie_job, args=(selected, path, self._clip_height(req), hold, fps),
                          daemon=True).start()
         return {"ok": True}
 
     def _export_movie_job(self, selected: list[dict], path: str, height: int, hold: float, fps: int):
+        self.job_start()
         self._settle()
         emit = self.on_event or (lambda e: None)
         from . import movie
@@ -3336,24 +3735,46 @@ class Manimble:
                                   "label": f"{s['name']}" + (f" (build {k})" if len(builds) > 1 else "")})
 
             def prog(i, n, label):
+                self.check_cancel()
                 emit({"event": "export_movie", "phase": "encoding", "done": i, "total": n, "scene": label})
-            movie.write_movie(clips, movie.SIZES[height], path, hold=hold, fps=fps, progress=prog)
+            movie.write_movie(clips, movie.SIZES[height], path, hold=hold, fps=fps, progress=prog, run=self._run_cancellable)
             emit({"event": "export_movie", "phase": "done", "path": path, "builds": len(clips), "slides": len(selected)})
+        except Cancelled:
+            emit({"event": "export_movie", "phase": "cancelled"})
         except Exception as exc:                          # noqa: BLE001
             emit({"event": "export_movie", "phase": "error", "error": str(exc)})
         finally:
             self._presenting = False
 
-    def _present_slides(self, selected: list[dict]) -> list[dict]:
+    def _present_slides(self, selected: list[dict], pending: set | None = None) -> list[dict]:
         """The built clips of the selected scenes, in show order, for the native player. `sceneIndex` is the
-        scene's place in order.txt (what chapters and link regions refer to), `number` its place in this show."""
+        scene's place in order.txt (what chapters and link regions refer to), `number` its place in this show.
+        Scenes in `pending` (still building) get one `pending` image page per build: the editor's still when it is
+        up to date, else no file."""
         deck = Path(self.deck).resolve()
         order = [s["name"] for s in self.scenes]
         out = []
         for number, s in enumerate(selected):
-            data = json.loads((deck / "slides" / f"{s['name']}.json").read_text())
             scene_notes = self._notes_of(s["name"])
             first_notes = self._first_build_notes(s["name"])
+            if pending and s["name"] in pending:
+                try:
+                    pages = self._slide_pages(s["name"], wait=False)
+                except Exception:                         # noqa: BLE001
+                    pages = {}
+                files = pages.get("pages") or [None] * max(1, int(pages.get("builds") or 1))
+                build_notes = pages.get("buildNotes") or []
+                for k, f in enumerate(files):
+                    out.append({
+                        "scene": s["name"], "sceneIndex": order.index(s["name"]) if s["name"] in order else number,
+                        "number": number, "index": k, "count": len(files), "kind": "image", "file": f,
+                        "revFile": None, "loop": False, "autoNext": False, "rate": 1.0, "revRate": 1.0,
+                        "notes": scene_notes,
+                        "buildNotes": first_notes if k == 0 else (build_notes[k] if k < len(build_notes) else ""),
+                        "pending": True,
+                    })
+                continue
+            data = json.loads((deck / "slides" / f"{s['name']}.json").read_text())
             for k, slide in enumerate(data.get("slides", [])):
                 kind = slide.get("type", "video")
                 if kind not in ("video", "image"):

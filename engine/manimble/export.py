@@ -80,10 +80,13 @@ def build_pptx(app, path: str, builds: bool = False, editable: bool = True, prog
             first = False
         k = 12192000 / pw                                   # EMU per frame pixel
         stops = sc["stops"] if builds else sc["stops"][-1:]
+        alt = sc.get("altText") or ""
         for st in stops:
             slide = prs.slides.add_slide(blank)
             if not editable:
-                slide.shapes.add_picture(st["png"], 0, 0, prs.slide_width, prs.slide_height)
+                pic = slide.shapes.add_picture(st["png"], 0, 0, prs.slide_width, prs.slide_height)
+                if alt:                                     # the whole slide is this picture: read its alt text aloud
+                    pic._element.nvPicPr.cNvPr.set("descr", alt)
                 # linked text is part of the picture: an invisible box over each one opens its link
                 for x0, x1, y0, y1, url in app._stop_links(sc, st):
                     W, H = prs.slide_width, prs.slide_height
@@ -94,7 +97,9 @@ def build_pptx(app, path: str, builds: bool = False, editable: bool = True, prog
                     hot.shadow.inherit = False
                     hot.click_action.hyperlink.address = url
                 continue
-            slide.shapes.add_picture(st["bg"], 0, 0, prs.slide_width, prs.slide_height)
+            bg = slide.shapes.add_picture(st["bg"], 0, 0, prs.slide_width, prs.slide_height)
+            if alt:
+                bg._element.nvPicPr.cNvPr.set("descr", alt)
             vis = {int(v[0]): v for v in st["visible"]}
             for sp in st["sprites"]:
                 oid = sp["oid"]

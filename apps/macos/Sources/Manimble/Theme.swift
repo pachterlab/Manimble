@@ -156,6 +156,9 @@ final class Pill: NSVisualEffectView {
     let label = NSTextField(labelWithString: "")
     let icon = NSImageView()
     let bar = ProgressBar()
+    /// The X at the right of a spinning pill; set on the busy pill to let the user stop what is rendering.
+    let cancelButton = NSButton()
+    var onCancel: (() -> Void)?
 
     init() {
         super.init(frame: .zero)
@@ -164,7 +167,16 @@ final class Pill: NSVisualEffectView {
         label.font = Theme.font(12, .medium); label.textColor = .labelColor
         label.maximumNumberOfLines = 3; label.lineBreakMode = .byWordWrapping
         icon.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
-        let row = NSStackView(views: [icon, label]); row.spacing = 7; row.alignment = .centerY
+        cancelButton.isBordered = false; cancelButton.bezelStyle = .inline; cancelButton.imagePosition = .imageOnly
+        cancelButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel")
+        cancelButton.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
+        cancelButton.contentTintColor = .secondaryLabelColor
+        cancelButton.toolTip = "Stop rendering"
+        cancelButton.setAccessibilityLabel("Stop rendering")
+        cancelButton.target = self; cancelButton.action = #selector(cancelPressed)
+        cancelButton.setContentHuggingPriority(.required, for: .horizontal)
+        cancelButton.isHidden = true
+        let row = NSStackView(views: [icon, label, cancelButton]); row.spacing = 7; row.alignment = .centerY
         bar.isHidden = true
         let column = NSStackView(views: [row, bar]); column.orientation = .vertical; column.alignment = .leading; column.spacing = 6
         column.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 14)
@@ -182,11 +194,13 @@ final class Pill: NSVisualEffectView {
 
     /// `spinning`: the pill reports work in progress and shows the bar. `progress` 0…1 fills it by count; otherwise
     /// `remaining` seconds drive it as a time estimate; with neither, a running estimate keeps going or a default
-    /// (`defaultEstimate` seconds) starts.
+    /// (`defaultEstimate` seconds) starts. `cancellable`: a spinning pill with an `onCancel` shows the X.
     func show(_ text: String, symbol: String?, tint: NSColor?, spinning: Bool = false, progress: Double? = nil,
-              remaining: Double? = nil) {
+              remaining: Double? = nil, cancellable: Bool = true) {
         label.stringValue = text
         icon.isHidden = symbol == nil || spinning
+        cancelButton.isHidden = !(spinning && cancellable && onCancel != nil)
+        cancelButton.isEnabled = true
         if let s = symbol { icon.image = NSImage(systemSymbolName: s, accessibilityDescription: nil); icon.contentTintColor = tint }
         let wasHidden = isHidden || alphaValue == 0
         bar.isHidden = !spinning
@@ -201,6 +215,11 @@ final class Pill: NSVisualEffectView {
         NSAnimationContext.runAnimationGroup { $0.duration = 0.18; animator().alphaValue = 1 }
     }
     var defaultEstimate = 3.0
+
+    @objc private func cancelPressed() {
+        cancelButton.isEnabled = false                   // one request is enough; the pill goes when the job stops
+        onCancel?()
+    }
 
     func hide() {
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; animator().alphaValue = 0 }, completionHandler: { [weak self] in

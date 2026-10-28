@@ -235,6 +235,9 @@ final class CanvasView: MTKView {
     /// Backspace in an empty layout box: remove the box (its line).
     var onPlaceholderDelete: ((Int) -> Void)?
     var hover: Int?
+    /// Search matches on the slide shown (Find.swift), drawn as highlighter marks; evaluated at draw time.
+    var findMarks: (() -> [FindMark])?
+    func findMarksChanged() { needsDisplay2() }
     var overrides: [Int: Override] = [:] { didSet { needsDisplay2(); onGeometryChange?() } }
     var showObjects = false { didSet { needsDisplay2() } }
     /// Dark mode / inverted colours (nothing is written): the slide is composited from backdrop + sprites, each colour-mapped.
@@ -310,11 +313,14 @@ final class CanvasView: MTKView {
         super.setFrameSize(newSize)
         layoutTextEditor()
         feedbackLayer?.relayout()
+        scriptLayer?.needsDisplay = true
         onGeometryChange?()
     }
 
     /// Feedback notes laid over the slide (never part of the render); the host adds it and sets its store.
     private(set) var feedbackLayer: FeedbackLayer?
+    /// The Script panel's pointer tracks and preview pointer (ScriptPane.swift adds it).
+    weak var scriptLayer: ScriptLayer?
     func attachFeedbackLayer() -> FeedbackLayer {
         if let l = feedbackLayer { return l }
         let l = FeedbackLayer(frame: bounds)
@@ -344,6 +350,33 @@ final class CanvasView: MTKView {
     var dragging: Int? { dragOID }
     /// Whether the object moves with the current drag (dragged itself or selected along with it).
     func isDragging(_ oid: Int) -> Bool { dragOID == oid || dragGroup[oid] != nil }
+
+    /// A line attached to objects being dragged or resized (`follows`): the map taking its sprite to ends that go
+    /// along with them, as the engine maps it once the move lands (an end within reach of an object follows it),
+    /// after any map the slide already applies. Nil when none of those objects is previewed.
+    func followXform(_ oid: Int, _ stop: StopInfo) -> [Double]? {
+        guard let hosts = sceneObjects[String(oid)]?.follows, let ln = stop.lines?[String(oid)], ln.count >= 4 else { return nil }
+        let live = hosts.compactMap { h -> (Box, Override)? in
+            guard let o = overrides[h], o.replacement == nil, let b = stop.box(of: h) else { return nil }
+            return (b, o)
+        }
+        guard !live.isEmpty else { return nil }
+        let reach = 0.6 * unitPx
+        let ends = [(ln[0], ln[1]), (ln[2], ln[3])]
+        let moved = ends.map { x, y -> (Double, Double) in
+            func gap(_ b: Box) -> Double { hypot(max(0, b.x0 - x, x - b.x1), max(0, b.y0 - y, y - b.y1)) }
+            guard let (b, o) = live.min(by: { gap($0.0) < gap($1.0) }), gap(b) <= reach else { return (x, y) }
+            return (b.cx + (x - b.cx) * o.scale + o.dx, b.cy + (y - b.cy) * o.scale + o.dy)
+        }
+        // the similarity taking the old segment to the new (rotation, uniform scale, translation)
+        let (ax, ay) = ends[0], (bx, by) = ends[1], (cx, cy) = moved[0], (dx, dy) = moved[1]
+        let vx = bx - ax, vy = by - ay, wx = dx - cx, wy = dy - cy, n2 = vx * vx + vy * vy
+        let a = n2 < 1e-9 ? 1 : (wx * vx + wy * vy) / n2, b = n2 < 1e-9 ? 0 : (wy * vx - wx * vy) / n2
+        let s = [a, b, -b, a, cx - (a * ax - b * ay), cy - (b * ax + a * ay)]
+        guard let x = stop.xforms?[String(oid)], x.count >= 6 else { return s }
+        return [s[0] * x[0] + s[2] * x[1], s[1] * x[0] + s[3] * x[1], s[0] * x[2] + s[2] * x[3], s[1] * x[2] + s[3] * x[3],
+                s[0] * x[4] + s[2] * x[5] + s[4], s[1] * x[4] + s[3] * x[5] + s[5]]
+    }
 
     /// A fresh render now shows part of this object's previewed offset: keep previewing only the rest.
     func settle(_ oid: Int, shownDx: Double, shownDy: Double) {
@@ -414,7 +447,68 @@ final class CanvasView: MTKView {
     }
     required init(coder: NSCoder) { fatalError() }
 
-    private func needsDisplay2() { layoutTextEditor(); feedbackLayer?.relayout(); setNeedsDisplay(bounds) }
+    private func needsDisplay2() { layoutTextEditor(); feedbackLayer?.relayout(); scriptLayer?.needsDisplay = true; layoutCornerButton(); setNeedsDisplay(bounds) }
+
+    /// A round button in the top-right corner of the hovered object, for objects the host gives a corner action
+    /// (a Python plot's ▶ runs its code again).
+    var hasCornerAction: ((Int) -> Bool)?
+    var onCornerAction: ((Int) -> Void)?
+    /// The Python badge left of the ▶: opens the plot's code (same as a double-click).
+    var onCornerEdit: ((Int) -> Void)?
+    private var cornerOID: Int?
+    private lazy var cornerButton: NSButton = {
+        let b = NSButton(image: NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Run again") ?? NSImage(),
+                         target: self, action: #selector(cornerPressed))
+        b.isBordered = false; b.imagePosition = .imageOnly; b.contentTintColor = .white
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        b.wantsLayer = true; b.layer?.cornerRadius = 13
+        b.layer?.backgroundColor = NSColor(calibratedRed: 0.486, green: 0.361, blue: 1, alpha: 0.92).cgColor
+        b.toolTip = "Run the plot's code again and show what it draws now"
+        b.isHidden = true
+        addSubview(b)
+        return b
+    }()
+    @objc private func cornerPressed() { if let o = cornerOID { onCornerAction?(o) } }
+    private lazy var pythonButton: NSButton = {
+        let b = NSButton(title: "", target: self, action: #selector(pythonPressed))
+        b.image = CanvasView.pythonGlyph()
+        b.isBordered = false; b.imagePosition = .imageOnly
+        b.wantsLayer = true; b.layer?.cornerRadius = 13
+        b.layer?.backgroundColor = NSColor(calibratedRed: 0.486, green: 0.361, blue: 1, alpha: 0.92).cgColor
+        b.toolTip = "Open the plot's Python code"
+        b.isHidden = true
+        addSubview(b)
+        return b
+    }()
+    @objc private func pythonPressed() { if let o = cornerOID { onCornerEdit?(o) } }
+    /// A small white "py" mark (SF Symbols has no Python logo).
+    private static func pythonGlyph() -> NSImage {
+        let img = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { r in
+            let a: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .heavy), .foregroundColor: NSColor.white]
+            let t = NSAttributedString(string: "py", attributes: a), z = t.size()
+            t.draw(at: NSPoint(x: (r.width - z.width) / 2, y: (r.height - z.height) / 2))
+            return true
+        }
+        return img
+    }
+    private func layoutCornerButton() {
+        guard let h = hover, inline == nil, drawTool == nil, hasCornerAction?(h) == true, let b = currentBox(h) else {
+            if cornerOID != nil { cornerOID = nil; cornerButton.isHidden = true; pythonButton.isHidden = true }
+            return
+        }
+        let r = viewRect(b), side: CGFloat = 26
+        cornerOID = h
+        cornerButton.frame = CGRect(x: r.maxX - side - 6, y: r.maxY - side - 6, width: side, height: side)
+        cornerButton.isHidden = r.width < side + 12 || r.height < side + 12
+        pythonButton.frame = cornerButton.frame.offsetBy(dx: -side - 6, dy: 0)
+        pythonButton.isHidden = r.width < 2 * side + 18 || r.height < side + 12
+    }
+
+    /// A frame-pixel box (y down) in view coordinates.
+    func viewRect(_ b: Box) -> CGRect {
+        let r = slideRect, kx = r.width / frameSize.width, ky = r.height / frameSize.height
+        return CGRect(x: r.minX + CGFloat(b.x0) * kx, y: r.maxY - CGFloat(b.y1) * ky, width: CGFloat(b.w) * kx, height: CGFloat(b.h) * ky)
+    }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay2() }
 
     private func buildPipelines(_ dev: MTLDevice) {
@@ -844,7 +938,7 @@ final class CanvasView: MTKView {
                         continue
                     }
                     guard let t = texture(path: sp.file) else { continue }
-                    if o == nil, let xf = stop.xforms?[String(sp.oid)], xf.count >= 6 {
+                    if o == nil, let xf = followXform(sp.oid, stop) ?? stop.xforms?[String(sp.oid)], xf.count >= 6 {
                         // an arrow attached to an object just moved: its sprite is mapped to the new end points
                         var u = Uniforms2(rect: SIMD4(Float(xf[0]), Float(xf[1]), Float(xf[2]), Float(xf[3])),
                                           color: SIMD4(DarkMode.lo, DarkMode.hi, 0, 1), frame: frame,
@@ -980,6 +1074,18 @@ final class CanvasView: MTKView {
             if let g = ghost {
                 outline(Box(x0: g.cx - g.w / 2, y0: g.cy - g.h / 2, x1: g.cx + g.w / 2, y1: g.cy + g.h / 2), SIMD4(0.486, 0.361, 1, 1), th * 1.6)
             }
+            for mark in findMarks?() ?? [] where mark.oid != inline?.oid {
+                // the characters of the match when the render has their boxes (and the object is where it rendered),
+                // else the whole object
+                let exact = overrides[mark.oid] == nil ? mark.glyphs.flatMap { stop.glyphBoxes(mark.oid, $0.0, $0.1) } : nil
+                guard let boxes = exact ?? currentBox(mark.oid).map({ [$0] }) else { continue }
+                for b in boxes {
+                    let pad = exact == nil ? 0 : max(1.0, b.h * 0.12)
+                    let p = Box(x0: b.x0 - pad, y0: b.y0 - pad, x1: b.x1 + pad, y1: b.y1 + pad)
+                    drawSolid(p.x0, p.y0, p.w, p.h, mark.current ? SIMD4(1, 0.62, 0.04, 0.42) : SIMD4(1, 0.84, 0.1, 0.3))
+                    if mark.current { outline(p, SIMD4(0.96, 0.5, 0, 0.95), th) }
+                }
+            }
             if showObjects {
                 for v in stop.visible {
                     let oid = Int(v[0])
@@ -1027,7 +1133,10 @@ final class CanvasView: MTKView {
         addTrackingArea(tracking!)
     }
 
-    override func mouseExited(with event: NSEvent) { onCursorMove?(nil) }
+    override func mouseExited(with event: NSEvent) {
+        onCursorMove?(nil)
+        if hover != nil { hover = nil; needsDisplay2() }
+    }
 
     override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
         s.draggingPasteboard.data(forType: BioCartoonPane.dragType) != nil ? .copy : []

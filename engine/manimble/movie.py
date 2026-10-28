@@ -24,13 +24,19 @@ def find_ffmpeg() -> str | None:
               os.path.expanduser("~/.local/bin/ffmpeg")):
         if c and os.access(c, os.X_OK):
             return c
-    return None
+    try:  # the ffmpeg that the app's Python runtime carries (imageio-ffmpeg)
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
 
 
 def write_movie(clips: list[dict], size: tuple[int, int], destination: str, *, hold: float = 2.0, fps: int = 30,
-                progress=None, ffmpeg: str | None = None) -> None:
+                progress=None, ffmpeg: str | None = None, run=None) -> None:
     """clips: [{"path", "kind" ("video" or "image"), "rate", "label"}] in playing order. `progress(i, n, label)` is
-    called before each clip is encoded. Raises RuntimeError with the tail of ffmpeg's output on failure."""
+    called before each clip is encoded. `run(args, **popen_kw) -> returncode` runs each ffmpeg command instead of
+    subprocess.run (the engine passes one whose process the app can cancel). Raises RuntimeError with the tail of
+    ffmpeg's output on failure."""
     if not clips:
         raise RuntimeError("there are no animation clips to export")
     if not math.isfinite(hold) or hold < 0:
@@ -64,19 +70,26 @@ def write_movie(clips: list[dict], size: tuple[int, int], destination: str, *, h
                     filters.append(f"tpad=stop_mode=clone:stop_duration={hold}")
             command += ["-vf", ",".join(filters), "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                         "-pix_fmt", "yuv420p", "-video_track_timescale", str(fps * 1000), segment]
-            _run(command, cwd=work, context=f"encoding {clip.get('label', 'a build')}")
+            _run(command, cwd=work, context=f"encoding {clip.get('label', 'a build')}", run=run)
             segments.append(segment)
         listing = work / "segments.ffconcat"
         listing.write_text("ffconcat version 1.0\n" + "".join(f"file '{name}'\n" for name in segments))
         movie = work / "movie.mp4"
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0",
               "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(movie)],
-             cwd=work, context="joining the builds")
+             cwd=work, context="joining the builds", run=run)
         os.replace(movie, dest)
 
 
-def _run(command: list[str], *, cwd: Path, context: str) -> None:
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
-    if result.returncode:
-        detail = "\n".join(result.stderr.strip().splitlines()[-5:]) or "command failed"
+def _run(command: list[str], *, cwd: Path, context: str, run=None) -> None:
+    if run is None:
+        result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+        code, stderr = result.returncode, result.stderr
+    else:
+        log = Path(cwd) / "ffmpeg.log"
+        with open(log, "w") as lf:
+            code = run(command, cwd=cwd, stdout=subprocess.DEVNULL, stderr=lf)
+        stderr = log.read_text(errors="replace") if log.exists() else ""
+    if code:
+        detail = "\n".join(stderr.strip().splitlines()[-5:]) or "command failed"
         raise RuntimeError(f"Error {context}: {detail}")

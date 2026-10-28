@@ -11,10 +11,21 @@ struct FindMatch: Decodable {
     var value: String
     var match: String
     var editable: Bool
+    var start: Int?                     // the match in `value`, in characters (Unicode scalars)
+    var end: Int?
+    var glyphs: [Int]?                  // the match as a range of the non-space characters of `value` (text objects)
 
     var key: String { "\(scene):\(kind):\(oid):\(stop):\(index)" }
     /// In the speaker notes (`notes`: the slide's, `buildNotes`: build `stop`'s own) rather than on the slide.
     var inNotes: Bool { kind == "notes" || kind == "buildNotes" }
+}
+
+/// A search match drawn on the canvas: object `oid`, the range of its non-space characters (nil: the whole
+/// object), and whether it is the match stepped to.
+struct FindMark {
+    var oid: Int
+    var glyphs: (Int, Int)?
+    var current: Bool
 }
 
 struct FindResult: Decodable {
@@ -31,84 +42,148 @@ struct ReplaceResult: Decodable {
     var changed: ChangedLines?
 }
 
-/// Far right of the Home bar: search every slide's text and formulas (match case, whole word, regular expression,
-/// and the speaker notes too), step through the matches, and replace one or all of them from the popover under the replace button.
+/// Far right of the Home bar, laid out like VS Code's find widget: a chevron that drops the replace row down under
+/// the bar, the search box with match case, whole word, regular expression and speaker-notes toggles inside it, the
+/// match count, previous/next and close.
 final class FindBar: NSStackView {
-    let field = NSSearchField()
+    let field = LiveTextField()
     let caseButton = FindBar.toggle("Aa", "Match case")
     let wordButton = FindBar.toggle("ab", "Whole word", underline: true)
     let regexButton = FindBar.toggle(".*", "Regular expression (Python syntax; $1 or \\1 in the replacement names a group)")
-    let notesButton = FormatBar.button("note.text", "N", "Check notes: search the speaker notes too (slide and build notes)", toggle: true)
-    let prev = FormatBar.button("chevron.up", "↑", "Previous match (⇧↩)")
-    let next = FormatBar.button("chevron.down", "↓", "Next match (↩)")
-    let replaceButton = FormatBar.button("arrow.left.arrow.right", "⇄", "Find and replace (⌥⌘F)", toggle: true)
+    let notesButton = FindBar.toggle(symbol: "note.text", "Check notes: search the speaker notes too (slide and build notes)")
+    let prev = FindBar.icon("arrow.up", "Previous match (⇧↩)")
+    let next = FindBar.icon("arrow.down", "Next match (↩)")
+    let close = FindBar.icon("xmark", "Clear the search (Esc)")
+    let replaceButton = FindBar.icon("chevron.right", "Toggle replace (⌥⌘F)", toggle: true)
     let count = NSTextField(labelWithString: "")
     let replaceField = NSTextField(string: "")
-    let replaceOne = NSButton(title: "Replace", target: nil, action: nil)
-    let replaceAll = NSButton(title: "Replace All", target: nil, action: nil)
-    lazy var popover: NSPopover = makePopover()
+    let replaceOne = FindBar.icon(image: FindBar.replaceIcon(all: false), "Replace (↩): the selected match, then go to the next one")
+    let replaceAll = FindBar.icon(image: FindBar.replaceIcon(all: true), "Replace All: every match on every slide, and in the notes when they are checked (one undo step)")
+    private(set) lazy var findBox = FindInput(field, buttons: [caseButton, wordButton, regexButton, notesButton])
+    private(set) lazy var replaceBox = FindInput(replaceField, buttons: [])
+    /// The replace row, dropped down under the Home bar over the canvas; `attachReplaceRow` puts it in the window.
+    let replaceRow = NSView()
 
     var matches: [FindMatch] = []
     var current: Int?                       // index into matches of the one on screen
     var shownKey: String?                   // the match last brought on screen
     var generation = 0                      // a search still running when a newer one starts is dropped
+    var onUpdate: (() -> Void)?             // the matches or the current one changed: redraw their highlights
 
+    var replaceShown: Bool { !replaceRow.isHidden }
+
+    /// An option toggle inside the search box: lit with the accent colour while on.
     static func toggle(_ title: String, _ tip: String, underline: Bool = false) -> NSButton {
-        let b = NSButton(title: "", target: nil, action: nil)
-        var attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)]
+        let b = FindButton(title: "", target: nil, action: nil)
+        var attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor]
         if underline { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
         b.attributedTitle = NSAttributedString(string: title, attributes: attrs)
-        b.bezelStyle = .texturedRounded
-        b.setButtonType(.pushOnPushOff)
-        b.toolTip = tip
-        b.translatesAutoresizingMaskIntoConstraints = false
-        b.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        return b
+        return FindButton.style(b, tip, toggle: true, width: 22, height: 18)
+    }
+
+    static func toggle(symbol: String, _ tip: String) -> NSButton {
+        let b = FindButton(title: "", target: nil, action: nil)
+        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+        b.imagePosition = .imageOnly
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        return FindButton.style(b, tip, toggle: true, width: 22, height: 18)
+    }
+
+    /// A borderless icon button beside the boxes.
+    static func icon(_ symbol: String = "", image: NSImage? = nil, _ tip: String, toggle: Bool = false) -> NSButton {
+        let b = FindButton(title: "", target: nil, action: nil)
+        b.image = image ?? NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+        b.imagePosition = .imageOnly
+        b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+        b.lightsWhenOn = false
+        return FindButton.style(b, tip, toggle: toggle, width: 24, height: 22)
+    }
+
+    /// VS Code's replace and replace-all icons: the old letters small at the top right, an arrow down into the new
+    /// letters knocked out of a box at the bottom left.
+    static func replaceIcon(all: Bool) -> NSImage {
+        let w: CGFloat = all ? 20 : 16
+        let img = NSImage(size: NSSize(width: w, height: 16), flipped: true) { _ in
+            let small: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 7.5, weight: .semibold), .foregroundColor: NSColor.black]
+            let old = NSAttributedString(string: all ? "ab" : "b", attributes: small)
+            old.draw(at: NSPoint(x: w - old.size().width, y: -1.5))
+            let arrow = NSBezierPath()
+            arrow.move(to: NSPoint(x: 7, y: 3)); arrow.line(to: NSPoint(x: 4.5, y: 3))
+            arrow.curve(to: NSPoint(x: 3, y: 4.5), controlPoint1: NSPoint(x: 3.6, y: 3), controlPoint2: NSPoint(x: 3, y: 3.6))
+            arrow.line(to: NSPoint(x: 3, y: 7))
+            arrow.move(to: NSPoint(x: 1.4, y: 5.6)); arrow.line(to: NSPoint(x: 3, y: 7.4)); arrow.line(to: NSPoint(x: 4.6, y: 5.6))
+            arrow.lineWidth = 1; NSColor.black.setStroke(); arrow.stroke()
+            let box = NSRect(x: 0.5, y: 8.5, width: all ? 11 : 8, height: 7)
+            NSColor.black.setFill(); NSBezierPath(roundedRect: box, xRadius: 1.5, yRadius: 1.5).fill()
+            let new = NSAttributedString(string: all ? "ac" : "c", attributes: small)
+            NSGraphicsContext.current?.compositingOperation = .destinationOut
+            new.draw(at: NSPoint(x: box.midX - new.size().width / 2, y: box.minY - 2))
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            return true
+        }
+        img.isTemplate = true
+        return img
     }
 
     init() {
         super.init(frame: .zero)
         orientation = .horizontal; alignment = .centerY; spacing = 2
         translatesAutoresizingMaskIntoConstraints = false
-        field.placeholderString = "Search slides"
+        field.placeholderString = "Find"
         field.toolTip = "Find text in every slide (⌘F); ↩ next match, ⇧↩ previous"
-        field.sendsSearchStringImmediately = false
-        field.sendsWholeSearchString = false
-        field.font = Theme.font(12)
-        field.controlSize = .small
-        field.translatesAutoresizingMaskIntoConstraints = false
-        field.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        count.font = Theme.font(10); count.textColor = .secondaryLabelColor
-        count.alignment = .center
+        replaceField.placeholderString = "Replace"
+        findBox.widthAnchor.constraint(equalToConstant: 250).isActive = true
+        count.font = Theme.font(12); count.textColor = .labelColor
+        count.lineBreakMode = .byClipping
         count.translatesAutoresizingMaskIntoConstraints = false
-        count.widthAnchor.constraint(greaterThanOrEqualToConstant: 34).isActive = true
-        for b in [prev, next, replaceButton] { b.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium) }
-        notesButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
-        notesButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        for v: NSView in [field, count, caseButton, wordButton, regexButton, notesButton, prev, next, replaceButton] { addArrangedSubview(v) }
-        setCustomSpacing(6, after: count)
-        setCustomSpacing(6, after: notesButton)
-        setCustomSpacing(6, after: next)
-        replaceField.placeholderString = "Replace with"
-        replaceField.font = Theme.font(12)
-        replaceField.translatesAutoresizingMaskIntoConstraints = false
-        replaceField.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        replaceOne.toolTip = "Replace the selected match, then go to the next one"
-        replaceAll.toolTip = "Replace every match on every slide, and in the notes when they are checked (one undo step)"
-        for b in [replaceOne, replaceAll] { b.bezelStyle = .rounded; b.controlSize = .small; b.font = Theme.font(11) }
+        count.widthAnchor.constraint(equalToConstant: 68).isActive = true
+        for v: NSView in [replaceButton, findBox, count, prev, next, close] { addArrangedSubview(v) }
+        replaceButton.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        setCustomSpacing(4, after: replaceButton)
+        setCustomSpacing(6, after: findBox)
+
+        replaceRow.isHidden = true
+        replaceRow.wantsLayer = true
+        replaceRow.translatesAutoresizingMaskIntoConstraints = false
+        Theme.layerColors(replaceRow) {
+            $0.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            $0.layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+        replaceRow.layer?.borderWidth = 1
+        replaceRow.layer?.cornerRadius = 6
+        replaceRow.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]   // the bottom ones (unflipped)
+        replaceRow.shadow = NSShadow()
+        replaceRow.layer?.shadowOpacity = 0.3; replaceRow.layer?.shadowRadius = 4; replaceRow.layer?.shadowOffset = NSSize(width: 0, height: -2)
+        for v: NSView in [replaceBox, replaceOne, replaceAll] { replaceRow.addSubview(v) }
+        NSLayoutConstraint.activate([
+            replaceBox.topAnchor.constraint(equalTo: replaceRow.topAnchor, constant: 5),
+            replaceBox.bottomAnchor.constraint(equalTo: replaceRow.bottomAnchor, constant: -6),
+            replaceOne.leadingAnchor.constraint(equalTo: replaceBox.trailingAnchor, constant: 6),
+            replaceOne.centerYAnchor.constraint(equalTo: replaceBox.centerYAnchor),
+            replaceAll.leadingAnchor.constraint(equalTo: replaceOne.trailingAnchor, constant: 4),
+            replaceAll.centerYAnchor.constraint(equalTo: replaceBox.centerYAnchor),
+        ])
         update()
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private func makePopover() -> NSPopover {
-        let p = NSPopover()
-        p.behavior = .semitransient
-        let row = NSStackView(views: [replaceField, replaceOne, replaceAll])
-        row.orientation = .horizontal; row.spacing = 6
-        row.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
-        let vc = NSViewController(); vc.view = row
-        p.contentViewController = vc
-        return p
+    /// Put the replace row in `root` (above the views after the bar), hanging from the bottom of `bar` with its box
+    /// lined up under the search box.
+    func attachReplaceRow(in root: NSView, below bar: NSView) {
+        root.addSubview(replaceRow, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            replaceRow.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: -1),
+            replaceRow.leadingAnchor.constraint(equalTo: replaceButton.leadingAnchor, constant: -6),
+            replaceRow.trailingAnchor.constraint(equalTo: close.trailingAnchor, constant: 6),
+            replaceBox.leadingAnchor.constraint(equalTo: findBox.leadingAnchor),
+            replaceBox.widthAnchor.constraint(equalTo: findBox.widthAnchor),
+        ])
+    }
+
+    func setReplaceShown(_ on: Bool) {
+        replaceRow.isHidden = !on
+        replaceButton.state = on ? .on : .off
+        replaceButton.image = NSImage(systemSymbolName: on ? "chevron.down" : "chevron.right", accessibilityDescription: "Toggle replace")
     }
 
     var options: [String: Any] {
@@ -118,51 +193,165 @@ final class FindBar: NSStackView {
 
     /// The count label and which controls apply.
     func update(error: String? = nil) {
+        defer { onUpdate?() }
         let has = !matches.isEmpty
         prev.isEnabled = has; next.isEnabled = has
         replaceOne.isEnabled = has; replaceAll.isEnabled = has
         count.toolTip = error
         if let error {
-            count.stringValue = "⚠︎"; count.textColor = .systemOrange
+            count.stringValue = "⚠︎ Error"; count.textColor = .systemOrange
             field.toolTip = error
             return
         }
-        count.textColor = .secondaryLabelColor
         field.toolTip = "Find text in every slide (⌘F); ↩ next match, ⇧↩ previous"
-        if field.stringValue.isEmpty { count.stringValue = "" }
-        else if !has { count.stringValue = "0" }
-        else if let c = current { count.stringValue = "\(c + 1)/\(matches.count)" }
-        else { count.stringValue = "\(matches.count)" }
+        count.textColor = has || field.stringValue.isEmpty ? .labelColor : .systemRed
+        if field.stringValue.isEmpty { count.stringValue = "No results"; count.textColor = .secondaryLabelColor }
+        else if !has { count.stringValue = "No results" }
+        else if let c = current { count.stringValue = "\(c + 1) of \(matches.count)" }
+        else { count.stringValue = "? of \(matches.count)" }
     }
 }
 
-extension MainController: NSSearchFieldDelegate {
+/// A text field that sends its action on every keystroke, for searching as you type.
+final class LiveTextField: NSTextField {
+    override func textDidChange(_ n: Notification) {
+        super.textDidChange(n)
+        sendAction(action, to: target)
+    }
+}
+
+/// A rounded box holding a borderless text field with small buttons inside its right end; its border takes the
+/// accent colour while the field is being typed in.
+final class FindInput: NSView {
+    private var editing = false
+
+    init(_ field: NSTextField, buttons: [NSView]) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 5; layer?.borderWidth = 1
+        Theme.layerColors(self) { $0.restyle() }
+        field.isBezeled = false; field.isBordered = false; field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = Theme.font(13)
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true; field.cell?.wraps = false
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [field] + buttons)
+        row.orientation = .horizontal; row.alignment = .centerY; row.spacing = 1
+        row.setCustomSpacing(4, after: field)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 24),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: NSControl.textDidBeginEditingNotification, object: field, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.editing = true; self?.restyle() }
+        }
+        nc.addObserver(forName: NSControl.textDidEndEditingNotification, object: field, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.editing = false; self?.restyle() }
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func restyle() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            layer?.borderColor = (editing ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
+        }
+    }
+}
+
+/// A borderless button of the find widget: dims its icon when disabled and, as an option toggle, fills with the
+/// accent colour while on.
+final class FindButton: NSButton {
+    var lightsWhenOn = true
+
+    static func style(_ b: FindButton, _ tip: String, toggle: Bool, width: CGFloat, height: CGFloat) -> NSButton {
+        b.isBordered = false
+        b.setButtonType(toggle ? .pushOnPushOff : .momentaryChange)
+        (b.cell as? NSButtonCell)?.highlightsBy = []
+        b.contentTintColor = .labelColor
+        b.toolTip = tip
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.widthAnchor.constraint(equalToConstant: width).isActive = true
+        b.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return b
+    }
+
+    override var isEnabled: Bool { didSet { alphaValue = isEnabled ? 1 : 0.35 } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 0.5, dy: 0.5)
+        if lightsWhenOn && state == .on {
+            let p = NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3)
+            NSColor.controlAccentColor.withAlphaComponent(0.3).setFill(); p.fill()
+            NSColor.controlAccentColor.setStroke(); p.stroke()
+        } else if isHighlighted {
+            NSColor.labelColor.withAlphaComponent(0.12).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 3, yRadius: 3).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
+extension MainController {
     func wireFindBar(_ f: FindBar) {
-        f.field.delegate = self
+        f.field.delegate = self; f.replaceField.delegate = self
         f.field.target = self; f.field.action = #selector(findFieldChanged(_:))
         for b in [f.caseButton, f.wordButton, f.regexButton, f.notesButton] { b.target = self; b.action = #selector(findOptionChanged(_:)) }
         f.prev.target = self; f.prev.action = #selector(findPrevious(_:))
         f.next.target = self; f.next.action = #selector(findNext(_:))
-        f.replaceButton.target = self; f.replaceButton.action = #selector(toggleReplacePopover(_:))
+        f.close.target = self; f.close.action = #selector(closeFind(_:))
+        f.replaceButton.target = self; f.replaceButton.action = #selector(toggleReplaceRow(_:))
         f.replaceField.target = self; f.replaceField.action = #selector(replaceCurrent(_:))
         f.replaceOne.target = self; f.replaceOne.action = #selector(replaceCurrent(_:))
         f.replaceAll.target = self; f.replaceAll.action = #selector(replaceEverything(_:))
+        f.onUpdate = { [weak self] in self?.canvas.findMarksChanged(); self?.markNotesMatch() }
+        canvas.findMarks = { [weak self] in self?.findMarksOnSlide() ?? [] }
+    }
+
+    /// Every match on the slide and build shown, highlighted on the canvas (the current one stronger). A match whose
+    /// text has changed since the search is left out: its character range no longer fits.
+    func findMarksOnSlide() -> [FindMark] {
+        guard let f = findBar, !f.matches.isEmpty, let name = sceneName, let stop = canvas.stop else { return [] }
+        return f.matches.indices.compactMap { i in
+            let m = f.matches[i]
+            guard m.scene == name, !m.inNotes, stop.box(of: m.oid) != nil,
+                  canvas.sceneObjects[String(m.oid)]?.value.replacingOccurrences(of: " \n", with: " ") == m.value else { return nil }
+            return FindMark(oid: m.oid, glyphs: m.glyphs.flatMap { $0.count == 2 ? ($0[0], $0[1]) : nil }, current: i == f.current)
+        }
+    }
+
+    /// The current match, when it is in the notes tab shown, highlighted in that tab's text (the others cleared).
+    func markNotesMatch() {
+        guard let f = findBar else { return }
+        let m = f.current.flatMap { f.matches.indices.contains($0) ? f.matches[$0] : nil }
+        let shown = m.flatMap { $0.inNotes && shownMatch($0) ? $0 : nil }
+        for box in [notesBox, buildNotesBox] {
+            if let m = shown, let s = m.start, let e = m.end, box === (m.kind == "notes" ? notesBox : buildNotesBox) {
+                box.highlight(in: m.value, from: s, to: e)
+            } else { box.highlight(in: nil, from: 0, to: 0) }
+        }
     }
 
     var findBar: FindBar? { formatBar?.find }
 
     /// ↩ in the search field goes to the next match, ⇧↩ to the previous one, Esc clears the search.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
-        guard let f = findBar, control === f.field else { return false }
+        guard let f = findBar else { return false }
+        if control === f.replaceField, sel == #selector(NSResponder.cancelOperation(_:)) { closeFind(nil); return true }
+        guard control === f.field else { return false }
         if sel == #selector(NSResponder.insertNewline(_:)) {
             if NSEvent.modifierFlags.contains(.shift) { findPrevious(nil) } else { findNext(nil) }
             return true
         }
-        if sel == #selector(NSResponder.cancelOperation(_:)) {
-            f.field.stringValue = ""; f.matches = []; f.current = nil; f.update()
-            window.makeFirstResponder(canvas)
-            return true
-        }
+        if sel == #selector(NSResponder.cancelOperation(_:)) { closeFind(nil); return true }
         return false
     }
 
@@ -176,19 +365,27 @@ extension MainController: NSSearchFieldDelegate {
 
     @objc func showFindReplace(_ sender: Any?) {
         guard let f = findBar else { return }
-        if !f.popover.isShown { f.replaceButton.state = .on; f.popover.show(relativeTo: f.replaceButton.bounds, of: f.replaceButton, preferredEdge: .minY) }
+        f.setReplaceShown(true)
         window.makeFirstResponder(f.field.stringValue.isEmpty ? f.field : f.replaceField)
     }
 
-    @objc func toggleReplacePopover(_ sender: NSButton) {
+    @objc func toggleReplaceRow(_ sender: NSButton) {
         guard let f = findBar else { return }
-        if f.popover.isShown { f.popover.performClose(nil); f.replaceButton.state = .off; return }
+        if f.replaceShown { f.setReplaceShown(false); return }
         showFindReplace(sender)
+    }
+
+    /// ✕ or Esc: clear the search, fold the replace row away and go back to the canvas.
+    @objc func closeFind(_ sender: Any?) {
+        guard let f = findBar else { return }
+        f.field.stringValue = ""; f.matches = []; f.current = nil; f.update()
+        f.setReplaceShown(false)
+        window.makeFirstResponder(canvas)
     }
 
     // MARK: searching
 
-    @objc func findFieldChanged(_ sender: NSSearchField) { Task { @MainActor in await self.runFind(keep: false) } }
+    @objc func findFieldChanged(_ sender: NSTextField) { Task { @MainActor in await self.runFind(keep: false) } }
     @objc func findOptionChanged(_ sender: NSButton) { Task { @MainActor in await self.runFind(keep: false) } }
 
     /// Search the deck again. `keep`: stay on the match shown before (after an edit), else start from the slide on
@@ -352,6 +549,10 @@ extension MainController {
             }
             await self.goToMatch(forward: false)
             log("prev -> \(self.sceneName ?? "-") sel \(self.selection.map(String.init) ?? "-") label \(f.count.stringValue)")
+            log("marks: " + self.findMarksOnSlide().map { m in
+                "\(m.oid)\(m.current ? "*" : "") " + (m.glyphs.flatMap { g in self.canvas.stop?.glyphBoxes(m.oid, g.0, g.1) }
+                    .map { $0.map { "[\(Int($0.x0)),\(Int($0.y0)) \(Int($0.w))x\(Int($0.h))]" }.joined() } ?? "whole")
+            }.joined(separator: " "))
             shot("next")
             f.caseButton.state = .on; f.field.stringValue = "E"; await self.runFind(keep: false)
             log("E case: \(f.matches.count)")
@@ -373,10 +574,10 @@ extension MainController {
             log("replaced in notes: \(self.scene?.notes ?? "-") / build \(self.scene?.buildNotes ?? [])")
             f.notesButton.state = .off; f.field.stringValue = "notes"; await self.runFind(keep: false)
             log("notes off: \(f.matches.count)")
-            f.popover.performClose(nil)
+            f.setReplaceShown(false)
             f.field.stringValue = "Manim"; await self.runFind(keep: false)
             self.showFindReplace(nil); f.replaceField.stringValue = "MANIM"
-            shot("popover")
+            shot("replace")
             self.replaceCurrent(nil); await self.queueTail?.value
             log("first replace press shows: \(self.sceneName ?? "-") sel \(self.selection.map(String.init) ?? "-")")
             self.replaceCurrent(nil); await self.queueTail?.value
