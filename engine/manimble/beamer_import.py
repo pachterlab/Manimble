@@ -8,7 +8,10 @@ ranges. itemize / enumerate / description become one Text per item with Beamer's
 `MathTex(...)` (the document's macros and maths packages go into the deck's TeX template), \\includegraphics an
 `ImageMobject`. Overlays become builds: \\pause, <+->, \\item<n->, \\only / \\uncover / \\onslide<n->. Anything else
 LaTeX draws (tikzpicture, tabular, ...) is typeset with the document's own preamble and placed as a picture.
-Themes are not reproduced; frames are laid out in the default theme."""
+Themes: the default look, and the "rounded + infolines" family (Madrid, Boadilla, CambridgeUS, AnnArbor, Rochester,
+Warsaw, ...) with its title bar, ball bullets, rounded title page box and footline; \\setbeamercolor / \\setbeamerfont /
+\\setbeamertemplate overrides of the frame title, footline and items are read. Positions were calibrated on compiled
+decks (default theme with pdfLaTeX, Madrid with XeLaTeX), see MARGIN, TITLE_X and the Theme class."""
 
 from __future__ import annotations
 
@@ -33,6 +36,15 @@ MANIM_MATH_EM = 96.4           # MathTex: 1 em = font_size / 96.4 units
 # LaTeX size commands at 11pt (Beamer's default); other base sizes scale these
 SIZES_11 = {"tiny": 6, "scriptsize": 8, "footnotesize": 9, "small": 10, "normalsize": 10.95, "large": 12,
             "Large": 14.4, "LARGE": 17.28, "huge": 20.74, "Huge": 24.88}
+# ... and their baseline skips (size11.clo), in pt
+BASELINESKIP_11 = {"tiny": 7, "scriptsize": 9.5, "footnotesize": 11, "small": 12, "normalsize": 13.6, "large": 14,
+                   "Large": 18, "LARGE": 22, "huge": 25, "Huge": 30}
+PT = 72 / 72.27                # bp per pt
+TEXTHEIGHT_INSET = 12.6        # \textheight = \paperheight - this (bp), measured at 16:9 and 4:3
+ITEMSEP = 3 * PT               # beamer's \itemsep and \topsep at level 1
+NO_OPS = {"strut", "selectfont", "relax", "noindent", "arraybackslash", "leavevmode", "nointerlineskip",
+          "ignorespaces", "unskip", "frenchspacing", "nonfrenchspacing", "sloppy", "fussy", "clearpage", "newpage",
+          "mathstrut", "indent", "displaystyle", "textstyle", "protect"}
 ASPECTS = {"169": (160, 90), "1610": (160, 100), "149": (140, 90), "141": (148.5, 105), "54": (125, 100),
            "43": (128, 96), "32": (135, 90), "2013": (200, 130)}
 MM = 72 / 25.4
@@ -211,6 +223,167 @@ class Colors:
             rgb = [round(a * pct + b * (1 - pct)) for a, b in zip(rgb, o)]
             k += 2
         return "#%02X%02X%02X" % tuple(rgb)
+
+
+# ---------------------------------------------------------------------------------------------- themes
+
+def mix(a: str, b: str, pct: float) -> str:
+    """xcolor's a!pct!b."""
+    ra = [int(a[i:i + 2], 16) for i in (1, 3, 5)]
+    rb = [int(b[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02X%02X%02X" % tuple(round(x * pct / 100 + y * (1 - pct / 100)) for x, y in zip(ra, rb))
+
+
+# presentation themes as (inner theme, outer theme, colour themes); only the parts the importer draws matter
+PRESENTATION_THEMES = {
+    "default": ("default", "default", []),
+    "Madrid": ("rounded", "infolines", ["whale", "orchid"]),
+    "Boadilla": ("rounded", "infolines", []),
+    "AnnArbor": ("rounded", "infolines", ["wolverine"]),
+    "CambridgeUS": ("rounded", "infolines", ["beaver"]),
+    "Rochester": ("rounded", "default", ["whale", "orchid"]),
+    "Warsaw": ("rounded", "shadow", ["whale", "orchid"]),
+    "Copenhagen": ("rounded", "split", ["whale", "orchid"]),
+    "Luebeck": ("rounded", "split", ["whale", "orchid"]),
+    "Malmoe": ("rounded", "split", ["whale", "orchid"]),
+    "Berlin": ("rounded", "miniframes", ["whale", "orchid"]),
+    "Ilmenau": ("rounded", "miniframes", ["whale", "orchid"]),
+    "Dresden": ("rounded", "miniframes", ["whale", "orchid"]),
+    "Darmstadt": ("rounded", "smoothbars", ["whale", "orchid"]),
+    "Frankfurt": ("rounded", "smoothbars", ["whale", "orchid"]),
+    "Singapore": ("circles", "smoothbars", ["lily"]),
+    "Szeged": ("rectangles", "smoothbars", ["lily"]),
+    "Antibes": ("circles", "tree", ["whale", "orchid"]),
+    "JuanLesPins": ("circles", "smoothtree", ["whale", "orchid"]),
+    "Montpellier": ("default", "tree", ["lily"]),
+    "Pittsburgh": ("default", "default", []),
+    "Bergen": ("rectangles", "sidebar", []),
+    "Berkeley": ("rectangles", "sidebar", ["whale", "orchid"]),
+    "PaloAlto": ("rectangles", "sidebar", ["whale", "orchid"]),
+    "Goettingen": ("rectangles", "sidebar", ["lily"]),
+    "Marburg": ("rectangles", "sidebar", ["lily"]),
+    "Hannover": ("rectangles", "sidebar", ["lily"]),
+    "EastLansing": ("default", "default", ["beaver"]),
+}
+BAR_OUTER = {"infolines", "shadow", "split", "miniframes", "smoothbars", "tree", "smoothtree"}
+
+
+class Theme:
+    """What the importer draws of a Beamer theme: colours of the frame title (a bar when it has a background),
+    the item shape, the rounded title page / blocks, the footline, the text margins and \\setbeamerfont sizes."""
+
+    def __init__(self):
+        self.structure = STRUCTURE
+        self.text = TEXT
+        self.frametitle_fg = STRUCTURE
+        self.frametitle_bg: str | None = None
+        self.items = "triangle"                   # triangle | ball | circle | square
+        self.rounded = False                      # rounded inner theme: boxed title page, rounded blocks
+        self.shadow = False
+        self.footline: str = "none"               # none | infolines | page
+        self.footline_src: str | None = None      # a custom \setbeamertemplate{footline}
+        self.frametitle_src: str | None = None    # a custom \setbeamertemplate{frametitle}
+        self.margin_l = MARGIN
+        self.margin_r = MARGIN
+        self.fonts: dict[str, dict] = {}          # \setbeamerfont: name -> {size, bold, italic}
+        self.colors: dict[str, dict] = {}         # \setbeamercolor: name -> {fg, bg}
+        self.block_title_bg: str | None = None
+        self.block_title_fg = STRUCTURE
+        self.block_body_bg: str | None = None
+        self.frame_keys: dict[str, str] = {}      # \define@key{beamerframe}{key}{\def\macro{#1}}: key -> macro
+        self.names: list[str] = []
+        self.warnings: list[str] = []
+
+    def apply_color_theme(self, name: str):
+        s = self.structure
+        if name == "whale":
+            self.frametitle_fg, self.frametitle_bg = "#FFFFFF", s
+            self.colors.setdefault("palette primary", {"fg": "#FFFFFF", "bg": s})
+            self.colors.setdefault("palette secondary", {"fg": "#FFFFFF", "bg": mix(s, "#000000", 75)})
+            self.colors.setdefault("palette tertiary", {"fg": "#FFFFFF", "bg": mix(s, "#000000", 50)})
+        elif name == "orchid":
+            self.block_title_bg, self.block_title_fg = mix(s, "#000000", 75), "#FFFFFF"
+            self.block_body_bg = mix(mix(s, "#000000", 75), "#FFFFFF", 10)
+        elif name == "beaver":
+            self.structure = s = "#CC0000"
+            self.frametitle_fg, self.frametitle_bg = s, None
+            self.colors.setdefault("palette primary", {"fg": s, "bg": "#D9D9D9"})
+            self.colors.setdefault("palette secondary", {"fg": s, "bg": "#E6E6E6"})
+            self.colors.setdefault("palette tertiary", {"fg": "#FFFFFF", "bg": s})
+            self.block_title_bg, self.block_title_fg = "#D9D9D9", s
+        elif name == "seagull":
+            self.structure = s = "#000000"
+            self.frametitle_fg, self.frametitle_bg = "#000000", "#B3B3B3"
+            self.colors.setdefault("palette primary", {"fg": "#000000", "bg": "#B3B3B3"})
+            self.colors.setdefault("palette secondary", {"fg": "#000000", "bg": "#999999"})
+            self.colors.setdefault("palette tertiary", {"fg": "#FFFFFF", "bg": "#808080"})
+        elif name == "dove":
+            self.structure = s = "#000000"
+            self.frametitle_fg, self.frametitle_bg = "#000000", None
+        elif name == "seahorse":
+            self.frametitle_fg, self.frametitle_bg = "#000000", mix(s, "#FFFFFF", 20)
+            self.colors.setdefault("palette primary", {"fg": "#000000", "bg": mix(s, "#FFFFFF", 20)})
+            self.colors.setdefault("palette secondary", {"fg": "#000000", "bg": mix(s, "#FFFFFF", 30)})
+            self.colors.setdefault("palette tertiary", {"fg": "#000000", "bg": mix(s, "#FFFFFF", 50)})
+        elif name == "crane":
+            self.structure = s = "#CC9933"
+            self.frametitle_fg, self.frametitle_bg = "#000000", "#FFCC00"
+            self.colors.setdefault("palette primary", {"fg": "#000000", "bg": "#FFCC00"})
+            self.colors.setdefault("palette secondary", {"fg": "#000000", "bg": "#E6B800"})
+            self.colors.setdefault("palette tertiary", {"fg": "#000000", "bg": "#E6A500"})
+        elif name == "wolverine":
+            self.structure = s = "#1A1AB3"
+            self.frametitle_fg, self.frametitle_bg = "#000000", "#FFE199"
+            self.colors.setdefault("palette primary", {"fg": "#000000", "bg": "#FFE199"})
+            self.colors.setdefault("palette secondary", {"fg": "#000000", "bg": "#F7C545"})
+            self.colors.setdefault("palette tertiary", {"fg": "#FFFFFF", "bg": "#B38F00"})
+        elif name in ("lily", "rose", "dolphin", "albatross", "beetle", "fly", "monarca", "spruce", "sidebartab",
+                      "structure", "default"):
+            if name in ("dolphin", "albatross", "beetle", "fly", "monarca", "spruce"):
+                self.warnings.append(f"the colour theme '{name}' is only approximated")
+        else:
+            self.warnings.append(f"the colour theme '{name}' is not known; the default colours are used")
+
+    def apply_inner(self, name: str, opts: str):
+        if name == "rounded":
+            self.rounded, self.items = True, "ball"
+            self.shadow = "shadow=true" in opts.replace(" ", "")
+        elif name == "circles":
+            self.items = "circle"
+        elif name == "rectangles":
+            self.items = "square"
+        elif name == "inmargin":
+            self.warnings.append("the 'inmargin' inner theme is not reproduced")
+
+    def apply_outer(self, name: str):
+        if name == "infolines":
+            self.footline = "infolines"
+            self.margin_l = self.margin_r = None               # 1em, resolved once the base size is known
+        elif name in BAR_OUTER:
+            self.footline = "infolines" if name in ("shadow", "split", "smoothbars") else "none"
+            self.warnings.append(f"the '{name}' outer theme's headline is not reproduced")
+        elif name == "sidebar":
+            self.warnings.append("the 'sidebar' outer theme's sidebar is not reproduced")
+
+    def apply_presentation(self, name: str):
+        if name not in PRESENTATION_THEMES:
+            self.warnings.append(f"the Beamer theme '{name}' is not known; frames use the default look")
+            return
+        inner, outer, colors = PRESENTATION_THEMES[name]
+        self.apply_inner(inner, "shadow=true" if inner == "rounded" else "")
+        self.apply_outer(outer)
+        for c in colors:
+            self.apply_color_theme(c)
+
+    def font(self, name: str, default: str) -> dict:
+        """{size name, bold, italic} of a beamer font, with `default` as its size when not set."""
+        f = dict(self.fonts.get(name, {}))
+        f.setdefault("size", default)
+        return f
+
+    def palette(self, name: str, fallback_fg: str, fallback_bg: str | None) -> tuple[str, str | None]:
+        c = self.colors.get(name, {})
+        return c.get("fg") or fallback_fg, c.get("bg", fallback_bg)
 
 
 # -------------------------------------------------------------------------------------- inline text
@@ -520,9 +693,27 @@ class Inline:
         if name == "today":
             out += [(ch, dict(style)) for ch in datetime.date.today().strftime("%B %-d, %Y")]
             return j
+        if name in NO_OPS:
+            return j
+        if name == "fontsize":
+            a, j = arg(s, j)
+            b, j = arg(s, j)
+            try:
+                style["size"] = float(re.sub(r"[a-z]+", "", a or "")) * PT
+                style["pitch"] = float(re.sub(r"[a-z]+", "", b or "")) * PT
+            except ValueError:
+                pass
+            return j
+        if name in ("newcommand", "renewcommand", "providecommand", "def", "setlength", "addtolength"):
+            _, j = arg(s, j)
+            _, j = opt(s, j)
+            _, j = opt(s, j)
+            _, j = arg(s, j)
+            return j
         size = self.size_pt(name)
         if size is not None:
             style["size"] = size
+            style.pop("pitch", None)
             return j
         if name in ("bfseries", "bf"):
             style["b"] = True
@@ -640,6 +831,11 @@ class BeamerImport:
         self.pil: dict = {}
         self.widths: dict = {}
         self.verbs: list[str] = []
+        self.theme = Theme()
+        self.sans: str | None = None                        # \setsansfont / helvet family, if any
+        self.cur_frame: dict = {}
+        self.pdf_pages: list[str] | None = None             # text of the sibling PDF's pages (picture fallback)
+        self.pdf_used: dict[int, int] = {}
 
     # ------------------------------------------------------------ preamble
     def read(self) -> tuple[str, str]:
@@ -670,8 +866,85 @@ class BeamerImport:
             return ""
         return re.sub(r"(?<!\\)\\(input|include)\{([^}]*)\}", sub, text)
 
+    # ------------------------------------------------------------ engine conditionals
+    def resolve_conditionals(self, pre: str) -> str:
+        """\\ifPDFTeX / \\ifXeTeX / \\ifLuaTeX ... \\else ... \\fi and \\IfFontExistsTF{font}{yes}{no}, decided the
+        way the document is most likely compiled (XeLaTeX when it loads fontspec) and by the fonts installed here."""
+        xe = bool(re.search(r"\\usepackage\s*(?:\[[^\]]*\])?\{[^}]*fontspec", pre))
+        truth = {"ifPDFTeX": not xe, "ifpdftex": not xe, "ifpdf": not xe, "ifXeTeX": xe, "ifxetex": xe,
+                 "ifLuaTeX": False, "ifluatex": False, "ifTUTeX": xe, "ifLuaHBTeX": False}
+        pat = re.compile(r"\\(if[A-Za-z@]*|else|fi)(?![A-Za-z@])")
+        out, i = [], 0
+        while True:
+            m = pat.search(pre, i)
+            if not m:
+                out.append(pre[i:])
+                break
+            name = m.group(1)
+            if name not in truth:
+                out.append(pre[i:m.end()])
+                i = m.end()
+                continue
+            out.append(pre[i:m.start()])
+            # find the matching \else / \fi
+            depth, j, branch_true, branch_false, cur = 0, m.end(), [], None, None
+            cur = branch_true
+            k = j
+            while True:
+                mm = pat.search(pre, k)
+                if not mm:
+                    cur.append(pre[k:])
+                    k = len(pre)
+                    break
+                tok = mm.group(1)
+                if tok.startswith("if"):
+                    depth += 1
+                    cur.append(pre[k:mm.end()])
+                elif tok == "else" and depth == 0:
+                    cur.append(pre[k:mm.start()])
+                    branch_false = []
+                    cur = branch_false
+                elif tok == "fi" and depth == 0:
+                    cur.append(pre[k:mm.start()])
+                    k = mm.end()
+                    break
+                else:
+                    if tok == "fi":
+                        depth -= 1
+                    cur.append(pre[k:mm.end()])
+                k = mm.end()
+            chosen = branch_true if truth[name] else (branch_false or [])
+            out.append("".join(chosen))
+            i = k
+        pre = "".join(out)
+
+        def font_exists(m):
+            name = m.group(1).strip()
+            yes, k = balanced(pre, m.end() - 1)
+            no, k2 = balanced(pre, skip_ws(pre, k))
+            from .importer import _font
+            ok = _font(name, False, False) is not None or name.lower() in {f.lower() for f in pango_fonts()}
+            # a fallback font that ships with TeX (TeX Gyre, Latin Modern) is what a standard TeX build uses
+            # and can travel with the deck, so it wins over a font that merely happens to be installed here
+            fb = re.search(r"\\set(?:sans|main)font\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}", no)
+            if ok and fb and self.tex_fonts({"r": re.sub(r"\s+", "", fb.group(1).lower()).removesuffix(".otf") + "-regular.otf"}).get("r"):
+                self.warnings.append(f"the document uses '{name}' when it is installed and {fb.group(1).strip()} otherwise; "
+                                     f"the deck uses the latter (it ships with TeX and travels with the deck)")
+                ok = False
+            return (yes if ok else no) + "\x02" + str(k2 - m.start())
+        # \IfFontExistsTF{name}{yes}{no}: rebuild by hand because the branches nest braces
+        while True:
+            m = re.search(r"\\IfFontExistsTF\s*\{([^}]*)\}\s*\{", pre)
+            if not m:
+                break
+            rep = font_exists(m)
+            body, n = rep.rsplit("\x02", 1)
+            pre = pre[:m.start()] + body + pre[m.start() + int(n):]
+        return pre
+
     def preamble(self, pre: str):
-        self.preamble_src = pre
+        self.preamble_src = pre                               # as written, for LaTeX
+        pre = self.resolve_conditionals(pre)
         m = re.search(r"\\documentclass\s*(?:\[([^\]]*)\])?\s*\{([^}]*)\}", pre)
         opts = [o.strip() for o in (m.group(1) or "").split(",")] if m else []
         if m and m.group(2).strip() != "beamer":
@@ -702,9 +975,7 @@ class BeamerImport:
             for p in mm.group(1).split(","):
                 if p.strip() in MATH_PACKAGES and p.strip() not in self.math_pkgs:
                     self.math_pkgs.append(p.strip())
-        for mm in re.finditer(r"\\use(?:outer|inner|color|font)?theme\s*(?:\[[^\]]*\])?\{([^}]*)\}", pre):
-            if mm.group(1).strip() != "default":
-                self.warnings.append(f"the Beamer theme '{mm.group(1).strip()}' is not reproduced; frames use the default look")
+        self.read_theme(pre)
         # macros: \newcommand{\x}[n][default]{body}, \def\x{body}, \DeclareMathOperator{\x}{name}
         i = 0
         pat = re.compile(r"\\(newcommand|renewcommand|providecommand|DeclareMathOperator\*?|def|DeclareRobustCommand)\*?")
@@ -726,6 +997,9 @@ class BeamerImport:
                     i = j
                     continue
                 body, j = balanced(pre, k)
+                if "#" in body and not nm.group(2):          # \def inside \define@key etc.: not a macro of its own
+                    i = j
+                    continue
                 self.macros[nm.group(1)] = (len(nm.group(2)) // 2, None, body)
             else:
                 name, j = arg(pre, j)
@@ -744,17 +1018,153 @@ class BeamerImport:
                     self.macros[name] = (n, default, body or "")
             self.macro_src.append(pre[start:j])
             i = j
+        self.meta_short: dict = {}
         for key in ("title", "subtitle", "author", "institute", "date", "titlegraphic"):
-            mm = re.search(r"\\" + key + r"\s*(?:\[[^\]]*\])?\s*\{", pre)
+            mm = re.search(r"\\" + key + r"\s*(?:\[([^\]]*)\])?\s*\{", pre)
             if mm:
                 body, _ = balanced(pre, mm.end() - 1)
                 self.meta[key] = body
+                if mm.group(1) is not None:
+                    self.meta_short[key] = mm.group(1)
+
+    def read_theme(self, pre: str):
+        """\\usetheme & co., \\setbeamercolor / font / template / size and frame keys, in document order."""
+        th = self.theme
+        pat = re.compile(r"\\(usetheme|usecolortheme|useinnertheme|useoutertheme|usefonttheme|setbeamercolor\*?|"
+                         r"setbeamerfont\*?|setbeamertemplate|setbeamersize|define@key|setsansfont|setmainfont|"
+                         r"usepackage)(?![A-Za-z@])")
+        i = 0
+        while True:
+            m = pat.search(pre, i)
+            if not m:
+                break
+            name, j = m.group(1).rstrip("*"), m.end()
+            o, j = opt(pre, j)
+            a, j = arg(pre, j)
+            a = (a or "").strip()
+            if name == "usetheme":
+                for t in a.split(","):
+                    th.apply_presentation(t.strip())
+            elif name == "usecolortheme":
+                for t in a.split(","):
+                    th.apply_color_theme(t.strip())
+            elif name == "useinnertheme":
+                th.apply_inner(a, o or "")
+            elif name == "useoutertheme":
+                th.apply_outer(a)
+            elif name == "usefonttheme":
+                if a in ("serif",):
+                    self.warnings.append("the serif font theme is not reproduced (sans-serif text is used)")
+            elif name == "setbeamercolor":
+                spec, j = arg(pre, j)
+                d = th.colors.setdefault(a, {})
+                for kv in re.split(r",(?![^{]*\})", spec or ""):
+                    if "=" in kv:
+                        k, v = (x.strip() for x in kv.split("=", 1))
+                        if k in ("fg", "bg"):
+                            v = v.strip("{}")
+                            d[k] = self.colors.get(v.replace("structure.fg", "structure")) if v else None
+                        elif k in ("parent", "use"):
+                            for p in v.strip("{}").split(","):
+                                d.update({kk: vv for kk, vv in th.colors.get(p.strip(), {}).items() if kk not in d})
+                if a == "structure" and d.get("fg"):
+                    th.structure = d["fg"]
+                    if th.frametitle_fg == STRUCTURE:
+                        th.frametitle_fg = d["fg"]
+                    self.colors.named["structure"] = d["fg"]
+                if a in ("frametitle", "titlelike"):
+                    if "fg" in d:
+                        th.frametitle_fg = d["fg"] or th.frametitle_fg
+                    if "bg" in d:
+                        th.frametitle_bg = d["bg"]
+                if a == "block title":
+                    th.block_title_fg = d.get("fg") or th.block_title_fg
+                    th.block_title_bg = d.get("bg", th.block_title_bg)
+                if a == "block body" and "bg" in d:
+                    th.block_body_bg = d["bg"]
+            elif name == "setbeamerfont":
+                spec, j = arg(pre, j)
+                f = th.fonts.setdefault(a, {})
+                for kv in (spec or "").split(","):
+                    if "=" in kv:
+                        k, v = (x.strip() for x in kv.split("=", 1))
+                        if k == "size":
+                            mm = re.match(r"\\([A-Za-z]+)", v)
+                            if mm and mm.group(1) in SIZES_11:
+                                f["size"] = mm.group(1)
+                            mm = re.match(r"\{?\s*([\d.]+)\s*\}?", v)
+                            if mm and mm.group(1):
+                                f["size"] = float(mm.group(1))
+                        elif k == "series":
+                            f["bold"] = "bf" in v
+                        elif k == "shape":
+                            f["italic"] = "it" in v or "sl" in v
+            elif name == "setbeamertemplate":
+                k = skip_ws(pre, j)
+                if k < len(pre) and pre[k] == "{":
+                    body, j = balanced(pre, k)
+                    body = body.strip()
+                else:
+                    body = None
+                    o2, j = opt(pre, j)                        # \setbeamertemplate{x}[variant]
+                if a == "footline":
+                    if body is not None:
+                        th.footline = "none" if not body else "custom"
+                        th.footline_src = body or None
+                    elif o2 and "frame number" in o2:
+                        th.footline = "page"
+                elif a == "headline" and body is not None:
+                    pass
+                elif a == "frametitle" and body is not None:
+                    th.frametitle_src = body or None
+                elif a in ("itemize items", "itemize item", "items", "itemize subitem", "itemize subsubitem") and body is None:
+                    if o2:
+                        v = o2.strip()
+                        if v in ("ball", "circle", "square", "triangle", "default"):
+                            th.items = {"default": "triangle"}.get(v, v)
+                elif a == "blocks" and body is None and o2:
+                    th.rounded = th.rounded or "rounded" in o2
+                    o3, j = opt(pre, j)
+                    th.shadow = th.shadow or bool(o3 and "shadow=true" in o3.replace(" ", ""))
+                elif a == "background canvas" and body is not None:
+                    pass
+            elif name == "setbeamersize":
+                for kv in a.split(","):
+                    if "=" in kv:
+                        k, v = (x.strip() for x in kv.split("=", 1))
+                        if k == "text margin left":
+                            th.margin_l = self.length(v, {"width": self.W, "size": self.size("normalsize")})
+                        elif k == "text margin right":
+                            th.margin_r = self.length(v, {"width": self.W, "size": self.size("normalsize")})
+            elif name == "define@key":
+                key, j = arg(pre, j)
+                body, j = arg(pre, j)
+                mm = re.search(r"\\def\s*\\([A-Za-z@]+)\s*\{#1\}", body or "")
+                if a == "beamerframe" and mm and key:
+                    th.frame_keys[key.strip()] = mm.group(1)
+            elif name in ("setsansfont", "setmainfont"):
+                fam = a
+                if o is None:
+                    o, j = opt(pre, j)                         # \setsansfont{name}[options]
+                if name == "setsansfont" or not self.sans:
+                    self.sans = fam
+                    self.sans_opts = o or ""
+            elif name == "usepackage":
+                if re.search(r"(^|,)\s*helvet\s*(,|$)", a):
+                    self.sans = self.sans or "helvet"
+            i = j
+        for w in th.warnings:
+            self.warnings.append(w)
+        th.warnings.clear()
+        self.colors.named["structure"] = th.structure
+        if th.margin_l is None:
+            th.margin_l = self.size("normalsize") * PT          # 1em (infolines)
+        if th.margin_r is None:
+            th.margin_r = self.size("normalsize") * PT
 
     # ------------------------------------------------------------ fonts and measuring
-    def setup_fonts(self):
-        files = {"regular": "lmsans10-regular.otf", "bold": "lmsans10-bold.otf", "italic": "lmsans10-oblique.otf",
-                 "bolditalic": "lmsans10-boldoblique.otf", "mono": "lmmono10-regular.otf"}
-        found = {}
+    def tex_fonts(self, files: dict[str, str]) -> dict[str, Path | None]:
+        found: dict[str, Path | None] = {}
         kpse = find_tool("kpsewhich")
         if kpse:
             try:
@@ -764,10 +1174,52 @@ class BeamerImport:
                     found[k] = next((p for p in paths if p.name == f and p.is_file()), None)
             except (subprocess.TimeoutExpired, OSError):
                 pass
-        self.font = "Latin Modern Sans" if found.get("regular") else "Helvetica Neue"
+        return found
+
+    def setup_fonts(self):
+        """The deck's text font: the document's \\setsansfont / helvet family when it is installed here or ships with
+        TeX (TeX Gyre, Latin Modern: copied into assets/fonts), else Beamer's Latin Modern Sans."""
+        lm = {"regular": "lmsans10-regular.otf", "bold": "lmsans10-bold.otf", "italic": "lmsans10-oblique.otf",
+              "bolditalic": "lmsans10-boldoblique.otf"}
+        mono = self.tex_fonts({"mono": "lmmono10-regular.otf"})
+        found: dict[str, Path | None] = {}
+        self.font = None
+        self.font_bundled = False
+        sans = (self.sans or "").strip()
+        if sans:
+            fam = sans
+            if sans == "helvet":
+                fam = "texgyreheros"
+            stem = re.sub(r"\s+", "", fam.lower()).removesuffix(".otf")
+            tgs = {"texgyreheros": "TeX Gyre Heros", "texgyreadventor": "TeX Gyre Adventor", "texgyretermes": "TeX Gyre Termes",
+                   "texgyrepagella": "TeX Gyre Pagella", "texgyrebonum": "TeX Gyre Bonum", "texgyreschola": "TeX Gyre Schola",
+                   "texgyrecursor": "TeX Gyre Cursor", "latinmodernsans": "Latin Modern Sans", "lmsans10": "Latin Modern Sans"}
+            if stem in tgs or stem in ("helvetica", "arial") and sans == "helvet":
+                if stem.startswith("texgyre"):
+                    files = {k: f"{stem}-{s}.otf" for k, s in (("regular", "regular"), ("bold", "bold"),
+                                                               ("italic", "italic"), ("bolditalic", "bolditalic"))}
+                else:
+                    files = lm
+                found = self.tex_fonts(files)
+                if found.get("regular"):
+                    self.font, self.font_bundled = tgs[stem], True
+            if self.font is None:
+                from .importer import _font
+                installed = {f.lower(): f for f in pango_fonts()}
+                if fam.lower() in installed or _font(fam, False, False) is not None:
+                    self.font = installed.get(fam.lower(), fam)
+                elif sans == "helvet":
+                    self.font = "Helvetica"
+                else:
+                    self.warnings.append(f"the document's font '{fam}' is not installed here; Latin Modern Sans is used")
+        if self.font is None:
+            found = self.tex_fonts(lm)
+            self.font = "Latin Modern Sans" if found.get("regular") else "Helvetica Neue"
+            self.font_bundled = bool(found.get("regular"))
+            if not found.get("regular"):
+                self.warnings.append("Latin Modern Sans (Beamer's font) was not found in a TeX installation; Helvetica Neue is used")
+        found["mono"] = mono.get("mono")
         self.mono = "Latin Modern Mono" if found.get("mono") else "Menlo"
-        if not found.get("regular"):
-            self.warnings.append("Latin Modern Sans (Beamer's font) was not found in a TeX installation; Helvetica Neue is used")
         fonts_dir = self.assets / "fonts"
         for k, p in found.items():
             if p:
@@ -788,7 +1240,8 @@ class BeamerImport:
                 self.pil[key] = None
             if self.pil[key] is None:
                 from .importer import _font_or_fallback
-                self.pil[key] = _font_or_fallback("Helvetica Neue", bool(st.get("b")), bool(st.get("i")))
+                self.pil[key] = _font_or_fallback(self.font if not st.get("tt") else "Menlo", bool(st.get("b")),
+                                                  bool(st.get("i")))
         f = self.pil[key]
         size = st.get("size") or self.size("normalsize")
         if f is None:
@@ -814,6 +1267,22 @@ class BeamerImport:
         if name not in SIZES_11:
             return None
         return SIZES_11[name] * self.base / 11
+
+    def size_of(self, name: str, default: str) -> float:
+        """Size in pt of a beamer font (\\setbeamerfont{name}{size=...}), `default` when not set."""
+        f = self.theme.font(name, default)
+        s = f["size"]
+        return float(s) if not isinstance(s, str) else (self.size(s) or self.size(default))
+
+    def pitch(self, size: float) -> float:
+        """Baseline skip (bp) for a font size: LaTeX's table at this base size, 1.2 em otherwise."""
+        for name, pt in SIZES_11.items():
+            if abs(pt * self.base / 11 - size) < 0.05:
+                return BASELINESKIP_11[name] * self.base / 11 * PT
+        return 1.2 * size
+
+    def textheight(self) -> float:
+        return self.H - TEXTHEIGHT_INSET
 
     def ux(self, x: float) -> float:
         return x * self.u - self.FW / 2
@@ -877,6 +1346,11 @@ class BeamerImport:
                 i = j
                 continue
             fr["sections"] = list(sections)
+            fr["keys"] = {}
+            for kv in re.split(r",(?![^{]*\})", fr["opts"]):
+                if "=" in kv:
+                    k, v = (x.strip() for x in kv.split("=", 1))
+                    fr["keys"][k] = v.strip("{}")
             out.append(fr)
             i = j
         return out
@@ -894,7 +1368,8 @@ class BeamerImport:
                 for para in re.split(r"\n[ \t]*\n", text):
                     if para.strip():
                         out.append({"t": "para", "src": para, "build": buf_build[0], "align": ctx["align"],
-                                    "size": ctx["size"], "color": ctx.get("color"), "italic": ctx.get("italic")})
+                                    "size": ctx["size"], "pitch": ctx.get("pitch"), "color": ctx.get("color"),
+                                    "italic": ctx.get("italic")})
             buf.clear()
             buf_build[0] = st["vis"]
 
@@ -940,6 +1415,35 @@ class BeamerImport:
                 st["vis"] = max(st["vis"] + 1, st["next"])
                 st["next"] = st["vis"]
                 buf_build[0] = st["vis"]
+                i = j
+                continue
+            if name == "par":
+                flush()
+                i = j
+                continue
+            if name in NO_OPS:
+                i = j
+                continue
+            if name in ("newcommand", "renewcommand", "providecommand", "def", "setlength", "addtolength",
+                        "setcounter", "setbeamercolor", "setbeamerfont", "setbeamertemplate", "usebeamercolor",
+                        "usebeamerfont", "usebeamertemplate"):
+                _, j = opt(s, j)
+                _, j = arg(s, j)
+                _, j = opt(s, j)
+                _, j = opt(s, j)
+                k = skip_ws(s, j)
+                if name not in ("usebeamercolor", "usebeamerfont", "usebeamertemplate") and k < len(s) and s[k] == "{":
+                    _, j = balanced(s, k)
+                i = j
+                continue
+            if name == "fontsize" and not "".join(buf).strip():
+                a, j = arg(s, j)
+                b, j = arg(s, j)
+                try:
+                    ctx["size"] = float(re.sub(r"[a-z]+", "", a or "")) * PT
+                    ctx["pitch"] = float(re.sub(r"[a-z]+", "", b or "")) * PT
+                except ValueError:
+                    pass
                 i = j
                 continue
             if name in ("frametitle", "framesubtitle"):
@@ -1020,14 +1524,13 @@ class BeamerImport:
                 add({"t": "vspace", "h": {"bigskip": 12, "medskip": 6, "smallskip": 3}[name] * self.base / 11})
                 i = j
                 continue
-            if name == "centering":
-                flush()
-                ctx["align"] = "center"
-                i = j
-                continue
-            if name in ("raggedright", "raggedleft"):
-                flush()
-                ctx["align"] = "left" if name == "raggedright" else "right"
+            if name in ("centering", "raggedright", "raggedleft"):
+                # inside a group that has not shown text yet ({\tiny\raggedright ...}) the alignment applies to
+                # the paragraph being collected; otherwise it starts a new one
+                sofar = re.sub(r"\\fontsize\s*\{[^}]*\}\s*\{[^}]*\}|\\\\\*?\s*(\[[^\]]*\])?", "", "".join(buf))
+                if re.sub(r"\\[A-Za-z@]+\*?|[{}\s]", "", sofar):
+                    flush()
+                ctx["align"] = {"centering": "center", "raggedright": "left"}.get(name, "right")
                 i = j
                 continue
             if name == "note":
@@ -1047,6 +1550,7 @@ class BeamerImport:
                 continue
             if name in SIZES_11 and not "".join(buf).strip():
                 ctx["size"] = self.size(name)
+                ctx.pop("pitch", None)
                 i = j
                 continue
             if name in ("caption",):
@@ -1078,7 +1582,11 @@ class BeamerImport:
             if dflt and dflt.strip().startswith("<"):
                 ov_dflt = dflt.strip()[1:-1]
             body, k = env_end(s, j, env)
-            add({"t": "list", "kind": env, "items": self.list_items(body, env, st, ctx, ov_dflt), "build": st["vis"]})
+            blk = {"t": "list", "kind": env, "items": self.list_items(body, env, st, ctx, ov_dflt), "build": st["vis"]}
+            mm = re.search(r"\\setlength\s*\{\\itemsep\}\s*\{([^}]*)\}", re.split(r"\\item(?![A-Za-z])", body, 1)[0])
+            if mm:                                          # \setlength{\itemsep}{..} inside the list
+                blk["itemsep"] = self.length(mm.group(1), ctx)
+            add(blk)
             return k
         if env in MATH_ENVS:
             body, k = env_end(s, j, env)
@@ -1165,11 +1673,19 @@ class BeamerImport:
                     width = self.length(w, ctx)
                     cols.append({"width": width, "valign": (o or "c").strip()[:1],
                                  "blocks": self.blocks(inner, st, dict(ctx, width=width, align="left"))})
-            add({"t": "columns", "cols": cols, "build": st["vis"], "valign": (o or "c").strip()[:1]})
+            copts = (o or "").replace(" ", "")
+            tw = re.search(r"totalwidth=([^,\]]*)", copts)
+            add({"t": "columns", "cols": cols, "build": st["vis"], "valign": (o or "c").strip()[:1],
+                 "onlytextwidth": "onlytextwidth" in copts, "total": self.length(tw.group(1), ctx) if tw else None})
             return k
-        # anything else LaTeX draws is typeset with the document's preamble and placed as a picture
+        # anything else LaTeX draws is typeset with the document's preamble and placed as a picture, at the
+        # size in force here
         body, k = env_end(s, j, env)
         raw = f"\\begin{{{env}}}" + s[body_start:k]
+        size = ctx.get("size")
+        if size:
+            name = next((n for n, pt in SIZES_11.items() if abs(pt * self.base / 11 - size) < 0.05), None)
+            raw = ("\\" + name if name else f"\\fontsize{{{size / PT:.2f}}}{{{(ctx.get('pitch') or 1.2 * size) / PT:.2f}}}\\selectfont") + raw
         idx = len(self.snippets)
         self.snippets.append(("picture", raw))
         add({"t": "snippet", "idx": idx, "build": st["vis"], "align": ctx["align"], "env": env})
@@ -1210,7 +1726,12 @@ class BeamerImport:
             start = overlay_start(spec, st)
             if start is not None:
                 st["vis"] = start
-            sub = dict(ctx, level=level, align="left", size=self.size(["normalsize", "small", "footnotesize"][min(level, 3) - 1]))
+            # level 1 keeps the surrounding size (beamer's "itemize/enumerate body" font is empty); deeper levels
+            # are \small and \footnotesize whatever surrounds them
+            sub = dict(ctx, level=level, align="left",
+                       size=ctx["size"] if level == 1 else self.size(["small", "footnotesize"][min(level, 3) - 2]))
+            if level > 1:
+                sub.pop("pitch", None)
             build = st["vis"]
             blocks = self.blocks(body[j:b], st, sub)
             items.append({"label": label, "build": build, "blocks": blocks, "level": level, "kind": env})
@@ -1220,11 +1741,20 @@ class BeamerImport:
 
     def length(self, expr: str, ctx: dict) -> float:
         """A TeX length in bp (\\textwidth, \\linewidth, \\paperwidth, ... and absolute units)."""
-        expr = (expr or "").strip()
+        expr = (expr or "").strip().replace("\\dimexpr", "").replace("\\relax", "").strip()
+        parts = re.split(r"(?<=[a-z}])\s*([+-])\s*(?=[\d.\\])", expr)      # "\paperwidth-.6cm": a sum of terms
+        if len(parts) > 1:
+            total, sign = 0.0, 1
+            for p in parts:
+                if p in ("+", "-"):
+                    sign = 1 if p == "+" else -1
+                else:
+                    total += sign * self.length(p, ctx)
+            return total
         m = re.fullmatch(r"(-?[\d.]*)\s*\\(textwidth|linewidth|columnwidth|hsize|paperwidth|textheight|paperheight)", expr)
         if m:
             f = float(m.group(1)) if m.group(1) not in ("", "-", ".") else 1.0
-            ref = {"paperwidth": self.W, "textheight": self.H - 60, "paperheight": self.H}.get(m.group(2), ctx["width"])
+            ref = {"paperwidth": self.W, "textheight": self.textheight(), "paperheight": self.H}.get(m.group(2), ctx["width"])
             return f * ref
         m = re.fullmatch(r"(-?[\d.]+)\s*(pt|bp|cm|mm|in|em|ex|pc|sp)?(?:\s*plus.*)?", expr)
         if m:
@@ -1326,6 +1856,9 @@ class BeamerImport:
             cands += [p] if p.suffix else [p.with_name(p.name + e) for e in (".png", ".pdf", ".jpg", ".jpeg", ".eps")]
         p = next((c for c in cands if c.is_file()), None)
         if p is None:
+            got = self.image_from_pdf(file)
+            if got:
+                return got
             self.warnings.append(f"the picture {file} was not found")
             return None
         from PIL import Image
@@ -1363,9 +1896,75 @@ class BeamerImport:
         except Exception:                                    # noqa: BLE001
             return name, 200.0, 150.0
 
+    def image_from_pdf(self, file: str) -> tuple[str, float, float] | None:
+        """A picture whose file is missing, taken from a compiled PDF next to the .tex (same stem): the page whose
+        text holds this frame's title, and on it the k-th picture for the frame's k-th \\includegraphics."""
+        pdf = self.src.with_suffix(".pdf")
+        title = plain(self.styled(self.cur_frame.get("title") or "", 10, None)[0])
+        pdfimages, pdftotext = find_tool("pdfimages"), find_tool("pdftotext")
+        if not pdf.is_file() or not title or not pdfimages or not pdftotext:
+            return None
+        if self.pdf_pages is None:
+            try:
+                r = subprocess.run([pdftotext, "-layout", str(pdf), "-"], capture_output=True, text=True, timeout=120)
+                self.pdf_pages = r.stdout.split("\f")
+            except (subprocess.TimeoutExpired, OSError):
+                self.pdf_pages = []
+        if not hasattr(self, "pdf_rows"):
+            try:
+                r = subprocess.run([pdfimages, "-list", str(pdf)], capture_output=True, text=True, timeout=120)
+                self.pdf_rows = [ln.split() for ln in r.stdout.splitlines()[2:]]
+            except (subprocess.TimeoutExpired, OSError):
+                self.pdf_rows = []
+        norm = lambda s: re.sub(r"\s+", " ", s).strip().lower()           # noqa: E731
+        want = norm(title)[:60]
+        k = self.cur_frame.get("n_images", 0)
+        self.cur_frame["n_images"] = k + 1
+        # the first page (from the last one used) whose text holds the title and that has enough pictures
+        start = self.cur_frame.get("pdf_page", self.pdf_used.get("last", 0))
+        page, imgs, rows = None, [], []
+        for i in range(start, len(self.pdf_pages)):
+            if want in norm(self.pdf_pages[i]):
+                rows = [row for row in self.pdf_rows if len(row) > 12 and row[0] == str(i + 1)]
+                imgs = [row for row in rows if row[2] == "image"]
+                if k < len(imgs):
+                    page = i
+                    break
+        if page is None:
+            return None
+        self.cur_frame["pdf_page"] = page
+        self.pdf_used["last"] = page
+        row = imgs[k]
+        pos, ppi = rows.index(row), float(row[12]) or 72.0        # pdfimages numbers the files of one run from 0
+        work = Path(tempfile.mkdtemp(prefix="manimble-pdfimg-"))
+        try:
+            subprocess.run([pdfimages, "-png", "-f", str(page + 1), "-l", str(page + 1), str(pdf), str(work / "i")],
+                           capture_output=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        src = work / f"i-{pos:03d}.png"
+        if not src.is_file():
+            return None
+        from PIL import Image
+        im = Image.open(src).convert("RGBA")
+        mask = work / f"i-{pos + 1:03d}.png"
+        if pos + 1 < len(rows) and rows[pos + 1][2] == "smask" and mask.is_file():
+            try:
+                im.putalpha(Image.open(mask).convert("L").resize(im.size))
+            except Exception:                                   # noqa: BLE001
+                pass
+        self.n_img += 1
+        name = f"img{self.n_img:02d}_{_slug(Path(file).stem, 'image')}.png"
+        im.save(self.assets / name)
+        shutil.rmtree(work, ignore_errors=True)
+        self.warnings.append(f"the picture {file} was not found; a copy was taken from {pdf.name} (page {page + 1})")
+        return name, im.width * 72 / ppi, im.height * 72 / ppi
+
     # ------------------------------------------------------------ layout
     def layout(self, blocks: list[dict], x0: float, x1: float, y: float, placed: list, ctx: dict) -> float:
-        """Place blocks top-down from y (bp) between x0 and x1; append placed items; return the new y."""
+        """Place blocks top-down from y (bp) between x0 and x1; append placed items; return the new y.
+        y is the bottom of the previous line box (its baseline + 0.3 of the baseline skip), so consecutive lines
+        sit one baseline skip apart; lists and pictures add LaTeX's \\topsep (3pt) above and below."""
         prev = None
         for b in blocks:
             t = b["t"]
@@ -1373,10 +1972,9 @@ class BeamerImport:
                 y += b["h"]
                 continue
             if prev is not None and prev in ("para", "verb") and t in ("list", "block", "math"):
-                y += 0.3 * self.size("normalsize")
+                y += ITEMSEP * self.base / 11
             if t == "para":
                 y = self.place_para(b, x0, x1, y, placed, ctx)
-                y += 0.25 * (b.get("size") or self.size("normalsize"))
             elif t == "verb":
                 y = self.place_verb(b, x0, y, placed)
             elif t == "list":
@@ -1430,18 +2028,22 @@ class BeamerImport:
                 total += self.measure(c, st) if c != "\x01" else self.math_width(st["math"], st)
             return total
 
-        cur_w = 0.0
+        cur_w, shrink = 0.0, 0.0
         for wd in words:
             if wd[0][0] == "\n":
                 lines.append(cur)
-                cur, cur_w = [], 0.0
+                cur, cur_w, shrink = [], 0.0, 0.0
                 continue
             ww = width_of([c for c in wd if c[0] != " "])
-            if cur and cur_w + ww > width + 0.5:
+            # TeX justifies: every inter-word space may shrink by a third of its width. Text() cannot, so only
+            # a small overrun (2% of the width) is allowed to keep LaTeX's line breaks
+            if cur and cur_w + ww > width + 0.5 + min(shrink, 0.02 * width):
                 lines.append(cur)
-                cur, cur_w = [], 0.0
+                cur, cur_w, shrink = [], 0.0, 0.0
             cur = cur + wd
             cur_w += width_of(wd)
+            if wd and wd[-1][0] == " ":
+                shrink += self.measure(" ", wd[-1][1]) / 3
         if cur:
             lines.append(cur)
         return [ln for ln in lines] or [[]]
@@ -1449,7 +2051,8 @@ class BeamerImport:
     def math_width(self, math: str, st: dict) -> float:
         return 0.55 * (st.get("size") or self.size("normalsize")) * max(1, len(re.sub(r"\\[A-Za-z]+|[{}^_ ]", "x", math)) * 0.8)
 
-    def text_code(self, lines: list[list], size: float, align: str, box_w: float | None) -> tuple[str, str]:
+    def text_code(self, lines: list[list], size: float, align: str, box_w: float | None, pitch: float | None = None,
+                  font: str = "FONT") -> tuple[str, str]:
         """Text(...) call for wrapped styled lines (soft breaks are ' \\n'), and its trailing comment."""
         text_parts, styles = [], []
         for k, ln in enumerate(lines):
@@ -1465,7 +2068,7 @@ class BeamerImport:
         chars = [s for s in styles]
         colors = [s.get("c") or TEXT for s in chars]
         base_color = max(set(colors), key=colors.count) if colors else TEXT
-        kw = [f"font=FONT", f"font_size={_num(self.fs_text(size), 1)}", f'color="{base_color}"']
+        kw = [f"font={font}", f"font_size={_num(self.fs_text(size), 1)}", f'color="{base_color}"']
         bold = [bool(s.get("b")) for s in chars]
         ital = [bool(s.get("i")) for s in chars]
         mono = [bool(s.get("tt")) for s in chars]
@@ -1501,7 +2104,7 @@ class BeamerImport:
                 kw.append(f"{key}={{" + ", ".join(f'"[{a}:{b}]": "{v}"' for a, b, v in rs) + "}")
         n = len(lines)
         if n > 1:
-            pitch = self.pitch(size)
+            pitch = pitch or self.pitch(size)
             kw.append(f"line_spacing={_num(pitch * self.u * 96 / self.fs_text(size) - 1, 2)}")
         kw.append("disable_ligatures=True")
         urls = [s.get("url") for s in chars if s.get("url")]
@@ -1516,20 +2119,24 @@ class BeamerImport:
             call += f".set(manimble_link={link!r})"
         return call, comment
 
-    def pitch(self, size: float) -> float:
-        return size * 1.22
-
-    def place_para(self, b: dict, x0: float, x1: float, y: float, placed: list, ctx: dict, first_line_x=None) -> float:
+    def place_para(self, b: dict, x0: float, x1: float, y: float, placed: list, ctx: dict, first_line_x=None,
+                   font: str = "FONT") -> float:
         size = b.get("size") or self.size("normalsize")
         indent = ctx.get("indent", 0)
         x0 += indent
         chars, needs_math = self.styled(b["src"], size, b.get("color"), b.get("italic"))
         if not chars:
             return y
+        # the paragraph's size is the size most of its characters have ({\small ...} groups)
+        sizes = [st.get("size") or size for c, st in chars if not c.isspace()]
+        if sizes:
+            size = max(set(sizes), key=sizes.count)
+        pitch = b.get("pitch") or next((st["pitch"] for c, st in chars if st.get("pitch") and st.get("size") == size), None) \
+            or self.pitch(size)
         width = x1 - x0
         lines = self.wrap(chars, width)
-        pitch = self.pitch(size)
-        baseline = y + 0.85 * size
+        baseline = y + 0.7 * pitch
+        b["_baseline"], b["_size"] = baseline, size
         align = b.get("align") or "left"
         if needs_math:
             for k, ln in enumerate(lines):
@@ -1542,19 +2149,19 @@ class BeamerImport:
                 else:
                     pos = f".move_to(({_num(self.ux(x0))}, {_num(self.uy(cy))}, 0), aligned_edge=LEFT)"
                 placed.append((b["build"], f"self.add({code}{pos})  # manimble", y, y + pitch))
-            return baseline + (len(lines) - 1) * pitch + 0.3 * size
+            return baseline + (len(lines) - 1) * pitch + 0.3 * pitch
         line0 = "".join(c for c, _ in lines[0])
         top = baseline - self.ink_top(line0, {"size": size})
-        call, comment = self.text_code(lines, size, align, width if align == "left" else None)
+        call, comment = self.text_code(lines, size, align, width if align == "left" else None, pitch, font)
         if align == "center":
             pos = f".move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy(top))}, 0), aligned_edge=UP)"
         elif align == "right":
             pos = f".move_to(({_num(self.ux(x1))}, {_num(self.uy(top))}, 0), aligned_edge=UR)"
         else:
             pos = f".move_to(({_num(self.ux(x0))}, {_num(self.uy(top))}, 0), aligned_edge=UL)"
-        bottom = baseline + (len(lines) - 1) * pitch + 0.3 * size
-        placed.append((b["build"], f"self.add({call}{pos})  {comment}", top, bottom))
-        return bottom
+        last = baseline + (len(lines) - 1) * pitch
+        placed.append((b["build"], f"self.add({call}{pos})  {comment}", top, last + 0.3 * size))
+        return last + 0.3 * pitch
 
     def math_line(self, line: list, size: float) -> str | None:
         """A MathTex for one line mixing text and maths LaTeX could not turn into characters."""
@@ -1583,7 +2190,7 @@ class BeamerImport:
         size = self.size("small")
         lines = b["text"].strip("\n").split("\n")
         pitch = self.pitch(size)
-        baseline = y + 0.85 * size
+        baseline = y + 0.7 * pitch
         top = baseline - 0.7 * size
         ls = pitch * self.u * 96 / self.fs_text(size) - 1
         call = (f"Text({chr(10).join(lines)!r}, font={self.mono!r}, font_size={_num(self.fs_text(size), 1)}, "
@@ -1593,59 +2200,93 @@ class BeamerImport:
         return baseline + (len(lines) - 1) * pitch + 0.3 * size + 0.3 * size
 
     def place_list(self, b: dict, x0: float, x1: float, y: float, placed: list, ctx: dict) -> float:
+        """Beamer's list spacing: \\topsep 3pt above and below a level-1 list, \\itemsep 3pt between its items
+        (1.35pt before an item that holds a nested list), 2pt above a nested list and no gap between its items."""
         base = self.size("normalsize")
         items = b["items"]
         if not items:
             return y
         level = items[0]["level"]
-        size = self.size(["normalsize", "small", "footnotesize"][min(level, 3) - 1])
+        size = ctx["size"] if level == 1 else self.size(["small", "footnotesize"][min(level, 3) - 2])
         kind = b["kind"]
         text_x = x0 + 1.98 * base
         if kind == "description":
             widest = max((self.measure(plain(self.styled(it["label"] or "", size, None)[0]), {"size": size})
                           for it in items), default=0)
             text_x = x0 + max(1.98 * base, widest + 0.9 * base)
-        y += 0.15 * base if level == 1 else 0.0
+        k = self.base / 11
+        sep = ITEMSEP * k
+        isep = b.get("itemsep")
+        y += sep if level == 1 else 2 * PT * k
         for n, it in enumerate(items):
-            if n:
-                y += 0.21 * size if level == 1 else 0.05 * size
-            start_y = y
-            sub_ctx = dict(ctx, level=level, indent=0)
             inner = it["blocks"]
+            if n and level == 1:
+                y += (1.35 * PT * k if any(blk["t"] == "list" for blk in inner) else sep) if isep is None else isep
+            start_y = y
+            sub_ctx = dict(ctx, level=level, indent=0, size=size)
             for blk in inner:
                 if blk["t"] == "para":
-                    blk.setdefault("size", size)
                     blk["size"] = blk.get("size") or size
             y = self.layout(inner, text_x, x1, y, placed, sub_ctx) if inner else y + self.pitch(size)
-            # trim the paragraph spacing layout() adds after the last paragraph
-            if inner and inner[-1]["t"] == "para":
-                y -= 0.25 * size
-            baseline = start_y + 0.85 * size
-            self.place_label(it, kind, n, level, size, text_x, baseline, placed)
-        return y + (0.3 * base if level == 1 else 0.15 * base)
+            first = next((blk for blk in inner if blk["t"] == "para"), None)
+            if first and first.get("_baseline") is not None:
+                baseline, lsize = first["_baseline"], first["_size"]
+            else:
+                baseline, lsize = start_y + 0.7 * self.pitch(size), size
+            self.place_label(it, kind, n, level, lsize, text_x, baseline, placed)
+        return y + (sep if level == 1 else 0.0)
 
     def place_label(self, it: dict, kind: str, n: int, level: int, size: float, text_x: float, baseline: float, placed: list):
+        th = self.theme
         if it["label"] is not None or kind in ("enumerate", "description"):
             if it["label"] is not None:
-                chars, _ = self.styled(it["label"], size, STRUCTURE if kind != "description" else STRUCTURE)
+                chars, _ = self.styled(it["label"], size, th.structure)
                 label = plain(chars)
             else:
                 label = (f"{n + 1}." if level == 1 else "abcdefghijklmnopqrstuvwxyz"[n % 26] + ".")
             if not label:
                 return
-            w = self.measure(label, {"size": size})
+            if kind == "enumerate" and it["label"] is None and th.items == "ball":
+                # the rounded theme's "item projected": a white number on a ball
+                r = 0.44 * size
+                cx, cy = text_x - 1.03 * size, baseline - 0.37 * size
+                self.ball(it["build"], cx, cy, r, placed)
+                num = label.rstrip(".")
+                code = (f"Text({num!r}, font=FONT, font_size={_num(self.fs_text(0.55 * size), 1)}, color=\"#FFFFFF\", "
+                        f"weight=BOLD, disable_ligatures=True).move_to(({_num(self.ux(cx))}, {_num(self.uy(cy))}, 0))")
+                placed.append((it["build"], f"self.add({code})  # manimble", cy - r, cy + r))
+                return
             right = text_x - 0.4 * size
             top = baseline - self.ink_top(label, {"size": size})
-            code = (f"Text({label!r}, font=FONT, font_size={_num(self.fs_text(size), 1)}, color=\"{STRUCTURE}\", "
+            code = (f"Text({label!r}, font=FONT, font_size={_num(self.fs_text(size), 1)}, color=\"{th.structure}\", "
                     f"disable_ligatures=True).move_to(({_num(self.ux(right))}, {_num(self.uy(top))}, 0), aligned_edge=UR)")
             placed.append((it["build"], f"self.add({code})  # manimble", top, baseline))
+            return
+        if th.items == "ball":
+            r = (0.25 if level == 1 else 0.215) * size
+            self.ball(it["build"], text_x - 0.8 * size, baseline - (0.32 if level == 1 else 0.29) * size, r, placed)
+            return
+        if th.items in ("circle", "square"):
+            r = (0.2 if level == 1 else 0.16) * size
+            cx, cy = text_x - 0.8 * size, baseline - 0.3 * size
+            shape = (f"Circle(radius={_num(r * self.u, 3)}" if th.items == "circle" else
+                     f"Square(side_length={_num(2 * r * self.u, 3)}")
+            code = (f"{shape}, color=\"{th.structure}\", fill_opacity=1, stroke_width=0)"
+                    f".move_to(({_num(self.ux(cx))}, {_num(self.uy(cy))}, 0))")
+            placed.append((it["build"], f"self.add({code})  # manimble", cy - r, cy + r))
             return
         h = (0.6 if level == 1 else 0.45) * size
         cx = text_x - (1.27 if level == 1 else 1.2) * size + h * 0.43
         cy = baseline - 0.33 * size
-        code = (f"Triangle(color=\"{STRUCTURE}\", fill_opacity=1, stroke_width=0).rotate(-PI / 2)"
+        code = (f"Triangle(color=\"{th.structure}\", fill_opacity=1, stroke_width=0).rotate(-PI / 2)"
                 f".scale_to_fit_height({_num(h * self.u, 3)}).move_to(({_num(self.ux(cx))}, {_num(self.uy(cy))}, 0))")
         placed.append((it["build"], f"self.add({code})  # manimble", cy - h / 2, cy + h / 2))
+
+    def ball(self, build: int, cx: float, cy: float, r: float, placed: list):
+        """A shaded sphere bullet (the rounded inner theme), lit from the top left."""
+        code = (f"Circle(radius={_num(r * self.u, 3)}, color=\"{self.theme.structure}\", fill_opacity=1, stroke_width=0)"
+                f".set_sheen(0.35, UL).move_to(({_num(self.ux(cx))}, {_num(self.uy(cy))}, 0))")
+        placed.append((build, f"self.add({code})  # manimble", cy - r, cy + r))
 
     def place_math(self, b: dict, x0: float, x1: float, y: float, placed: list) -> float:
         size = self.size("normalsize")
@@ -1704,14 +2345,48 @@ class BeamerImport:
             obj = f'ImageMobject(ASSETS / "{name}").set(width={_num(w * self.u)})'
         align = b.get("align") or "left"
         cx = {"center": (x0 + x1) / 2, "right": x1 - w / 2}.get(align, x0 + w / 2)
-        y += 0.2 * self.size("normalsize")
+        sep = ITEMSEP * self.base / 11
+        y += sep
         placed.append((b["build"], f"self.add({obj}.move_to(({_num(self.ux(cx))}, {_num(self.uy(y + h / 2))}, 0)))  # manimble",
                        y, y + h))
-        return y + h + 0.2 * self.size("normalsize")
+        return y + h + sep
 
     def place_block(self, b: dict, x0: float, x1: float, y: float, placed: list, ctx: dict) -> float:
         size = self.size("normalsize")
-        color = {"alertblock": ALERT, "exampleblock": EXAMPLE}.get(b["kind"], STRUCTURE)
+        th = self.theme
+        color = {"alertblock": ALERT, "exampleblock": EXAMPLE}.get(b["kind"], th.structure)
+        if th.rounded and th.block_title_bg:
+            # the rounded inner theme: a title bar, a tinted body, rounded corners and a shadow below
+            pitch = self.pitch(size)
+            title_bg = {"alertblock": "#BF0000", "exampleblock": "#008000"}.get(b["kind"], th.block_title_bg)
+            body_bg = mix(title_bg, "#FFFFFF", 10)
+            y += 0.3 * size
+            top = y
+            start = len(placed)
+            if b.get("title"):
+                head_h = pitch + 0.85
+                self.place_para({"src": b["title"], "build": b["build"], "size": size, "color": th.block_title_fg,
+                                 "align": "left"}, x0, x1, y + 0.11 * pitch, placed, ctx)
+                y = top + head_h
+            else:
+                head_h = 0.0
+            body = self.layout(b["blocks"], x0, x1, y - 0.2, placed, ctx)
+            bottom = body + 0.1 * pitch
+            w, r = (x1 - x0) * self.u, 4 * PT * self.u
+            code = []
+            if th.shadow:
+                code.append(f"RoundedRectangle(corner_radius={_num(r, 3)}, width={_num(w)}, height={_num((bottom - top) * self.u)}, "
+                            f"color=\"#808080\", fill_opacity=0.45, stroke_width=0)"
+                            f".move_to(({_num(self.ux((x0 + x1) / 2) + 0.012)}, {_num(self.uy((top + bottom) / 2) - 0.02)}, 0))")
+            code.append(f"RoundedRectangle(corner_radius={_num(r, 3)}, width={_num(w)}, height={_num((bottom - top) * self.u)}, "
+                        f"color=\"{body_bg}\", fill_opacity=1, stroke_width=0)"
+                        f".move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy((top + bottom) / 2))}, 0))")
+            if head_h:
+                code.append(f"Rectangle(width={_num(w)}, height={_num(head_h * self.u)}, color=\"{title_bg}\", fill_opacity=1, "
+                            f"stroke_width=0).move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy(top + head_h / 2))}, 0))")
+            backs = [(b["build"], f"self.add({c})  # manimble", top, bottom) for c in code]
+            placed[start:start] = backs
+            return bottom + 0.5 * size
         y += 0.2 * size
         if b.get("title"):
             y = self.place_para({"src": b["title"], "build": b["build"], "size": size, "color": color, "align": "left"},
@@ -1723,8 +2398,17 @@ class BeamerImport:
     def place_columns(self, b: dict, x0: float, x1: float, y: float, placed: list, ctx: dict) -> float:
         cols = b["cols"]
         total = sum(c["width"] for c in cols)
-        gap = max(0.0, (x1 - x0 - total) / (len(cols) + 1))
-        x = x0 + gap
+        # beamer (beamerbaseframecomponents.sty): the columns sit in a box as wide as the paper (text width plus
+        # both margins) with \hfill before the first and after each one, so what is left is shared between n+1
+        # gaps; with onlytextwidth / totalwidth the box is that wide and has no leading \hfill
+        if b.get("total") or b.get("onlytextwidth"):
+            span = b.get("total") or (x1 - x0)
+            gap = max(0.0, (span - total) / len(cols))
+            x = x0
+        else:
+            left, right = x0 - self.theme.margin_l, x1 + self.theme.margin_r
+            gap = max(0.0, (right - left - total) / (len(cols) + 1))
+            x = left + gap
         results = []
         for c in cols:
             sub: list = []
@@ -1742,10 +2426,15 @@ class BeamerImport:
         return y + tallest + 0.2 * self.size("normalsize")
 
     def place_titlepage(self, b: dict, placed: list):
-        """Title, subtitle, author, institute and date, centred as Beamer's default title page."""
-        rows = [("title", "Large", STRUCTURE, 0), ("subtitle", "normalsize", STRUCTURE, 16.9),
-                ("author", "normalsize", TEXT, 35.4), ("institute", "scriptsize", TEXT, 22.5),
-                ("date", "normalsize", TEXT, 24.5)]
+        """Title, subtitle, author, institute and date, centred as Beamer's default title page; the rounded inner
+        theme (Madrid & co.) puts the title in a rounded, shadowed box in the title colours."""
+        th = self.theme
+        rounded = th.rounded
+        title_fg = th.frametitle_fg if rounded and th.frametitle_bg else th.structure
+        rows = [("title", "Large", title_fg, 0), ("subtitle", "normalsize", title_fg, 16.9),
+                ("author", "normalsize", TEXT, 43.5 if rounded else 35.4),
+                ("institute", "scriptsize", TEXT, 25.2 if rounded else 22.5),
+                ("date", "normalsize", TEXT, 26.9 if rounded else 24.5)]
         items, y = [], 0.0
         for key, sz, color, gap in rows:
             if key not in self.meta or not self.meta[key].strip():
@@ -1753,18 +2442,253 @@ class BeamerImport:
             if items:
                 y += gap * self.base / 11
             src = self.meta[key].replace("\\and", ",\\ ")
-            items.append((y, src, self.size(sz), color))
+            size = self.size_of(key, sz)
+            items.append((key, y, src, size, color))
         if "titlegraphic" in self.meta:
             self.warnings.append("\\titlegraphic is not imported")
         if not items:
             return
-        span = items[-1][0] - items[0][0]
-        y0 = self.H / 2 + 4 - span / 2
-        for yb, src, size, color in items:
+        k = self.base / 11
+        in_box = [it for it in items if it[0] in ("title", "subtitle")]
+        if rounded and in_box and th.frametitle_bg:
+            tsize = in_box[0][3]
+            box_top = in_box[0][1] - 1.69 * tsize
+            box_bot = in_box[-1][1] + 0.98 * in_box[-1][3] + (4 * k if len(in_box) > 1 else 0)
+            span_top, span_bot = box_top, items[-1][1] + 0.3 * items[-1][3]
+            y0 = 105.9 * self.H / 255.12 - 0.4 * (span_bot - span_top) - span_top
+            x0, x1 = 7.0 * self.W / 453.5, self.W - 7.1 * self.W / 453.5
+            w, h, r = (x1 - x0) * self.u, (box_bot - box_top) * self.u, 4 * PT * self.u
+            cx, cy = self.ux((x0 + x1) / 2), self.uy(y0 + (box_top + box_bot) / 2)
+            if th.shadow:
+                placed.append((b["build"], f"self.add(RoundedRectangle(corner_radius={_num(r, 3)}, width={_num(w)}, height={_num(h)}, "
+                               f"color=\"#808080\", fill_opacity=0.5, stroke_width=0).move_to(({_num(cx + 0.03)}, {_num(cy - 0.06)}, 0)))  # manimble",
+                               y0 + box_top, y0 + box_bot))
+            placed.append((b["build"], f"self.add(RoundedRectangle(corner_radius={_num(r, 3)}, width={_num(w)}, height={_num(h)}, "
+                           f"color=\"{th.frametitle_bg}\", fill_opacity=1, stroke_width=0).move_to(({_num(cx)}, {_num(cy)}, 0)))  # manimble",
+                           y0 + box_top, y0 + box_bot))
+        else:
+            span = items[-1][1] - items[0][1]
+            y0 = self.H / 2 + 4 - span / 2
+        for key, yb, src, size, color in items:
             sub: list = []
+            pitch = self.pitch(size)
             self.place_para({"src": src, "build": b["build"], "size": size, "color": color, "align": "center"},
-                            MARGIN, self.W - MARGIN, y0 + yb - 0.85 * size, sub, {})
+                            th.margin_l, self.W - th.margin_r, y0 + yb - 0.7 * pitch, sub, {})
             placed += sub
+
+    # ------------------------------------------------------------ frame title, footline
+    def place_frametitle(self, fr: dict, title: str | None, subtitle: str | None, head: list) -> float:
+        """The frame title (and a theme's title bar); returns the y (bp) where the body may start."""
+        th = self.theme
+        keys = {th.frame_keys[k]: v for k, v in fr.get("keys", {}).items() if k in th.frame_keys}
+        if not title and not (th.frametitle_src and keys):
+            return 0.0
+        tsize = self.size_of("frametitle", "Large")
+        tfont = th.font("frametitle", "Large")
+        pitch = self.pitch(tsize)
+        if th.frametitle_src:
+            lines, bar_h = self.frametitle_template(th.frametitle_src, title or "", subtitle, keys)
+        else:
+            lines = []
+            xh = self.ink_top("x", {"size": tsize})
+            baseline = TITLE_X + pitch - xh                          # sep=0.3cm, \vbox{}\vskip-1ex, then the strut line
+            lines.append({"src": title, "size": tsize, "bold": tfont.get("bold"), "italic": tfont.get("italic"),
+                          "align": "left", "baseline": baseline, "x0": TITLE_X, "x1": self.W - TITLE_X})
+            n = self.n_lines(title, tsize, self.W - 2 * TITLE_X, tfont)
+            bottom = baseline + (n - 1) * pitch + 0.3 * pitch
+            if subtitle:
+                ssize = self.size_of("framesubtitle", "footnotesize")
+                sp = self.pitch(ssize)
+                sb = baseline + (n - 1) * pitch + sp
+                lines.append({"src": subtitle, "size": ssize, "bold": False, "italic": False, "align": "left",
+                              "baseline": sb, "x0": TITLE_X, "x1": self.W - TITLE_X})
+                bottom = sb + 0.3 * sp
+            bar_h = bottom + 0.6
+        if th.frametitle_bg:
+            head.append((0, f"self.add(Rectangle(width={_num(self.FW)}, height={_num(bar_h * self.u)}, color=\"{th.frametitle_bg}\", "
+                            f"fill_opacity=1, stroke_width=0).move_to((0, {_num(self.uy(bar_h / 2))}, 0)))  # manimble",
+                         0.0, bar_h))
+        for ln in lines:
+            if not (ln["src"] or "").strip():
+                continue
+            src = ln["src"]
+            if ln.get("bold"):
+                src = "\\textbf{" + src + "}"
+            if ln.get("italic"):
+                src = "\\textit{" + src + "}"
+            p = self.pitch(ln["size"])
+            self.place_para({"src": src, "build": 0, "size": ln["size"], "color": th.frametitle_fg, "align": ln["align"]},
+                            ln["x0"], ln["x1"], ln["baseline"] - 0.7 * p, head, {})
+        if th.frametitle_bg:
+            return bar_h
+        return max(27.0 * self.base / 11, bar_h - 0.6)
+
+    def n_lines(self, src: str, size: float, width: float, font: dict | None = None) -> int:
+        """How many lines LaTeX needs for src at this size in this width."""
+        if not (src or "").strip():
+            return 1
+        if font and font.get("bold"):
+            src = "\\textbf{" + src + "}"
+        chars, _ = self.styled(src, size, None)
+        return max(1, len(self.wrap(chars, width))) if chars else 1
+
+    def frametitle_template(self, src: str, title: str, subtitle: str | None, keys: dict) -> tuple[list, float]:
+        """A custom \\setbeamertemplate{frametitle}: its lines (\\hbox{...} and ...\\par runs) stacked the way TeX
+        stacks them (\\vskip, struts, interline glue), with \\usebeamerfont sizes and frame-key macros."""
+        th = self.theme
+        k = self.base / 11
+        src = re.sub(r"\\ifx\\insertframesubtitle\\@empty(.*?)(?:\\else(.*?))?\\fi",
+                     lambda m: (m.group(1) if not subtitle else (m.group(2) or "")), src, flags=re.S)
+        src = re.sub(r"\\if@tempswa.*?\\fi", "", src, flags=re.S)
+        for macro, val in keys.items():
+            src = re.sub(r"\\" + macro + r"(?![A-Za-z@])", lambda m: "{" + val + "}", src)
+        for macro in th.frame_keys.values():
+            src = re.sub(r"\\" + macro + r"(?![A-Za-z@])", "{}", src)
+        src = src.replace("\\insertframetitle", "{" + title + "}").replace("\\insertframesubtitle", "{" + (subtitle or "") + "}")
+        leftskip = rightskip = 0.0
+        sep = 0.0
+        m = re.search(r"\\begin\{beamercolorbox\}\s*(?:\[([^\]]*)\])?", src)
+        if m:
+            for kv in (m.group(1) or "").split(","):
+                if "=" in kv:
+                    kk, vv = (x.strip() for x in kv.split("=", 1))
+                    L = self.length(vv, {"width": self.W, "size": self.size("normalsize")})
+                    if kk == "leftskip":
+                        leftskip = L
+                    elif kk == "rightskip":
+                        rightskip = L
+                    elif kk == "sep":
+                        sep = L
+        src = re.sub(r"\\begin\{beamercolorbox\}\s*(?:\[[^\]]*\])?\s*\{[^}]*\}|\\end\{beamercolorbox\}", "", src)
+        y = 7.5 * k + sep
+        pending = 0.0
+        prevdepth = None
+        lines: list[dict] = []
+        cur_font = "frametitle"
+        text: list[str] = []
+        pat = re.compile(r"\\vskip\s*(-?[\d.]+\s*[a-z]{2})|\\vbox\s*\{\s*\}|\\hbox(\s+to\s*([^{]*))?\s*\{|\\par(?![A-Za-z])|"
+                         r"\\usebeamerfont\s*\{([^}]*)\}|\\usebeamercolor\s*(?:\[[^\]]*\])?\s*\{[^}]*\}|"
+                         r"\\(nointerlineskip|strut|relax|leavevmode|noindent)(?![A-Za-z])")
+
+        def emit(content: str, font: str, x0: float, x1: float):
+            nonlocal y, pending, prevdepth
+            fsize = self.size_of(font, "Large" if font == "frametitle" else "normalsize")
+            f = th.font(font, "normalsize")
+            bs = self.pitch(fsize)
+            h, d = 0.7 * bs, 0.3 * bs
+            if prevdepth is None:
+                baseline = y + pending + h
+            else:
+                glue = bs - prevdepth - h
+                baseline = y + pending + (glue if glue >= 0 else PT) + h
+            align = "left"
+            c = content.strip()
+            if c.startswith("\\hfill"):
+                c = c[len("\\hfill"):]
+                align = "right"
+                if c.rstrip().endswith("\\hfill"):
+                    c = c.rstrip()[:-len("\\hfill")]
+                    align = "center"
+            n = self.n_lines(c, fsize, x1 - x0, f)
+            y, pending, prevdepth = baseline + (n - 1) * bs + d, 0.0, d
+            lines.append({"src": c, "size": fsize, "bold": f.get("bold"), "italic": f.get("italic"), "align": align,
+                          "baseline": baseline, "x0": x0, "x1": x1})
+
+        i = 0
+        while i < len(src):
+            m = pat.search(src, i)
+            if not m:
+                text.append(src[i:])
+                break
+            text.append(src[i:m.start()])
+            tok = m.group(0)
+            i = m.end()
+            if tok.startswith("\\vskip"):
+                pending += self.length(m.group(1), {"width": self.W, "size": self.size("normalsize")})
+            elif tok.startswith("\\vbox"):
+                if prevdepth is None:
+                    y += pending
+                    pending = 0.0
+                prevdepth = 0.0
+            elif tok.startswith("\\hbox"):
+                body, i = balanced(src, i - 1)
+                fm = re.search(r"\\usebeamerfont\s*\{([^}]*)\}", body)
+                font = fm.group(1).strip() if fm else cur_font
+                body = re.sub(r"\\usebeamerfont\s*\{[^}]*\}|\\usebeamercolor\s*(?:\[[^\]]*\])?\s*\{[^}]*\}|\\strut", "", body)
+                L = self.length(m.group(3).replace("\\dimexpr", "").replace("\\relax", "").strip(), {"width": self.W, "size": self.size("normalsize")}) \
+                    if m.group(3) else self.W - leftskip - rightskip
+                emit(body, font, leftskip, leftskip + L - rightskip)
+                text = []
+            elif tok.startswith("\\par"):
+                if "".join(text).strip():
+                    emit("".join(text), cur_font, leftskip, self.W - rightskip)
+                text = []
+            elif tok.startswith("\\usebeamerfont"):
+                cur_font = m.group(4).strip()
+        if "".join(text).strip():
+            emit("".join(text), cur_font, leftskip, self.W - rightskip)
+        bar_h = y + pending + sep
+        return lines, bar_h
+
+    def place_footline(self, n: int, total: int, head: list):
+        th = self.theme
+        k = self.base / 11
+        tiny = self.size_of("page number in head/foot", "tiny")
+        if th.footline == "infolines":
+            fh = 10.1 * k
+            boxes = [("palette tertiary", mix(th.structure, "#000000", 50), "author", "center"),
+                     ("palette secondary", mix(th.structure, "#000000", 75), "title", "center"),
+                     ("palette primary", th.structure, "date", "right")]
+            bw = self.W / 3
+            for bi, (pal, dflt_bg, key, align) in enumerate(boxes):
+                fg, bg = th.palette(pal, "#FFFFFF", dflt_bg)
+                x0, x1 = bi * bw, (bi + 1) * bw
+                if bg:
+                    head.append((0, f"self.add(Rectangle(width={_num(bw * self.u)}, height={_num(fh * self.u)}, color=\"{bg}\", "
+                                    f"fill_opacity=1, stroke_width=0).move_to(({_num(self.ux((x0 + x1) / 2))}, {_num(self.uy(self.H - fh / 2))}, 0)))  # manimble",
+                                 self.H - fh, self.H))
+                if key == "author":
+                    src = self.meta_short.get("author", self.meta.get("author", ""))
+                    inst = self.meta_short.get("institute", self.meta.get("institute", ""))
+                    if inst.strip():
+                        src += "~~(" + inst + ")"
+                elif key == "title":
+                    src = self.meta_short.get("title", self.meta.get("title", ""))
+                else:
+                    src = self.meta_short.get("date", self.meta.get("date", "")) + f"\\hspace*{{2em}}{n} / {total}"
+                src = src.replace("\\and", ", ")
+                if not src.strip():
+                    continue
+                pitch = self.pitch(tiny)
+                baseline = self.H - 3.9 * k
+                inset = 2 * 0.5 * tiny
+                self.place_para({"src": src, "build": 0, "size": tiny, "color": fg, "align": align},
+                                x0 + inset, x1 - inset, baseline - 0.7 * pitch, head, {})
+            return
+        if th.footline == "page":
+            src, right_inset, bottom, color = f"{n} / {total}", 2 * self.size("normalsize"), 2 * PT * k, th.structure
+        elif th.footline == "custom" and th.footline_src and "\\insertframenumber" in th.footline_src:
+            fs = th.footline_src
+            m = re.search(r"\\insertframenumber\s*(?:\{\})?(.*?)\\inserttotalframenumber", fs, flags=re.S)
+            src = f"{n}{m.group(1)}{total}" if m else str(n)
+            fm = re.search(r"\\usebeamerfont\s*\{([^}]*)\}", fs)
+            tiny = self.size_of(fm.group(1).strip(), "tiny") if fm else tiny
+            hm = re.search(r"\\hspace\*?\s*\{([^}]*)\}\s*(?:\\vskip|$)", fs.replace("\n", " ").strip())
+            right_inset = self.length(hm.group(1), {"width": self.W, "size": tiny}) if hm else 0.0
+            vm = re.search(r"\\vskip\s*(-?[\d.]+\s*[a-z]{2})", fs)
+            bottom = self.length(vm.group(1), {"width": self.W, "size": tiny}) if vm else 0.0
+            cm = re.search(r"\\usebeamercolor\s*\[fg\]\s*\{([^}]*)\}", fs)
+            color = (th.colors.get(cm.group(1).strip(), {}).get("fg") if cm else None) or TEXT
+            if "beamercolorbox" in fs:
+                self.warnings.append("the custom footline's boxes are not drawn; only its frame number is")
+        else:
+            if th.footline == "custom":
+                self.warnings.append("the custom footline is not reproduced")
+            return
+        pitch = self.pitch(tiny)
+        baseline = self.H - bottom
+        self.place_para({"src": src, "build": 0, "size": tiny, "color": color, "align": "right"},
+                        th.margin_l, self.W - right_inset, baseline - 0.7 * pitch, head, {})
 
     # ------------------------------------------------------------ the deck
     def run(self, progress=None) -> dict:
@@ -1797,37 +2721,33 @@ class BeamerImport:
             progress(0, len(parsed) + 1, "typesetting")
         self.typeset_snippets()
         classes, names = [], []
+        th = self.theme
         for fi, (fr, ctx, blocks) in enumerate(parsed, start=1):
             if progress:
                 progress(fi, len(parsed) + 1, f"frame {fi}")
             placed: list = []
             title = ctx["frame"].get("frametitle")
             subtitle = ctx["frame"].get("framesubtitle")
+            self.cur_frame = {"title": title, "index": fi, "n_images": 0}
             head: list = []
-            title_bottom = 0.0
-            if title:
-                size = self.size("Large")
-                self.place_para({"src": title, "build": 0, "size": size, "color": STRUCTURE, "align": "left"},
-                                TITLE_X, self.W - TITLE_X, 20.7 * self.base / 11 - 0.85 * size, head, {})
-                title_bottom = 27.0
-                if subtitle:
-                    ss = self.size("footnotesize")
-                    self.place_para({"src": subtitle, "build": 0, "size": ss, "color": STRUCTURE, "align": "left"},
-                                    TITLE_X, self.W - TITLE_X, 34.8 * self.base / 11 - 0.85 * ss, head, {})
-                    title_bottom = 38.0
-            self.layout(blocks, MARGIN, self.W - MARGIN, 0.0, placed, ctx)
-            body_items = [p for p in placed if not any(b["t"] == "titlepage" for b in blocks)]
+            title_bottom = self.place_frametitle(fr, title, subtitle, head)
+            is_title = any(b["t"] == "titlepage" for b in blocks)
+            if not is_title or th.footline == "custom":
+                self.place_footline(fi, len(parsed), head)
+            self.layout(blocks, th.margin_l, self.W - th.margin_r, 0.0, placed, ctx)
+            body_items = [p for p in placed if not is_title]
             if body_items:
                 top = min(p[2] for p in body_items)
                 bot = max(p[3] for p in body_items)
                 opts = fr["opts"].replace(" ", "").split(",")
                 if "t" in opts:
-                    dy = title_bottom + 8 - top if title else 10 - top
+                    dy = title_bottom + 12.7 * self.base / 11 - top
                 elif "b" in opts:
                     dy = self.H - 12 - bot
                 else:
-                    dy = (self.H / 2 + 1) - (top + bot) / 2
-                    dy = max(dy, title_bottom + 6 - top)
+                    # beamer leaves 40% of the free space above the content and 60% below (measured)
+                    dy = (0.4 * self.H + 17 * self.H / 255.12) - 0.4 * (bot - top) - top
+                    dy = max(dy, title_bottom + 4 - top)
                 if bot + dy > self.H + 2:
                     self.warnings.append(f"frame {fi}: the content runs off the bottom of the slide")
                 placed = [shift(p, dy, self) if p in body_items else p for p in placed]
@@ -1878,9 +2798,9 @@ class BeamerImport:
             setup = ""
         fonts = ""
         if any(self.font_files.values()):
-            fonts = ('\n\ndef _register_fonts():\n    """Beamer\'s Latin Modern fonts, copied from the TeX installation into assets/fonts."""\n'
+            fonts = ('\n\ndef _register_fonts():\n    """The document\'s TeX fonts, copied from the TeX installation into assets/fonts."""\n'
                      "    try:\n        import manimpango\n    except Exception:\n        return\n"
-                     '    for f in sorted((ASSETS / "fonts").glob("*.otf")):\n        try:\n'
+                     '    for f in sorted((ASSETS / "fonts").glob("*.[ot]tf")):\n        try:\n'
                      "            manimpango.register_font(str(f))\n        except Exception:\n            pass\n\n\n"
                      "_register_fonts()\n")
         (self.deck / "common.py").write_text(
@@ -1912,6 +2832,21 @@ def pyraw(s: str) -> str:
     if '"' not in s and not s.endswith("\\") and "\n" not in s:
         return 'r"' + s + '"'
     return repr(s)
+
+
+_PANGO_FONTS: list[str] | None = None
+
+
+def pango_fonts() -> list[str]:
+    """Font families Pango (manim's Text) can use on this machine."""
+    global _PANGO_FONTS
+    if _PANGO_FONTS is None:
+        try:
+            import manimpango
+            _PANGO_FONTS = list(manimpango.list_fonts())
+        except Exception:                                        # noqa: BLE001
+            _PANGO_FONTS = []
+    return _PANGO_FONTS
 
 
 def find_tool(name: str) -> str | None:

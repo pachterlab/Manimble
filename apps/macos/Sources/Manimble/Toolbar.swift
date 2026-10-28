@@ -447,7 +447,6 @@ extension MainController: NSToolbarDelegate {
 
     func runImport(label: String) {
         let exts = label.hasPrefix("Beamer") ? ["tex", "ltx"] : ["ppt", "pptx", "key"]
-        guard confirmClose(for: "importing a presentation") else { return }
         // Folders stay choosable so tagged folders show up under the sidebar's Tags; picking one
         // reopens the panel inside it instead of importing it.
         var src: URL?

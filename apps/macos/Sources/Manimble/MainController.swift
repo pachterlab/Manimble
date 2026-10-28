@@ -38,7 +38,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     // Opening a deck can happen while startup is still searching for Python.
     // Keep the selection and open it as soon as launch() has started the engine.
-    private var pendingDeck: String?
+    private(set) var pendingDeck: String?
     private var setup: Setup?
     var state: StateInfo?
     var showUnusedSlides = false
@@ -549,22 +549,28 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     /// Open what File ▸ Open, a launch argument or the Dock/Finder hands over: a deck folder, a Manimble project
-    /// folder, a .manimble package, or a file inside a deck folder (its deck is opened).
+    /// folder, a .manimble package, or a file inside a deck folder (its deck is opened). With a deck already in this
+    /// window it opens in a new one, and a deck open in some window is brought to the front instead.
     func openProject(at u: URL) {
         do {
             let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             if u.pathExtension.lowercased() == "manimble" && !isDir {
-                open(deck: try PortableProject.unpackArchive(u).path)
+                openInWindow(deck: try PortableProject.unpackArchive(u).path)
             } else if isDir, let deck = try PortableProject.deckURL(in: u) {
-                open(deck: deck.path)
+                openInWindow(deck: deck.path)
             } else if isDir {
-                open(deck: u.path)
+                openInWindow(deck: u.path)
             } else if FileManager.default.fileExists(atPath: u.deletingLastPathComponent().appendingPathComponent("order.txt").path) {
-                open(deck: u.deletingLastPathComponent().path)
+                openInWindow(deck: u.deletingLastPathComponent().path)
             } else {
                 alert("Could not open project", "Choose a deck folder or a .manimble package.")
             }
         } catch { alert("Could not open project", "\(error.localizedDescription)") }
+    }
+
+    /// Open `deck` here when this window is empty, otherwise in its own window (or the window already showing it).
+    func openInWindow(deck: String) {
+        if let app = NSApp.delegate as? AppDelegate { app.show(deck: deck, from: self) } else { open(deck: deck) }
     }
 
     @objc func saveProjectFolderPressed() {
@@ -838,7 +844,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 let n = ev["slides"] as? Int ?? 0
                 let warn = (ev["warnings"] as? [String]) ?? []
                 toast("Imported \(n) slides" + (warn.isEmpty ? "" : " — " + warn.prefix(2).joined(separator: "; ")), error: !warn.isEmpty)
-                if let d = ev["deck"] as? String { open(deck: d, confirmed: true) }
+                if let d = ev["deck"] as? String { openInWindow(deck: d) }
             default:
                 busyPill.hide(); toast(ev["error"] as? String ?? "import failed", error: true)
             }

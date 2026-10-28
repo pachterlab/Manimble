@@ -31,12 +31,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         c.showWindow()
         NSApp.activate(ignoringOtherApps: true)
         // a deck given at launch wins over the last one; the engine opens it once it is running
-        if let u = (launchURLs + commandLineDecks()).first { c.openProject(at: u) }
+        for u in launchURLs + commandLineDecks() { c.openProject(at: u) }
         c.start()
     }
 
-    /// File ▸ New Deck… with a deck already open: a second window with its own engine, cascaded off the current one.
-    @MainActor func openInNewWindow(deck: String) {
+    /// Open a deck in `c`'s window if it is empty; else bring forward the window already showing that deck, or
+    /// make a new one for it.
+    @MainActor func show(deck: String, from c: MainController) {
+        let target = URL(fileURLWithPath: deck).standardizedFileURL.resolvingSymlinksInPath()
+        if let w = controllers.first(where: { $0.workspace?.original == target }) {
+            w.window.makeKeyAndOrderFront(nil)
+        } else if c.workspace == nil && c.pendingDeck == nil {
+            c.open(deck: deck, confirmed: true)
+        } else {
+            openInNewWindow(deck: deck)
+        }
+    }
+
+    /// A second window with its own engine, cascaded off the current one.
+    @MainActor private func openInNewWindow(deck: String) {
         let previous = controller
         let c = MainController()
         controllers.append(c)
@@ -59,8 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// `open -a Manimble <deck>`, a drop on the Dock icon, Finder's Open With.
     func application(_ app: NSApplication, open urls: [URL]) {
-        guard let c = controller else { launchURLs += urls; return }
-        if let u = urls.first { c.openProject(at: u) }
+        guard controller != nil else { launchURLs += urls; return }
+        for u in urls { controller.openProject(at: u) }
     }
 
     /// Paths on the command line (`Manimble.app/Contents/MacOS/Manimble <deck>`), skipping `-Key value` defaults.

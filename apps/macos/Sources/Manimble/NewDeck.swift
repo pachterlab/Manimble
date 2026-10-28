@@ -39,11 +39,7 @@ extension MainController {
             alert("Could not create the deck", "\(error.localizedDescription)")
             return
         }
-        if workspace != nil, let app = NSApp.delegate as? AppDelegate {
-            app.openInNewWindow(deck: deck.path)
-        } else {
-            open(deck: deck.path, confirmed: true)
-        }
+        openInWindow(deck: deck.path)
     }
 
     /// A title slide laid out like Slide ▸ New Slide ▸ Title Slide, on the theme's common.py (the importer's plain
