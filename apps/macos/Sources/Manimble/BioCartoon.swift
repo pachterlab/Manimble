@@ -13,7 +13,7 @@ struct BCIcon: Codable, Equatable {
     var author: String?
     var url: String?            // a web URL, or a local path for the user's own uploads
     var png_local: String?
-    var thumb_url: String?      // a small preview for the tile, when the catalog has one (biocartoon 0.4.2+)
+    var thumb_url: String?      // a small preview for the tile, when the catalog has one
     var width: Double?
     var height: Double?
     var svg_key: String?        // set when the icon is published as SVG
@@ -146,9 +146,9 @@ enum BioCartoonCLI {
     }
 
     /// The oldest `biocartoon` Manimble works with: it lists icons' taxonomy (`taxa`) and calls the databases' own
-    /// categories source categories (`--source-category`, `source_categories`), and filters by tag (`--tags`). Keep in step
-    /// with engine/requirements.txt.
-    static let minimumVersion = "0.4.0"
+    /// categories source categories (`--source-category`, `source_categories`), filters by tag (`--tags`), and lists the
+    /// small previews result tiles load (`thumb_url`). Keep in step with engine/requirements.txt.
+    static let minimumVersion = "0.4.2"
 
     static func supported(_ version: String) -> Bool {
         version.compare(minimumVersion, options: .numeric) != .orderedAscending
