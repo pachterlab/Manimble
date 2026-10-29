@@ -76,10 +76,13 @@ func fieldLabel(_ s: String) -> NSTextField {
     return l
 }
 
-/// A thin separator line.
-func hairline() -> NSView {
-    let v = NSBox(); v.boxType = .separator
-    return v
+/// A thin separator line. Not an NSBox separator: its inner line view keeps a fixed width from the first layout,
+/// which then holds the window at that width (a frame saved on a wider display stayed wider than the screen).
+func hairline() -> NSView { Hairline() }
+
+private final class Hairline: NSView {
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 1) }
+    override func draw(_ dirtyRect: NSRect) { NSColor.separatorColor.setFill(); bounds.fill() }
 }
 
 /// A thin accent progress bar. `set` fills it to a known fraction; `run` drives it on a time estimate: it reaches

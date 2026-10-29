@@ -41,7 +41,7 @@ final class LatexBanner: NSView {
         row.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
-        let line = NSBox(); line.boxType = .separator; line.translatesAutoresizingMaskIntoConstraints = false
+        let line = hairline(); line.translatesAutoresizingMaskIntoConstraints = false
         addSubview(line)
         height = heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([

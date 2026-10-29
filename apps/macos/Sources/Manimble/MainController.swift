@@ -156,8 +156,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.delegate = self
         window.tabbingMode = .disallowed        // a new deck opens in its own window, not a tab
         window.isReleasedWhenClosed = false     // closing it closes the deck; the window comes back for the next one
-        window.minSize = NSSize(width: 1000, height: 600)
         window.setFrameAutosaveName("manimble.main")
+        fitWindowToScreen()                     // before the panes are first laid out: their sizes would widen it again
         window.contentView = buildUI()
         window.toolbar = makeToolbar()
         window.toolbarStyle = .unified
@@ -430,6 +430,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         split.setHoldingPriority(.init(260), forSubviewAt: 0)
         split.setHoldingPriority(.init(250), forSubviewAt: 2)
         split.collapsesEdgePanes = true                    // push a side panel all the way off; drag the edge to bring it back
+        fitSavedSplit("manimble.split", to: (window.screen ?? NSScreen.main)?.visibleFrame.width, mins: [190, 500, 280])
         split.autosaveName = "manimble.split"            // remembers where you dragged the dividers
         mainSplit = split
         sideScroll = side
@@ -3140,6 +3141,43 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { confirmClose(for: "closing") }
+    func windowDidChangeScreen(_ n: Notification) { fitWindowToScreen() }
+
+    /// Shrink pane widths an NSSplitView saved on a wider display so they fit `width`: restored frames that add up
+    /// to more than the window make the split view grow the window past the screen edge. The centre pane gives
+    /// way first, then the side panes, none below its minimum.
+    func fitSavedSplit(_ name: String, to width: CGFloat?, mins: [CGFloat]) {
+        let key = "NSSplitView Subview Frames " + name
+        guard let width, var rows = UserDefaults.standard.stringArray(forKey: key)?.map({ $0.components(separatedBy: ", ") }),
+              rows.count == mins.count, rows.allSatisfy({ $0.count >= 4 && Double($0[2]) != nil }) else { return }
+        var widths = rows.map { CGFloat(Double($0[2])!) }
+        let open = rows.map { $0.count < 5 || $0[4] != "YES" }        // collapsed panes take no room
+        var excess = zip(widths, open).reduce(0) { $0 + ($1.1 ? $1.0 : 0) } + CGFloat(rows.count - 1) * 9 - width
+        guard excess > 0 else { return }
+        for i in [1, 2, 0] where open[i] && excess > 0 {
+            let cut = min(excess, max(0, widths[i] - mins[i]))
+            widths[i] -= cut; excess -= cut
+        }
+        var x: CGFloat = 0
+        for i in rows.indices {
+            rows[i][0] = String(format: "%f", x); rows[i][2] = String(format: "%f", widths[i])
+            x += (open[i] ? widths[i] : 0) + 9
+        }
+        UserDefaults.standard.set(rows.map { $0.joined(separator: ", ") }, forKey: key)
+    }
+
+    /// Keep the window inside its screen's visible area: the 1500×920 default (or a frame saved on a larger
+    /// display) is wider than a 13–14" MacBook's 1280–1470 pt and taller than what the menu bar and Dock leave.
+    func fitWindowToScreen() {
+        guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+        window.minSize = NSSize(width: min(1000, visible.width), height: min(600, visible.height))
+        var f = window.frame
+        guard f.width > visible.width || f.height > visible.height else { return }
+        f.size = NSSize(width: min(f.width, visible.width), height: min(f.height, visible.height))
+        f.origin.x = min(max(f.minX, visible.minX), visible.maxX - f.width)
+        f.origin.y = min(max(f.minY, visible.minY), visible.maxY - f.height)
+        window.setFrame(f, display: true)
+    }
     func windowWillClose(_ n: Notification) {
         closeDeck()
         (NSApp.delegate as? AppDelegate)?.windowClosed(self)

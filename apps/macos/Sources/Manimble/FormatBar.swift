@@ -143,6 +143,9 @@ final class FormatBar: NSView {
         for v in paraGroup { stack.setVisibilityPriority(.detachOnlyIfNecessary, for: v) }
         for v in viewGroup { stack.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: 700), for: v) }
         stack.setCustomSpacing(2, after: sizeField)
+        // give way to the window's width (priority 500) so a narrow screen detaches the groups above instead of
+        // holding the window wider than the screen
+        stack.setClippingResistancePriority(.init(490), for: .horizontal)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         addSubview(script)

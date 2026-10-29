@@ -832,7 +832,7 @@ class _Importer:
     # ----------------------------------------------------------------------------------------------- pictures
     def emit_picture(self, shape, el, xf: _Xf, ctx: dict):
         qn = self.qn
-        box = self.box_of(el.find(qn("p:spPr") + "/" + qn("a:xfrm")), xf)
+        box = self.box_of(self.shape_xfrm(el, ctx["slide"]), xf)
         if box is None:
             return
         try:
@@ -1372,7 +1372,7 @@ class _Importer:
         theme: _Theme = ctx["theme"]
         spPr = el.find(qn("p:spPr"))
         style = el.find(qn("p:style"))
-        box = self.box_of(spPr.find(qn("a:xfrm")) if spPr is not None else None, xf)
+        box = self.box_of(self.shape_xfrm(el, ctx["slide"]), xf)
         if box is None:
             return
         prst_el = spPr.find(qn("a:prstGeom"))
@@ -1667,15 +1667,14 @@ class _Importer:
                 if branch is not None:
                     yield from self.iter_shapes(shapes, branch)
 
-    def placeholder_chain(self, el, slide):
-        """([lstStyle containers of the layout and master placeholders], kind, [their bodyPr])."""
+    def placeholder_sources(self, el, slide) -> list:
+        """The layout and master placeholders that a slide placeholder inherits from, nearest first."""
         qn = self.qn
-        ph = el.find(qn("p:nvSpPr") + "/" + qn("p:nvPr") + "/" + qn("p:ph"))
+        ph = el.find("./*/" + qn("p:nvPr") + "/" + qn("p:ph"))
         if ph is None:
-            return [], "other", []
+            return []
         typ, idx = ph.get("type", "body"), ph.get("idx")
-        kind = "title" if typ in ("title", "ctrTitle") else "body"
-        containers, bodies = [], []
+        sources = []
         layout = slide.slide_layout
         for holder, by_idx in ((layout, True), (layout.slide_master, False)):
             match = None
@@ -1691,11 +1690,35 @@ class _Importer:
                 if same.get(stype, stype) == same.get(typ, typ) and match is None:
                     match = sh
             if match is not None:
-                tb = match._element.find(qn("p:txBody"))
-                if tb is not None:
-                    containers.append(tb.find(qn("a:lstStyle")))
-                    bodies.append(tb.find(qn("a:bodyPr")))
+                sources.append(match._element)
+        return sources
+
+    def placeholder_chain(self, el, slide):
+        """([lstStyle containers of the layout and master placeholders], kind, [their bodyPr])."""
+        qn = self.qn
+        ph = el.find("./*/" + qn("p:nvPr") + "/" + qn("p:ph"))
+        if ph is None:
+            return [], "other", []
+        kind = "title" if ph.get("type", "body") in ("title", "ctrTitle") else "body"
+        containers, bodies = [], []
+        for src in self.placeholder_sources(el, slide):
+            tb = src.find(qn("p:txBody"))
+            if tb is not None:
+                containers.append(tb.find(qn("a:lstStyle")))
+                bodies.append(tb.find(qn("a:bodyPr")))
         return containers, kind, bodies
+
+    def shape_xfrm(self, el, slide):
+        """A shape's own <a:xfrm>, or, for a placeholder without one, the nearest layout/master position."""
+        qn = self.qn
+        path = qn("p:spPr") + "/" + qn("a:xfrm")
+        xfrm = el.find(path)
+        if xfrm is None:
+            for src in self.placeholder_sources(el, slide):
+                xfrm = src.find(path)
+                if xfrm is not None:
+                    break
+        return xfrm
 
     @staticmethod
     def _lvl(container, level):
