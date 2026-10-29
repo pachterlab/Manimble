@@ -1720,11 +1720,11 @@ class _Importer:
                     break
         return xfrm
 
-    @staticmethod
-    def _lvl(container, level):
+    def _lvl(self, container, level):
+        # a:lvlNpPr in both a:lstStyle and the master's p:titleStyle/p:bodyStyle/p:otherStyle
         if container is None:
             return None
-        return container.find(container.tag.rsplit("}", 1)[0] + "}" + f"lvl{level + 1}pPr")
+        return container.find(self.qn(f"a:lvl{level + 1}pPr"))
 
     @staticmethod
     def _attr(chain, attr):
@@ -1978,9 +1978,10 @@ class _Importer:
                 return (ascent - bb[1]) / 1000 if which == 0 else (bb[3] - ascent) / 1000
 
             def sp(v):
+                # shrink-on-overflow's lnSpcReduction tightens the space between paragraphs as well as lines
                 if v is None:
                     return 0.0
-                return v[1] * 12700 if v[0] == "pts" else v[1] * line_em * size_emu
+                return (v[1] * 12700 if v[0] == "pts" else v[1] * line_em * size_emu) * spacing_scale
 
             widths, off = [], 0
             for ln in text_lines:
