@@ -13,6 +13,7 @@ struct BCIcon: Codable, Equatable {
     var author: String?
     var url: String?            // a web URL, or a local path for the user's own uploads
     var png_local: String?
+    var thumb_url: String?      // a small preview for the tile, when the catalog has one (biocartoon 0.4.2+)
     var width: Double?
     var height: Double?
     var svg_key: String?        // set when the icon is published as SVG
@@ -393,7 +394,7 @@ enum BioCartoonCLI {
     }()
 }
 
-/// Thumbnails, downsampled from the icons' PNGs and kept in memory.
+/// Thumbnails, kept in memory: the catalog's small previews, else downsampled from the icons' PNGs.
 @MainActor
 final class BCThumbs {
     static let shared = BCThumbs()
@@ -409,7 +410,8 @@ final class BCThumbs {
         Task.detached(priority: .utility) {
             var data: Data?
             if let p = local { data = FileManager.default.contents(atPath: p) }
-            else if let s = icon.url, let u = URL(string: s) { data = try? await URLSession.shared.data(from: u).0 }
+            if data == nil, let s = icon.thumb_url, let u = URL(string: s) { data = try? await Self.download(u) }
+            if data == nil, local == nil, let s = icon.url, let u = URL(string: s) { data = try? await Self.download(u) }
             let cg = data.flatMap { Self.downsample($0, maxSide: 240) }
             await MainActor.run {
                 let img = cg.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
@@ -417,6 +419,12 @@ final class BCThumbs {
                 for f in self.waiting.removeValue(forKey: id) ?? [] { f(img) }
             }
         }
+    }
+
+    /// The body of a successful GET (a missing thumbnail is a 404, not an image).
+    nonisolated static func download(_ u: URL) async throws -> Data? {
+        let (data, response) = try await URLSession.shared.data(from: u)
+        return (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } == false ? nil : data
     }
 
     nonisolated static func downsample(_ data: Data, maxSide: Int) -> CGImage? {
