@@ -524,10 +524,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                     .compactMap({ ProcessInfo.processInfo.environment["MANIMBLE_TEST_" + $0] }).first
                     ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"].flatMap({ $0.hasPrefix("/") ? $0 : nil }) {
             open(deck: d)
-        } else {
-            let last = UserDefaults.standard.string(forKey: "lastDeck")
-            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { chooseDeck() }
+        } else if let ws = workspace {
+            open(deck: ws.original.path)        // Choose Python… restarted the engine under the open deck
         }
+        // nothing given at launch: the window opens empty, like other apps (File ▸ Open Recent has the last decks)
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == 0 { await self?.reloadState() } }
         }
@@ -665,6 +665,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 if terminal.hasStarted { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
                 _ = try await engine.raw("open", ["deck": ws.work.path, "cache": Workspace.cacheDir(for: ws.original)])
                 UserDefaults.standard.set(deck, forKey: "lastDeck")
+                RecentDecks.note(deck)
                 loadGuides()
                 sceneName = nil; scene = nil; selection = nil
                 sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil

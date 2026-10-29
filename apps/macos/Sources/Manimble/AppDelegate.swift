@@ -165,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("File", [
             item("New Deck…", #selector(MainController.newDeck), "n"),
             item("Open Deck or Project…", #selector(MainController.openDeck), "o"),
+            recentMenuItem(),
             importItem,
             .separator(),
             item("Save to Original", #selector(MainController.saveToOriginal), "s"),
