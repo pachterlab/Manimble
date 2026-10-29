@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from .srcedit import (BLANK_CELLS, BOX_PAD, EditError, Planner, Project, Src, _stmt_lines, box_tag, ensure_helpers, fmt, py_str, py_tex,
-                      insert_kwarg, remove_kwargs, unwrap_soft, wrap_soft)
+                      insert_kwarg, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
 
 HERE = Path(__file__).resolve().parent
 
@@ -279,7 +279,7 @@ class Manimble:
 
     def _scene_key(self, s: dict) -> str:
         """Hash of everything that can change how this scene renders."""
-        h = hashlib.sha1(b"manimble-engine-3")
+        h = hashlib.sha1(b"manimble-engine-4")
         scene_names = {x["name"] for x in self.all_scenes}
         for rel in self.project.py_files():
             src = self.project.src(rel)
@@ -846,6 +846,9 @@ class Manimble:
             stop = int(req.get("stop", 0))
             vis = {str(v[0]): v for v in data["stops"][min(stop, len(data["stops"]) - 1)]["visible"]}
             before_box = vis.get(oid)
+            if obj["kind"] == "drawing" and op not in ("move", "resize"):
+                return {"ok": False, "error": "this drawing is made by one line of code: drag it to move it, or a "
+                                              "corner to resize it; change anything else in the source"}
             fw, fh = data["frame"]
             pw, ph = data["size"]
             ux, uy = fw / pw, fh / ph
@@ -905,6 +908,8 @@ class Manimble:
                             req = dict(req, one_build=True)
                         except EditError:
                             attempts = None      # not laid out for a one-build move: it moves in every build
+                    if attempts is None and obj["kind"] == "drawing":
+                        attempts = self.planner.plan_drawing(obj, f".shift({vec_expr(dx, dy)})")
                     if attempts is None:
                         attempts = self.planner.plan_move(obj, dx, dy)
                     frame = self.planner.frame_box(obj) if obj["kind"] == "text" else None
@@ -958,7 +963,8 @@ class Manimble:
                     ratio = float(req["ratio"])
                     if abs(ratio - 1) < 1e-3:
                         return {"ok": True, "message": "no change"}
-                    attempts = self.planner.plan_resize(obj, ratio)
+                    attempts = (self.planner.plan_drawing(obj, f".scale({fmt(ratio, 4)})", each=False)
+                                if obj["kind"] == "drawing" else self.planner.plan_resize(obj, ratio))
                     frame = self.planner.frame_box(obj) if obj["kind"] == "text" else None
                     if frame:                        # the text frame scales with its text, about its centre
                         w, h = frame["w"] * ratio, frame["h"] * ratio

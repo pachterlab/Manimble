@@ -58,7 +58,7 @@ struct FormatInfo: Decodable {
 }
 
 struct ObjInfo: Decodable {
-    var kind: String                 // text | tex | image | line | shape | table
+    var kind: String                 // text | tex | image | line | shape | table | drawing
     var value: String
     var fontSize: Double?
     var color: String?

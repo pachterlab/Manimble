@@ -524,10 +524,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                     .compactMap({ ProcessInfo.processInfo.environment["MANIMBLE_TEST_" + $0] }).first
                     ?? ProcessInfo.processInfo.environment["MANIMBLE_TEST_TERM"].flatMap({ $0.hasPrefix("/") ? $0 : nil }) {
             open(deck: d)
-        } else {
-            let last = UserDefaults.standard.string(forKey: "lastDeck")
-            if let d = last, FileManager.default.fileExists(atPath: d) { open(deck: d) } else { chooseDeck() }
+        } else if let ws = workspace {
+            open(deck: ws.original.path)        // Choose Python… restarted the engine under the open deck
         }
+        // nothing given at launch: the window opens empty, like other apps (File ▸ Open Recent has the last decks)
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == 0 { await self?.reloadState() } }
         }
@@ -665,6 +665,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 if terminal.hasStarted { terminal.start(in: terminalDirectory(ws), original: ws.original.path) }
                 _ = try await engine.raw("open", ["deck": ws.work.path, "cache": Workspace.cacheDir(for: ws.original)])
                 UserDefaults.standard.set(deck, forKey: "lastDeck")
+                RecentDecks.note(deck)
                 loadGuides()
                 sceneName = nil; scene = nil; selection = nil
                 sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil
@@ -1930,8 +1931,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
             return
         }
-        let kind = ["text": "TEXT", "tex": "FORMULA", "image": "IMAGE", "line": (o.shape ?? "LINE").uppercased(), "shape": (o.shape ?? "SHAPE").uppercased(), "table": "TABLE"][o.kind] ?? o.kind.uppercased()
-        let symbols = ["text": "textformat", "tex": "function", "image": "photo", "line": "line.diagonal", "shape": "square.on.circle", "table": "tablecells"]
+        let kind = ["text": "TEXT", "tex": "FORMULA", "image": "IMAGE", "line": (o.shape ?? "LINE").uppercased(), "shape": (o.shape ?? "SHAPE").uppercased(), "table": "TABLE", "drawing": "DRAWING"][o.kind] ?? o.kind.uppercased()
+        let symbols = ["text": "textformat", "tex": "function", "image": "photo", "line": "line.diagonal", "shape": "square.on.circle", "table": "tablecells", "drawing": "scribble.variable"]
         inspector.addArrangedSubview(inspectorHeader(symbol: symbols[o.kind] ?? "square", title: kind.capitalized, detail: o.loc))
         inspector.addArrangedSubview(hairline())
         if o.kind == "text" {
@@ -1964,6 +1965,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             for v in tableEditor(o, width: width) { inspector.addArrangedSubview(v) }
         } else if o.kind == "image" {
             inspector.addArrangedSubview(label("File")); inspector.addArrangedSubview(NSTextField(labelWithString: o.image ?? ""))
+        } else if o.kind == "drawing" {
+            let n = NSTextField(wrappingLabelWithString: "\(o.value.capitalized) made by one line of code, kept together: drag to move it, "
+                                + "drag a corner to resize it. Change anything else in the source.")
+            n.textColor = .secondaryLabelColor; width(n); inspector.addArrangedSubview(n)
         } else {
             let w = NSColorWell(); w.color = NSColor(hex: o.color ?? "#FFFFFF")
             w.target = self; w.action = #selector(colorCommitted(_:))
@@ -2041,6 +2046,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         func row(_ views: [NSView]) { let r = NSStackView(views: views); r.spacing = 16; r.alignment = .bottom; inspector.addArrangedSubview(r) }
         let dims = o.dims ?? [b.w, b.h]
         row([field("X (px)", b.cx, #selector(xCommitted(_:))), field("Y (px)", b.cy, #selector(yCommitted(_:)))])
+        if o.kind == "drawing" { return }           // its size is its pieces': corner handles scale it
         row([field("Width", dims[0], #selector(wCommitted(_:))), field("Height", dims[1], #selector(hCommitted(_:)))])
         if o.kind != "line" {
             var views: [NSView] = [field("Rotation (°)", o.rotation ?? 0, #selector(rotationCommitted(_:)), decimals: 1)]

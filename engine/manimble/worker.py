@@ -214,6 +214,8 @@ TRACKED: list = []          # tracked mobjects of the current run, oid == index
 EVENTS: dict = {}           # id(mob) -> (mob, [event, ...])
 PARENTS: dict = {}          # id(mob) -> (mob, [(parent, seq_joined), ...])
 GROUPS: list = []           # (group, members, frames) of every `Group(...)  # manimble group` of the run
+DRAWINGS: dict = {}         # oid -> {"frames", "count"} of each drawing: what one line of code makes in bulk
+DRAWING_BASE = 1_000_000    # a drawing's oid is this plus its first object's, so it stays put across renders
 _pos_cache: dict = {}
 _building = {"on": False}
 
@@ -696,9 +698,11 @@ class Slide(Scene):
             return [(mob.get_left()[0] + fw / 2) / fw * pw, (fh / 2 - mob.get_top()[1]) / fh * ph,
                     (mob.get_right()[0] + fw / 2) / fw * pw, (fh / 2 - mob.get_bottom()[1]) / fh * ph]
         sites = {}
+        first = {}
         for m in TRACKED:
             k = (m._sl_frames[-1]["file"], tuple(m._sl_frames[-1]["pos"]))
             sites[k] = sites.get(k, 0) + 1
+            first.setdefault(k, m._sl_id)
         # tracked objects living inside another tracked one (a table's row labels) are drawn by their parent
         inner = {}
         for m in TRACKED:
@@ -708,11 +712,14 @@ class Slide(Scene):
         for m in TRACKED:
             if id(m) in top and any(id(m) in d for pid, d in inner.items() if pid != id(m)):
                 nested_ids.add(id(m))
+        bulk = {}
         for m in TRACKED:
             if id(m) not in top:
                 continue
-            if m._sl_kind in ("line", "shape", "table") and sites[(m._sl_frames[-1]["file"], tuple(m._sl_frames[-1]["pos"]))] > 12:
-                continue          # data-point style bulk objects are not individually editable
+            site = (m._sl_frames[-1]["file"], tuple(m._sl_frames[-1]["pos"]))
+            if m._sl_kind in ("line", "shape", "table") and sites[site] > 12:
+                bulk.setdefault(site, []).append(m)
+                continue          # data-point style bulk objects are not individually editable: one drawing, below
             try:
                 if m._sl_kind != "image" and max_opacity(m) < 0.03:
                     continue
@@ -746,6 +753,30 @@ class Slide(Scene):
                 sp = raster(cam, fam, out)
                 if sp:
                     sp.update(oid=m._sl_id, z=z, zi=float(m.z_index),
+                              seq=min((added.get(id(f), 10 ** 9) for f in fam), default=10 ** 9))
+                    sprites.append(sp)
+            except Exception:
+                traceback.print_exc()
+        # What one line of code makes in bulk (a row of glyphs, a cloud of dots) selects and moves as one drawing
+        for site, ms in bulk.items():
+            try:
+                ms = [m for m in ms if max_opacity(m) >= 0.03]
+                if not ms:
+                    continue
+                uid = DRAWING_BASE + first[site]
+                x0, x1 = min(m.get_left()[0] for m in ms), max(m.get_right()[0] for m in ms)
+                y0, y1 = max(m.get_top()[1] for m in ms), min(m.get_bottom()[1] for m in ms)
+                vis.append([uid, (x0 + fw / 2) / fw * pw, (fh / 2 - y0) / fh * ph,
+                            (x1 + fw / 2) / fw * pw, (fh / 2 - y1) / fh * ph])
+                DRAWINGS[uid] = {"frames": ms[0]._sl_frames, "count": sites[site]}
+                fam = [f for f in extract_mobject_family_members(ms, use_z_index=True, only_those_with_points=True)
+                       if id(f) not in taken]
+                for f in fam:
+                    taken.add(id(f))
+                sp = raster(cam, fam, out)
+                if sp:
+                    sp.update(oid=uid, z=min((order.get(id(f), 10 ** 9) for f in fam), default=10 ** 9),
+                              zi=max(float(m.z_index) for m in ms),
                               seq=min((added.get(id(f), 10 ** 9) for f in fam), default=10 ** 9))
                     sprites.append(sp)
             except Exception:
@@ -992,6 +1023,7 @@ def render(req):
     EVENTS.clear()
     PARENTS.clear()
     GROUPS.clear()
+    DRAWINGS.clear()
     _STATE.update(stops=[], out=out, scene=req["scene"])
     purge_project_modules()
     mod = importlib.import_module(req["module"])
@@ -1011,7 +1043,7 @@ def render(req):
         config.background_color = req["background"]
     try:
         for attempt in (0, 1):
-            TRACKED.clear(); EVENTS.clear(); PARENTS.clear(); GROUPS.clear()
+            TRACKED.clear(); EVENTS.clear(); PARENTS.clear(); GROUPS.clear(); DRAWINGS.clear()
             _STATE.update(stops=[], steps=0, t0=time.perf_counter(), times=[])
             scene = cls(skip_animations=True)
             if req.get("force_background"):
@@ -1046,6 +1078,10 @@ def render(req):
             "frames": m._sl_frames,
             "events": collect_events(m),
         }
+    for uid, d in DRAWINGS.items():
+        objects[uid] = {"kind": "drawing", "value": f"{d['count']} shapes", "font_size": None, "font0": None, "font": None,
+                        "weight": None, "slant": None, "color": None, "path": None, "rotation": None, "dims": None,
+                        "frames": d["frames"], "events": []}
     for gi, (_, members, frames) in enumerate(GROUPS):
         for m in members:
             if "_sl_id" in m.__dict__ and m._sl_id < len(TRACKED) and TRACKED[m._sl_id] is m:
