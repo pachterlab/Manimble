@@ -276,7 +276,7 @@ extension MainController {
                 if let u = o.format?.link { link.toolTip = u }
                 m.addItem(link)
             }
-            if let item = bioCartoonMenuItem() { m.addItem(item) }
+            for item in bioCartoonMenuItems() { m.addItem(item) }
             addArrangeItems(to: m)
             return m
         }

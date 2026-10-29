@@ -13,6 +13,7 @@ struct BCIcon: Codable, Equatable {
     var author: String?
     var url: String?            // a web URL, or a local path for the user's own uploads
     var png_local: String?
+    var png_key: String?        // the PNG's path under the asset URL (and under the offline folder: see BCOffline)
     var thumb_url: String?      // a small preview for the tile, when the catalog has one
     var width: Double?
     var height: Double?
@@ -21,9 +22,16 @@ struct BCIcon: Codable, Equatable {
     var taxa: [BCTaxon]?        // its place in BioCartoon's taxonomy (biocartoon 0.3.4+)
     var stars: Int?             // how many people starred it, as of the catalog and the last sync (see BCStars)
     var starred: Bool?          // this install starred it
+    var tags: [String]?
 
     /// The database the icon is listed under: BioCartoon's own drawings are uploads (source `user`) by "BioCartoon".
     var database: String { source == "user" && author == "BioCartoon" ? "biocartoon" : source }
+    /// One of the user's own uploads (made in the BioCartoon editor, kept on this Mac): in Your library, and in its database too.
+    var own: Bool { source == "user" && png_local != nil }
+    /// The database's own categories it is filed under.
+    var categories: [String] {
+        (category ?? "").components(separatedBy: ", ").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
 
     /// What the BioCartoon editor shows on hovering a tile: the title, its categories, the database's own category,
     /// "Reactome Icon Library  ·  CC-BY-4.0  ·  SVG  ·  1024 × 569 px", and the credit line.
@@ -81,6 +89,30 @@ struct BCFacets: Decodable {
 
     func source(_ key: String) -> Int { sources.first { $0.source == key }?.icons ?? 0 }
     func taxon(_ slug: String) -> Int { categories.first { $0.slug == slug }?.icons ?? 0 }
+
+    /// Count `icons` too (none of them counted already), each dropdown's under the other filters, as `search --facets` does.
+    mutating func add(_ icons: [BCIcon], under f: BCFilter) {
+        func tally(_ rows: inout [Row], _ keys: Set<String>, _ key: WritableKeyPath<Row, String?>, _ make: (String) -> Row) {
+            for k in keys {
+                if let i = rows.firstIndex(where: { $0[keyPath: key] == k }) { rows[i].icons += 1 } else { rows.append(make(k)) }
+            }
+        }
+        for i in icons {
+            if f.passes(i, skip: .licenses), let l = i.license, !l.isEmpty { tally(&licenses, [l], \.license) { Row(license: $0, icons: 1) } }
+            if f.passes(i, skip: .taxa) {
+                let taxa = i.taxa ?? []
+                let slugs = Set(taxa.compactMap(\.slug) + taxa.compactMap { $0.slug.map { String($0.prefix { $0 != "." }) } })
+                tally(&categories, slugs, \.slug) { Row(slug: $0, icons: 1) }
+            }
+            if f.passes(i, skip: .dbCats) {
+                for c in Set(i.categories) {
+                    if let r = source_categories.firstIndex(where: { $0.source == i.database && $0.category == c }) { source_categories[r].icons += 1 }
+                    else { source_categories.append(Row(source: i.database, category: c, icons: 1)) }
+                }
+            }
+            if f.passes(i, skip: .fileTypes) { tally(&file_types, [i.svg_key != nil ? "SVG" : "PNG"], \.file_type) { Row(file_type: $0, icons: 1) } }
+        }
+    }
 }
 
 /// A collection of the catalog (`biocartoon --sources --json`).
@@ -148,7 +180,7 @@ enum BioCartoonCLI {
     /// The oldest `biocartoon` Manimble works with: it lists icons' taxonomy (`taxa`) and calls the databases' own
     /// categories source categories (`--source-category`, `source_categories`), filters by tag (`--tags`), and lists the
     /// small previews result tiles load (`thumb_url`). Keep in step with engine/requirements.txt.
-    static let minimumVersion = "0.4.2"
+    static let minimumVersion = "0.4.3"
 
     static func supported(_ version: String) -> Bool {
         version.compare(minimumVersion, options: .numeric) != .orderedAscending
@@ -175,8 +207,31 @@ enum BioCartoonCLI {
         return await catalogPath(exe) != before
     }
 
-    /// One page of `biocartoon search` keeping what passes `filter` (each option repeated per value; 0.3.0+).
+    /// One page of `biocartoon search` keeping what passes `filter` (each option repeated per value; 0.3.0+). With Your
+    /// library picked, the user's own icons that no other picked database lists come first, then the databases' pages.
     static func search(_ exe: String, query: String, filter: BCFilter, sort: String, offset: Int, limit: Int) async throws -> [BCIcon] {
+        guard filter.sources.contains(BCFilter.library) else {
+            return try await searchPage(exe, query: query, filter: filter, sort: sort, offset: offset, limit: limit)
+        }
+        var dbs = filter
+        dbs.sources.remove(BCFilter.library)
+        // an own icon in a picked database is on its pages already: listing it here too would show it twice
+        let extra = try await ownIcons(exe, query: query, sort: sort, mine: filter).filter { filter.passes($0) && !dbs.sources.contains($0.database) }
+        let mine = Array(extra.dropFirst(offset).prefix(limit))
+        guard !dbs.sources.isEmpty, mine.count < limit else { return mine }
+        return mine + (try await searchPage(exe, query: query, filter: dbs, sort: sort, offset: max(0, offset - extra.count), limit: limit - mine.count))
+    }
+
+    /// The user's own icons under `query`, whatever the filters but `mine`'s Favorites and Downloads: they are few, and
+    /// only ever in the User-generated or BioCartoon databases (which `--source library` doesn't name before biocartoon
+    /// has Your library).
+    static func ownIcons(_ exe: String, query: String, sort: String = "relevance", mine: BCFilter = BCFilter()) async throws -> [BCIcon] {
+        var f = BCFilter(); f.sources = ["user", "biocartoon"]
+        f.favorites = mine.favorites; f.downloads = mine.downloads
+        return try await searchPage(exe, query: query, filter: f, sort: sort, offset: 0, limit: 5000).filter(\.own)
+    }
+
+    private static func searchPage(_ exe: String, query: String, filter: BCFilter, sort: String, offset: Int, limit: Int) async throws -> [BCIcon] {
         var args = ["search"]
         if !query.isEmpty { args.append(query) }
         args += ["--icons", "--no-sql", "--json", "--limit", String(limit), "--offset", String(offset), "--sort", sort]
@@ -196,15 +251,31 @@ enum BioCartoonCLI {
         for l in filter.licenses.sorted() { args += ["--license", l] }
         for t in filter.fileTypes.sorted() { args += ["--file-type", t] }
         if !filter.tagList.isEmpty { args += ["--tags", filter.tagList.joined(separator: ",")] }
+        if filter.favorites { args.append("--favorites") }   // 0.4.3+: the usage file's stars and downloads
+        if filter.downloads { args.append("--downloads") }
         return args
     }
 
     /// How many icons each dropdown's choices find under `query` and the other filters (`search --facets`).
+    /// Your library is counted here, from the user's own icons: under the other filters, and (when it is picked) added to
+    /// the other dropdowns' counts for the own icons the picked databases don't list.
     static func facets(_ exe: String, query: String, filter: BCFilter) async throws -> BCFacets {
+        var dbs = filter
+        dbs.sources.remove(BCFilter.library)
         var args = ["search"]
         if !query.isEmpty { args.append(query) }
         args += ["--facets", "--icons", "--no-sql", "--json"]
-        return try JSONDecoder().decode(BCFacets.self, from: try await run(exe, args + filterArgs(filter)))
+        let cmd = args + filterArgs(dbs)
+        async let counted = run(exe, cmd)
+        let own = try await ownIcons(exe, query: query, mine: filter)
+        var fc = try JSONDecoder().decode(BCFacets.self, from: try await counted)
+        guard !own.isEmpty else { return fc }
+        if filter.sources.contains(BCFilter.library) {
+            if dbs.sources.isEmpty { fc.licenses = []; fc.categories = []; fc.source_categories = []; fc.file_types = [] }
+            fc.add(own.filter { !dbs.sources.contains($0.database) }, under: filter)
+        }
+        fc.sources.append(.init(source: BCFilter.library, icons: own.filter { filter.passes($0, skip: .sources) }.count))
+        return fc
     }
 
     static func categories(_ exe: String) async throws -> [BCCategory] {
@@ -406,7 +477,7 @@ final class BCThumbs {
         if waiting[icon.id] != nil { waiting[icon.id]!.append(done); return }
         waiting[icon.id] = [done]
         let id = icon.id
-        let local = icon.png_local ?? (icon.url?.hasPrefix("/") == true ? icon.url : nil)
+        let local = icon.png_local ?? (icon.url?.hasPrefix("/") == true ? icon.url : nil) ?? BCOffline.saved(icon)?.path
         Task.detached(priority: .utility) {
             var data: Data?
             if let p = local { data = FileManager.default.contents(atPath: p) }
@@ -448,6 +519,8 @@ final class BCStars {
     static let shared = BCStars()
     /// Posted when counts or this install's stars change (the object is nil).
     static let changed = Notification.Name("BCStarsChanged")
+    /// Posted once the usage file has this install's stars (searches with Favorites read them there).
+    static let written = Notification.Name("BCStarsWritten")
 
     private(set) var counts: [String: Int] = [:]
     private(set) var mine: Set<String> = []
@@ -597,8 +670,10 @@ final class BCStars {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("manimble-stars-\(UUID().uuidString).sql")
         guard (try? sql.write(to: tmp, atomically: true, encoding: .utf8)) != nil else { return }
         defer { try? FileManager.default.removeItem(at: tmp) }
-        do { _ = try await BioCartoonCLI.run("/usr/bin/sqlite3", ["-cmd", ".timeout 5000", file.path, ".read \(tmp.path)"], timeout: 30) }
-        catch { NSLog("BioCartoon stars: could not update \(file.path): \(error)") }
+        do {
+            _ = try await BioCartoonCLI.run("/usr/bin/sqlite3", ["-cmd", ".timeout 5000", file.path, ".read \(tmp.path)"], timeout: 30)
+            NotificationCenter.default.post(name: Self.written, object: nil)
+        } catch { NSLog("BioCartoon stars: could not update \(file.path): \(error)") }
     }
 
     private func getJSON(_ url: String) async throws -> Any {
@@ -613,11 +688,182 @@ final class BCStars {
     }
 }
 
+/// The icons downloaded, kept in the usage file's `downloads` table, which `biocartoon search --downloads` reads (the
+/// BioCartoon editor's right-click > Download goes there too).
+@MainActor
+enum BCDownloads {
+    /// Posted once the usage file has a new download (the object is nil).
+    static let changed = Notification.Name("BCDownloadsChanged")
+    private static var editorImported = false
+
+    static func add(_ icon: BCIcon) {
+        guard !icon.id.isEmpty else { return }
+        Task { if await record([icon.id]) { NotificationCenter.default.post(name: changed, object: nil) } }
+    }
+
+    /// Once per run, the downloads the editor listed only in its settings (before it kept them in the usage file).
+    static func importEditor() async {
+        guard !editorImported else { return }
+        editorImported = true
+        let ron = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("com.biocartoon.app/app.ron")
+        var ids: [String] = []
+        // the settings are JSON in a RON string there, quotes escaped: downloads\":[\"BA002984\",…]
+        if let s = try? String(contentsOf: ron, encoding: .utf8),
+           let r = s.range(of: #"downloads\\?"\s*:\s*\[[^\]]*\]"#, options: .regularExpression) {
+            for q in s[r].drop(while: { $0 != "[" }).split(separator: "\"") {
+                let id = q.trimmingCharacters(in: CharacterSet(charactersIn: "\\[], "))
+                if !id.isEmpty { ids.append(id) }
+            }
+        }
+        await record(ids)
+    }
+
+    @discardableResult
+    private static func record(_ ids: [String]) async -> Bool {
+        let file = BCStars.usageFile
+        guard !ids.isEmpty, FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path) else { return false }
+        let q = { (s: String) in "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
+        let sql = "CREATE TABLE IF NOT EXISTS downloads (id TEXT PRIMARY KEY);\n"
+            + "INSERT OR IGNORE INTO downloads (id) VALUES \(ids.map { "(\(q($0)))" }.joined(separator: ","));\n"
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("manimble-downloads-\(UUID().uuidString).sql")
+        guard (try? sql.write(to: tmp, atomically: true, encoding: .utf8)) != nil else { return false }
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do {
+            _ = try await BioCartoonCLI.run("/usr/bin/sqlite3", ["-cmd", ".timeout 5000", file.path, ".read \(tmp.path)"], timeout: 30)
+            return true
+        } catch {
+            NSLog("BioCartoon downloads: could not update \(file.path): \(error)")
+            return false
+        }
+    }
+}
+
+/// Icons' full PNGs kept on this Mac, so tiles and inserts work without internet. They live where the BioCartoon editor
+/// keeps its offline images (Settings › Offline), `<folder>/assets/<png_key>`, so either app's downloads serve both.
+enum BCOffline {
+    static let assetBase = ProcessInfo.processInfo.environment["BIOCARTOON_ASSET_URL"] ?? "https://assets.biocartoon.com"
+
+    /// The editor's chosen folder, else its default (`biocartoon/offline`, beside the catalog the command line keeps),
+    /// else Manimble's own. Read once (the editor's settings file is large); `refresh` reads it again.
+    private(set) static var folder = locate()
+    static func refresh() { folder = locate() }
+
+    private static func locate() -> URL {
+        let fm = FileManager.default
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        // the settings are JSON in a RON string there, quotes escaped: offline_dir\":\"/Users/…\"
+        if let s = try? String(contentsOf: support.appendingPathComponent("com.biocartoon.app/app.ron"), encoding: .utf8),
+           let r = s.range(of: #"offline_dir\\?"\s*:\s*\\?"[^"\\]+"#, options: .regularExpression) {
+            let path = String(s[r].split(separator: "\"").last ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "\\"))
+            if path.hasPrefix("/") { return URL(fileURLWithPath: path, isDirectory: true) }
+        }
+        let editor = support.appendingPathComponent("biocartoon", isDirectory: true)
+        if fm.fileExists(atPath: editor.path) { return editor.appendingPathComponent("offline", isDirectory: true) }
+        return Workspace.base.appendingPathComponent("BioCartoon Offline", isDirectory: true)
+    }
+
+    static var assets: URL { folder.appendingPathComponent("assets", isDirectory: true) }
+
+    /// Where the icon's PNG goes (nil without a key, or for one that would leave the folder).
+    static func file(_ icon: BCIcon) -> URL? {
+        var key = icon.png_key ?? ""
+        if key.isEmpty, let u = icon.url, u.hasPrefix(assetBase + "/") { key = String(u.dropFirst(assetBase.count + 1)) }
+        return file(key: key)
+    }
+    static func file(key: String) -> URL? {
+        let parts = key.split(separator: "/")
+        guard !parts.isEmpty, !parts.contains(where: { $0 == ".." || $0 == "." }) else { return nil }
+        return assets.appendingPathComponent(key)
+    }
+
+    /// The icon's PNG, when it is downloaded.
+    static func saved(_ icon: BCIcon) -> URL? {
+        file(icon).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+    }
+
+    /// Download the icon's PNG into the folder (kept when it is there already).
+    static func save(_ icon: BCIcon) async throws -> URL {
+        if let f = saved(icon) { return f }
+        var key = icon.png_key ?? ""
+        if key.isEmpty, let u = icon.url, u.hasPrefix(assetBase + "/") { key = String(u.dropFirst(assetBase.count + 1)) }
+        guard let dest = file(key: key) else { throw BioCartoonCLI.Failure(description: "\(icon.title) has no image to download") }
+        try await fetch(key, to: dest)
+        return dest
+    }
+
+    /// Write the downloaded PNG to `dest` (longest side at most `maxSide` px, as `biocartoon fetch --max-side`); false
+    /// when it isn't downloaded.
+    nonisolated static func copy(_ icon: BCIcon, to dest: URL, maxSide: Int) -> Bool {
+        guard let f = saved(icon), let data = FileManager.default.contents(atPath: f.path),
+              let cg = BCThumbs.downsample(data, maxSide: maxSide), let out = ImageExtractor.png(cg) else { return false }
+        return (try? out.write(to: dest)) != nil
+    }
+
+    /// GET `<asset URL>/<key>` into `dest`, through a temporary file so a reader never sees half of it.
+    nonisolated static func fetch(_ key: String, to dest: URL) async throws {
+        guard let u = URL(string: assetBase + "/" + (key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key)),
+              let data = try await BCThumbs.download(u) else { throw BioCartoonCLI.Failure(description: "\(key) is not on the server") }
+        guard data.starts(with: [0x89, 0x50, 0x4E, 0x47]) else { throw BioCartoonCLI.Failure(description: "\(key) is not a PNG") }
+        let fm = FileManager.default
+        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let tmp = dest.deletingLastPathComponent().appendingPathComponent(".\(dest.lastPathComponent).part")
+        try data.write(to: tmp)
+        _ = try? fm.removeItem(at: dest)
+        try fm.moveItem(at: tmp, to: dest)
+    }
+
+    /// Every catalog image not downloaded yet: their keys and how many bytes they come to.
+    static func missing(_ exe: String) async throws -> (keys: [String], bytes: Int64, total: Int) {
+        let rows = try await BioCartoonCLI.sql(exe, "SELECT png_key, coalesce(png_bytes, 0) FROM assets WHERE png_key IS NOT NULL AND png_key != '' ORDER BY source, png_key",
+                                              maxRows: 1_000_000)
+        return await Task.detached(priority: .userInitiated) { () -> (keys: [String], bytes: Int64, total: Int) in
+            var keys: [String] = [], bytes: Int64 = 0
+            for r in rows {
+                guard let k = r.first?.string, let f = file(key: k), !FileManager.default.fileExists(atPath: f.path) else { continue }
+                keys.append(k)
+                if r.count > 1 { bytes += Int64(r[1].int) }
+            }
+            return (keys, bytes, rows.count)
+        }.value
+    }
+
+    /// Download `keys`, eight at a time, reporting how many are done (and failed) as they go; stops when cancelled.
+    static func download(_ keys: [String], progress: @escaping @MainActor (_ done: Int, _ failed: Int) -> Void) async -> (got: Int, failed: Int) {
+        var next = 0, done = 0, failed = 0
+        await withTaskGroup(of: Bool.self) { g in
+            func add() {
+                guard next < keys.count, !Task.isCancelled else { return }
+                let k = keys[next]; next += 1
+                g.addTask {
+                    guard let dest = file(key: k) else { return false }
+                    for attempt in 0..<3 {
+                        if Task.isCancelled { return false }
+                        if (try? await fetch(k, to: dest)) != nil { return true }
+                        try? await Task.sleep(nanoseconds: UInt64(500_000_000) << attempt)
+                    }
+                    return false
+                }
+            }
+            for _ in 0..<8 { add() }
+            for await ok in g {
+                done += 1
+                if !ok { failed += 1 }
+                if done % 25 == 0 || done == keys.count { let (d, f) = (done, failed); await progress(d, f) }
+                add()
+            }
+        }
+        return (done - failed, failed)
+    }
+}
+
 /// A result tile: white card, thumbnail, collection badge. Click inserts the icon; dragging it onto the slide places it there.
 final class BCTile: NSCollectionViewItem, NSDraggingSource {
     static let id = NSUserInterfaceItemIdentifier("bctile")
     var icon: BCIcon?
     var onClick: ((BCIcon) -> Void)?
+    /// The menu's Download: keep the icon's PNG for working offline.
+    var onDownload: ((BCIcon) -> Void)?
     private let thumb = NSImageView()
     private let badge = NSTextField(labelWithString: "")
     private let star = NSButton(title: "", target: nil, action: nil)
@@ -706,6 +952,7 @@ final class BCTile: NSCollectionViewItem, NSDraggingSource {
             let m = NSMenu()
             m.addItem(BCMenuItem("Insert on Slide") { [weak o] in o?.onClick?(icon) })
             m.addItem(BCMenuItem(BCStars.shared.isStarred(icon) ? "Unstar" : "Star") { BCStars.shared.toggle(icon) })
+            m.addItem(BCMenuItem(BCOffline.saved(icon) == nil ? "Download" : "Show Download in Finder") { [weak o] in o?.onDownload?(icon) })
             m.addItem(.separator())
             m.addItem(BCMenuItem("Copy Name") { BioCartoonCLI.copy(icon.title) })
             if let c = icon.credit, !c.isEmpty { m.addItem(BCMenuItem("Copy Credit") { BioCartoonCLI.copy(c) }) }
@@ -820,6 +1067,8 @@ struct BCFilter: Equatable {
     var licenses: Set<String> = []
     var fileTypes: Set<String> = []       // "svg" (published as SVG), "png" (a PNG only)
     var tags = ""                         // whole tags, any case, commas between
+    var favorites = false                 // only the icons you starred
+    var downloads = false                 // only the icons you downloaded (placed on a slide, or in the editor)
 
     var authorParts: [String] {
         authors.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
@@ -829,7 +1078,30 @@ struct BCFilter: Equatable {
     }
     var isEmpty: Bool {
         sources.isEmpty && authorParts.isEmpty && categories.isEmpty && subcategories.isEmpty && dbCats.isEmpty && licenses.isEmpty
-            && fileTypes.isEmpty && tagList.isEmpty
+            && fileTypes.isEmpty && tagList.isEmpty && !favorites && !downloads
+    }
+
+    /// The key of Your library in `sources`: the user's own icons, which are in the database they are listed under too.
+    static let library = "library"
+
+    /// A dropdown (or two: a category and its subcategories go together), for `passes(_:skip:)`.
+    enum Part { case sources, taxa, dbCats, licenses, fileTypes }
+
+    /// Whether `icon` passes the filters (but `skip`), as `biocartoon search` would keep it: for the user's own icons,
+    /// which the command line can't single out (sources here are only Your library's or their database's).
+    func passes(_ icon: BCIcon, skip: Part? = nil) -> Bool {
+        let same = { (a: String, b: String) in a.caseInsensitiveCompare(b) == .orderedSame }
+        let taxa = icon.taxa ?? []
+        let author = (icon.author ?? "").lowercased()
+        return (skip == .sources || sources.isEmpty || sources.contains(Self.library) || sources.contains(icon.database))
+            && (authorParts.isEmpty || authorParts.contains { author.contains($0) })
+            && (skip == .taxa || (categories.isEmpty && subcategories.isEmpty)
+                || taxa.contains { t in t.slug.map { s in subcategories.contains(s) || categories.contains(String(s.prefix { $0 != "." })) } ?? false })
+            && (skip == .dbCats || dbCats.isEmpty
+                || dbCats.contains { k in let d = Self.split(k); return d.database == icon.database && icon.categories.contains { same($0, d.category) } })
+            && (skip == .licenses || licenses.isEmpty || licenses.contains { same($0, icon.license ?? "") })
+            && (skip == .fileTypes || fileTypes.isEmpty || fileTypes.contains(icon.svg_key != nil ? "svg" : "png"))
+            && (tagList.isEmpty || tagList.contains { t in (icon.tags ?? []).contains { same($0, t) } })
     }
 
     static func key(_ database: String, _ category: String) -> String { database + "\t" + category }
@@ -921,14 +1193,18 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private let licensePopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let fileTypePopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let tagsField = NSTextField()
+    private let favoritesBox = NSButton(checkboxWithTitle: "Favorites", target: nil, action: nil)
+    private let downloadsBox = NSButton(checkboxWithTitle: "Downloads", target: nil, action: nil)
     private let clearButton = NSButton(title: "Clear filters", target: nil, action: nil)
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let status = NSTextField(labelWithString: "")
     private let installButton = NSButton(title: "Install BioCartoon", target: nil, action: nil)
+    private let downloadButton = NSButton(title: "Download", target: nil, action: nil)
+    /// The download of every catalog image, while it runs (the button stops it).
+    private var downloadAll: Task<Void, Never>?
     private let grid = NSCollectionView()
     private let scroll = NSScrollView()
     private let creditLabel = NSTextField(wrappingLabelWithString: "")
-    private let copyCredit = NSButton(title: "Copy credit", target: nil, action: nil)
     private var creditBox: NSStackView!
 
     private(set) var exe: String?
@@ -967,7 +1243,10 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         close.toolTip = "Back to the inspector"
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let head = NSStackView(views: [logo, heading, spacer, close]); head.spacing = 7
+        downloadButton.controlSize = .small; downloadButton.bezelStyle = .rounded
+        downloadButton.target = self; downloadButton.action = #selector(downloadAllPressed)
+        downloadButton.toolTip = "Download every icon's image, so searches show them without internet"
+        let head = NSStackView(views: [logo, heading, spacer, downloadButton, close]); head.spacing = 7
 
         search.placeholderString = "Search icons (cell, neuron, mouse…)"
         search.delegate = self
@@ -1000,7 +1279,12 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         dbCatLabel.toolTip = "A database's own categories, by its code (BA: NIAID NIH BioArt, …)"
         let rows: [[NSView]] = [[fieldLabel("Database"), dbPopup], [fieldLabel("Author"), authorField], [fieldLabel("Category"), catPopup],
                                 [fieldLabel("Subcategory"), subPopup], [dbCatLabel, dbCatPopup], [fieldLabel("License"), licensePopup],
-                                [fieldLabel("File type"), fileTypePopup], [tagsLabel, tagsField]]
+                                [fieldLabel("File type"), fileTypePopup], [tagsLabel, tagsField],
+                                [NSGridCell.emptyContentView, favoritesBox], [NSGridCell.emptyContentView, downloadsBox]]
+        for (b, tip) in [(favoritesBox, "Only icons you starred"), (downloadsBox, "Only icons you placed on a slide (or downloaded in the BioCartoon editor)")] {
+            b.font = Theme.font(11); b.controlSize = .small; b.toolTip = tip
+            b.target = self; b.action = #selector(checkboxToggled)
+        }
         for r in rows { r[1].setContentHuggingPriority(.init(1), for: .horizontal) }
         let table = NSGridView(views: rows)
         table.rowSpacing = 6; table.columnSpacing = 8
@@ -1061,14 +1345,14 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         NotificationCenter.default.addObserver(self, selector: #selector(resized), name: NSView.frameDidChangeNotification, object: scroll)
         NotificationCenter.default.addObserver(self, selector: #selector(starsChanged), name: BCStars.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(usageWritten), name: BCStars.written, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(usageWritten), name: BCDownloads.changed, object: nil)
         BCStars.shared.onProblem = { [weak self] why in self?.status.stringValue = why }
 
         creditLabel.font = Theme.font(10); creditLabel.textColor = .secondaryLabelColor
         creditLabel.maximumNumberOfLines = 3
         creditLabel.isSelectable = true
-        copyCredit.controlSize = .small; copyCredit.bezelStyle = .rounded
-        copyCredit.target = self; copyCredit.action = #selector(copyCreditPressed)
-        let creditBox = NSStackView(views: [creditLabel, copyCredit])
+        let creditBox = NSStackView(views: [creditLabel])
         creditBox.orientation = .vertical; creditBox.alignment = .leading; creditBox.spacing = 4
         creditBox.isHidden = true
         self.creditBox = creditBox
@@ -1110,6 +1394,13 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         for case let tile as BCTile in grid.visibleItems() { tile.refreshStar() }
     }
 
+    /// Stars or downloads reached the usage file: with Favorites or Downloads on, search again (and count again).
+    @objc private func usageWritten() {
+        guard exe != nil, filter.favorites || filter.downloads else { return }
+        facetsFor = nil
+        reload()
+    }
+
     private func locate() {
         status.stringValue = "Looking for biocartoon…"
         Task {
@@ -1132,6 +1423,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             if let s = try? await BioCartoonCLI.sources(exe) { setSources(s) }
             reload()
             syncStars()
+            await BCDownloads.importEditor()
             await loadChoices(exe)
         }
     }
@@ -1171,7 +1463,6 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         status.stringValue = ""
         creditLabel.stringValue = s
         creditBox.isHidden = false
-        copyCredit.isHidden = true
     }
 
     // MARK: filter choices
@@ -1192,10 +1483,17 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     }
 
     private func refreshSources() {
-        dbPopup.setChoices(sources.filter { ($0.icons ?? 0) > 0 }.compactMap { s in
-            shown(facets?.source(s.source), catalog: s.icons, picked: dbPopup.picked.contains(s.source)).map { (s.source, s.name, $0) }
-        })
+        var choices = sources.filter { ($0.icons ?? 0) > 0 }.compactMap { s in
+            shown(facets?.source(s.source), catalog: s.icons, picked: dbPopup.picked.contains(s.source)).map { (s.source, name(ofDatabase: s), $0) }
+        }
+        // Your library last, once the counts say there is something in it
+        let lib = BCFilter.library
+        if let n = facets.map({ $0.source(lib) }), n > 0 || dbPopup.picked.contains(lib) { choices.append((lib, "Your library", n)) }
+        dbPopup.setChoices(choices)
     }
+
+    /// The editor's name for the database (User-generated is "Community and user-generated" in its Database dropdown).
+    private func name(ofDatabase s: BCSource) -> String { s.source == "user" ? "Community and user-generated" : s.name }
 
     private func setCategories(_ list: [BCCategory]) {
         categories = list
@@ -1261,7 +1559,9 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             }
         }
         let order = sources.map(\.source)
-        let rows = all.filter { filter.sources.isEmpty || filter.sources.contains($0.database) }.sorted { a, b in
+        // (Your library's icons are in any database: with it picked, all of them)
+        let any = filter.sources.isEmpty || filter.sources.contains(BCFilter.library)
+        let rows = all.filter { any || filter.sources.contains($0.database) }.sorted { a, b in
             let (ia, ib) = (order.firstIndex(of: a.database) ?? order.count, order.firstIndex(of: b.database) ?? order.count)
             return ia != ib ? ia < ib : a.category.localizedCaseInsensitiveCompare(b.category) == .orderedAscending
         }
@@ -1304,6 +1604,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         for p in [dbPopup, catPopup, subPopup, dbCatPopup, licensePopup, fileTypePopup] { p.clear() }
         authorField.stringValue = ""
         tagsField.stringValue = ""
+        favoritesBox.state = .off; downloadsBox.state = .off
         refreshSubcategories()
         refreshDbCategories()
         refreshFilterChrome()
@@ -1327,9 +1628,13 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         filter.fileTypes = fileTypePopup.picked
         filter.authors = authorField.stringValue
         filter.tags = tagsField.stringValue
+        filter.favorites = favoritesBox.state == .on
+        filter.downloads = downloadsBox.state == .on
         refreshFilterChrome()
         reload()
     }
+
+    @objc private func checkboxToggled() { filtersEdited() }
 
     /// Set the filters from code (the headless check).
     func apply(_ f: BCFilter) {
@@ -1341,6 +1646,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         dbCatPopup.pick(f.dbCats); licensePopup.pick(f.licenses); fileTypePopup.pick(f.fileTypes)
         authorField.stringValue = f.authors
         tagsField.stringValue = f.tags
+        favoritesBox.state = f.favorites ? .on : .off; downloadsBox.state = f.downloads ? .on : .off
         filterBox.isHidden = false
         refreshFilterChrome()
         reload()
@@ -1350,7 +1656,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private func refreshFilterChrome() {
         let active = !filter.isEmpty
         funnel.contentTintColor = active || !filterBox.isHidden ? Theme.accent : .secondaryLabelColor
-        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category, license, file type or tags" : "Hide the filters"
+        funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category, license, file type, tags, favorites or downloads" : "Hide the filters"
         clearButton.isHidden = !active
         summary.stringValue = summaryText()
         summary.isHidden = !(active && filterBox.isHidden)
@@ -1359,7 +1665,10 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     /// The set filters in a line: "Bioicons, OpenMoji · by Ann · Cells · CC0-1.0".
     private func summaryText() -> String {
         var parts: [String] = []
-        if !filter.sources.isEmpty { parts.append(sources.filter { filter.sources.contains($0.source) }.map(\.name).joined(separator: ", ")) }
+        if !filter.sources.isEmpty {
+            let names = sources.filter { filter.sources.contains($0.source) }.map(name(ofDatabase:)) + (filter.sources.contains(BCFilter.library) ? ["Your library"] : [])
+            parts.append(names.joined(separator: ", "))
+        }
         let authors = filter.authors.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         if !authors.isEmpty { parts.append("by " + authors.joined(separator: ", ")) }
         let taxa = filter.categories.sorted() + filter.subcategories.sorted()
@@ -1370,6 +1679,8 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         if !filter.licenses.isEmpty { parts.append(filter.licenses.sorted().joined(separator: ", ")) }
         if !filter.fileTypes.isEmpty { parts.append(filter.fileTypes.sorted().map { $0.uppercased() }.joined(separator: ", ")) }
         if !filter.tagList.isEmpty { parts.append("tagged " + filter.tagList.joined(separator: ", ")) }
+        if filter.favorites { parts.append("Favorites") }
+        if filter.downloads { parts.append("Downloads") }
         return parts.joined(separator: "  ·  ")
     }
 
@@ -1448,6 +1759,78 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     }
     @objc private func resized() { grid.collectionViewLayout?.invalidateLayout() }
 
+    // MARK: downloads
+
+    /// The tile menu's Download: keep the icon's PNG in the offline folder and show it in Finder.
+    func downloadIcon(_ icon: BCIcon) {
+        status.stringValue = "Downloading \(icon.title)…"
+        Task {
+            do {
+                let f = try await BCOffline.save(icon)
+                BCDownloads.add(icon)
+                status.stringValue = "Downloaded \(icon.title)"
+                NSWorkspace.shared.activateFileViewerSelecting([f])
+            } catch {
+                status.stringValue = "Download failed"
+                setMessage("Could not download \(icon.title): \(error)")
+            }
+        }
+    }
+
+    /// The header's Download: every catalog image into the offline folder (opened in Finder), after saying how much
+    /// that is; images already there are kept. Pressed again while it runs, it stops (what came in is kept).
+    @objc private func downloadAllPressed() {
+        if let t = downloadAll { t.cancel(); return }
+        guard let exe = exe else { setMessage("BioCartoon isn't ready yet: install it first."); return }
+        BCOffline.refresh()
+        let folder = BCOffline.folder
+        downloadButton.isEnabled = false
+        downloadButton.title = "Checking…"
+        Task {
+            defer { downloadButton.isEnabled = true }
+            let todo: (keys: [String], bytes: Int64, total: Int)
+            do { todo = try await BCOffline.missing(exe) } catch {
+                downloadButton.title = "Download"
+                setMessage("Could not list the catalog's images: \(error)")
+                return
+            }
+            try? FileManager.default.createDirectory(at: BCOffline.assets, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(folder)
+            guard !todo.keys.isEmpty else {
+                downloadButton.title = "Download"
+                setMessage("All \(Self.count(todo.total)) images are downloaded, in \(folder.path).")
+                return
+            }
+            let a = NSAlert()
+            a.messageText = "Download \(Self.count(todo.keys.count)) BioCartoon images?"
+            a.informativeText = "About \(ByteCountFormatter.string(fromByteCount: todo.bytes, countStyle: .file)), into \(folder.path) (where the BioCartoon editor keeps its offline images). "
+                + (todo.keys.count < todo.total ? "The other \(Self.count(todo.total - todo.keys.count)) are there already. " : "")
+                + "Searches then show them without internet."
+            a.addButton(withTitle: "Download"); a.addButton(withTitle: "Cancel")
+            guard a.runModal() == .alertFirstButtonReturn else { downloadButton.title = "Download"; return }
+            let n = todo.keys.count
+            downloadButton.title = "Stop"
+            downloadButton.toolTip = "Stop downloading (images downloaded so far are kept)"
+            status.stringValue = "Downloading \(Self.count(n)) images…"
+            downloadAll = Task {
+                let r = await BCOffline.download(todo.keys) { [weak self] done, _ in
+                    self?.downloadButton.title = "Stop · \(done * 100 / max(n, 1))%"
+                    self?.status.stringValue = "Downloaded \(Self.count(done)) of \(Self.count(n)) images…"
+                }
+                downloadAll = nil
+                downloadButton.title = "Download"
+                downloadButton.toolTip = "Download every icon's image, so searches show them without internet"
+                status.stringValue = ""
+                let stopped = Task.isCancelled
+                setMessage((stopped ? "Download stopped: " : "Downloaded ") + "\(Self.count(r.got)) images into \(folder.path)"
+                           + (r.failed > 0 && !stopped ? "; \(Self.count(r.failed)) could not be downloaded (press Download to try them again)." : "."))
+                grid.reloadData()      // tiles that had no thumbnail
+            }
+        }
+    }
+
+    private static func count(_ n: Int) -> String { NumberFormatter.localizedString(from: NSNumber(value: n), number: .decimal) }
+
     @objc private func installPressed() {
         installButton.isEnabled = false
         status.stringValue = "Installing biocartoon…"
@@ -1465,13 +1848,6 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         }
     }
 
-    /// Show the credit line of the icon just inserted (BioCartoon's "Copy caption").
-    func showCredit(_ icon: BCIcon) {
-        creditLabel.stringValue = icon.credit ?? icon.title
-        copyCredit.isHidden = false
-        creditBox.isHidden = false
-    }
-
     // for the headless check
     var resultCount: Int { results.count }
     var firstResult: BCIcon? { results.first }
@@ -1482,13 +1858,6 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     var facetsSettled: Bool { facetsAnswered == facetsRequest }
     func type(_ query: String) { search.stringValue = query; reload() }
 
-    @objc private func copyCreditPressed() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(creditLabel.stringValue, forType: .string)
-        copyCredit.title = "Copied"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.copyCredit.title = "Copy credit" }
-    }
-
     // MARK: grid
 
     func collectionView(_ cv: NSCollectionView, numberOfItemsInSection section: Int) -> Int { results.count }
@@ -1498,6 +1867,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         let icon = results[ip.item]
         item.show(icon, code: code(forDatabase: icon.database))
         item.onClick = { [weak self] icon in self?.onInsert?(icon) }
+        item.onDownload = { [weak self] icon in self?.downloadIcon(icon) }
         return item
     }
 
@@ -1565,7 +1935,10 @@ extension MainController {
             var size: CGSize
             let dest: URL
             do {
-                try await BioCartoonCLI.fetch(exe, id: icon.id, to: png)
+                // the downloaded PNG when there is one (no internet needed), else the catalog's
+                if !(await Task.detached { BCOffline.copy(icon, to: png, maxSide: 1600) }.value) {
+                    try await BioCartoonCLI.fetch(exe, id: icon.id, to: png)
+                }
                 // a vector picture when the icon is published as SVG and manim draws it like the PNG, else the PNG
                 if icon.svg_key != nil, let v = await vectorCopy(exe, icon, png: png, to: svg) {
                     try? FileManager.default.removeItem(at: png)
@@ -1581,10 +1954,10 @@ extension MainController {
                 }
             } catch { busyPill.hide(); toast("Could not download \(icon.title): \(error)", error: true); return }
             busyPill.hide()
+            BCDownloads.add(icon)
             let half = 1.5 * canvas.unitPx * min(1, size.width / max(size.height, 1))
             insert(kind: "image", extra: ["file": dest.lastPathComponent, "path": dest.path,
                                           "sx": Double(c.x) - half, "sy": Double(c.y), "ex": Double(c.x) + half, "ey": Double(c.y)])
-            biocartoonPane?.showCredit(icon)
         }
     }
 
@@ -1608,16 +1981,14 @@ extension MainController {
 extension MainController {
     // MARK: right-click on a picture
 
-    /// The right-click menu's BioCartoon item for the selected picture: its credit when it came from the catalog,
-    /// otherwise an offer to submit it to the shared library (as the BioCartoon editor's canvas menu).
-    func bioCartoonMenuItem() -> NSMenuItem? {
-        guard let o = objInfo, o.kind == "image", let path = o.imagePath, FileManager.default.fileExists(atPath: path) else { return nil }
+    /// The right-click menu's BioCartoon items for the selected picture: its credit when it came from the catalog,
+    /// otherwise Add to Local / Upload to Online BioCartoon Library (as the BioCartoon editor's canvas menu).
+    func bioCartoonMenuItems() -> [NSMenuItem] {
+        guard let o = objInfo, o.kind == "image", let path = o.imagePath, FileManager.default.fileExists(atPath: path) else { return [] }
         if let icon = BioCartoonCLI.origin(ofImageAt: path) {
-            return BCMenuItem("Show Credit…") { [weak self] in self?.showBioCartoonCredit(icon) }
+            return [BCMenuItem("Show Credit…") { [weak self] in self?.showBioCartoonCredit(icon) }]
         }
-        let item = BCMenuItem("Add to BioCartoon Library…") { [weak self] in self?.addToBioCartoon(path) }
-        item.toolTip = "Submit this picture to the shared BioCartoon library"
-        return item
+        return bioCartoonLibraryItems(path)
     }
 
     /// Right-click ▸ Show Credit…: who made the artwork, ready to copy.
@@ -1634,102 +2005,6 @@ extension MainController {
             self?.toast("Copied the credit")
         }
     }
-
-    /// Right-click ▸ Add to BioCartoon Library…: title, credit, license and category, then `biocartoon upload`.
-    func addToBioCartoon(_ path: String) {
-        Task { @MainActor in
-            let found = await BioCartoonCLI.usable()
-            guard case .success(let exe) = found else {
-                toast("BioCartoon needs installing or updating: open Insert ▸ BioCartoon Icons…", error: true)
-                return
-            }
-            let cats = (try? await BioCartoonCLI.categories(exe)) ?? []
-            let form = BCSubmitForm(file: path, categories: cats)
-            let a = NSAlert()
-            a.messageText = "Add to BioCartoon Library"
-            a.informativeText = "Submit this picture to the shared library, where everyone can find it. Submissions are reviewed before they are published (up to 20 a day)."
-            a.icon = BioCartoonCLI.logo
-            a.accessoryView = form.view
-            let submit = a.addButton(withTitle: "Submit for Review")
-            a.addButton(withTitle: "Cancel")
-            form.onValidity = { submit.isEnabled = $0 }
-            form.refresh()
-            a.beginSheetModal(for: window) { [weak self] r in
-                guard r == .alertFirstButtonReturn, let self = self else { return }
-                let v = form.values
-                UserDefaults.standard.set(v.credit, forKey: "biocartoonCredit")
-                self.busyPill.show("Submitting \(v.title)…", symbol: nil, tint: nil, spinning: true, cancellable: false)
-                Task { @MainActor in
-                    do {
-                        try await BioCartoonCLI.upload(exe, file: path, title: v.title, credit: v.credit, license: v.license,
-                                                       category: v.category, description: v.description)
-                        self.busyPill.hide()
-                        self.toast("Submitted \(v.title) for review: it joins the BioCartoon library once approved")
-                    } catch {
-                        self.busyPill.hide()
-                        self.toast("Could not submit \(v.title): \(error)", error: true)
-                    }
-                }
-            }
-            window.makeFirstResponder(form.titleField)
-        }
-    }
-}
-
-/// The fields of Add to BioCartoon Library: what `biocartoon upload` takes.
-@MainActor
-final class BCSubmitForm: NSObject, NSTextFieldDelegate {
-    let view: NSView
-    let titleField = NSTextField()
-    private let creditField = NSTextField()
-    private let license = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let category = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let descriptionField = NSTextField()
-    private let confirm = NSButton(checkboxWithTitle: "I made this picture, or may share it under this license", target: nil, action: nil)
-    var onValidity: ((Bool) -> Void)?
-    private static let licenses = [("CC-BY-4.0", "CC BY 4.0 (users credit you)"), ("CC0-1.0", "CC0 (no credit needed)")]
-
-    init(file: String, categories: [BCCategory]) {
-        let stem = URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
-        titleField.stringValue = stem.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
-        creditField.stringValue = UserDefaults.standard.string(forKey: "biocartoonCredit") ?? NSFullUserName()
-        creditField.placeholderString = "Anonymous"
-        descriptionField.placeholderString = "Optional"
-        for (key, name) in Self.licenses { license.addItem(withTitle: name); license.lastItem?.representedObject = key }
-        category.addItem(withTitle: "None")
-        let tops = Dictionary(categories.filter { !$0.slug.contains(".") }.map { ($0.slug, $0.name) }, uniquingKeysWith: { a, _ in a })
-        for c in categories {
-            let top = String(c.slug.prefix { $0 != "." })
-            category.addItem(withTitle: c.slug.contains(".") ? "\(tops[top] ?? top) › \(c.name)" : c.name)
-            category.lastItem?.representedObject = c.slug
-        }
-        let rows: [[NSView]] = [[Self.label("Title"), titleField], [Self.label("Credit"), creditField], [Self.label("License"), license],
-                                [Self.label("Category"), category], [Self.label("Description"), descriptionField]]
-        let grid = NSGridView(views: rows)
-        grid.rowSpacing = 8; grid.columnSpacing = 8
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowAlignment = .firstBaseline
-        for f in [titleField, creditField, descriptionField] { f.widthAnchor.constraint(equalToConstant: 280).isActive = true }
-        let stack = NSStackView(views: [grid, confirm])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
-        stack.frame = NSRect(origin: .zero, size: stack.fittingSize)
-        view = stack
-        super.init()
-        titleField.delegate = self
-        confirm.target = self; confirm.action = #selector(changed)
-    }
-
-    private static func label(_ s: String) -> NSTextField { NSTextField(labelWithString: s) }
-
-    var values: (title: String, credit: String, license: String, category: String, description: String) {
-        let t = { (f: NSTextField) in f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
-        return (t(titleField), t(creditField), license.selectedItem?.representedObject as? String ?? "CC-BY-4.0",
-                category.selectedItem?.representedObject as? String ?? "", t(descriptionField))
-    }
-
-    func refresh() { onValidity?(confirm.state == .on && !values.title.isEmpty) }
-    @objc private func changed() { refresh() }
-    func controlTextDidChange(_ n: Notification) { refresh() }
 }
 
 extension MainController {
@@ -1771,6 +2046,14 @@ extension MainController {
             try? await Task.sleep(nanoseconds: 300_000_000)
             await wait("search") { p.resultCount > 0 && p.firstResult?.title.lowercased().contains("mito") == true }
             let plain = p.resultCount
+            // offline images: where they go, and one downloaded there (what the tile menu's Download does, but Finder)
+            if let icon = p.firstResult {
+                let had = BCOffline.saved(icon) != nil
+                let f = try? await BCOffline.save(icon)
+                let copy = URL(fileURLWithPath: dir + "offline_copy.png")
+                log("offline: folder \(BCOffline.folder.path), \(icon.id) key \(icon.png_key ?? "-"), had \(had), saved \(f?.path ?? "FAILED"), "
+                    + "copy \(BCOffline.copy(icon, to: copy, maxSide: 1600)) \(NSImage(contentsOf: copy)?.size ?? .zero)")
+            }
             // the dropdowns count what the search finds
             await wait("facets") { p.facetsSettled && p.facets != nil }
             log("facets for mitochondria: databases \(counts(p.facets?.sources ?? [], \.source))")
@@ -1785,6 +2068,21 @@ extension MainController {
             log("filtered: \(p.resultCount) of \(plain), off: \(bad.count)")
             await wait("filtered facets") { p.facetsSettled }
             log("filtered facets: databases \(counts(p.facets?.sources ?? [], \.source)); licenses \(counts(p.facets?.licenses ?? [], \.license)); file types \(counts(p.facets?.file_types ?? [], \.file_type))")
+            // Your library: the user's own icons, also in their database, never listed twice (under no search words)
+            p.type("")
+            for srcs in [[BCFilter.library], [BCFilter.library, "user"], [BCFilter.library, "bioart"]] {
+                var lf = BCFilter(); lf.sources = Set(srcs)
+                p.apply(lf)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await wait("library \(srcs)") { !p.isLoading && p.facetsSettled }
+                let ids = p.allResults.map(\.id)
+                log("library \(srcs): \(ids.count) icons, \(p.allResults.filter(\.own).count) own, \(ids.count - Set(ids).count) twice; first \(ids.prefix(3)); "
+                    + "databases \(counts(p.facets?.sources ?? [], \.source))")
+            }
+            p.type("mitochondria")
+            p.apply(f)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await wait("filtered again") { !p.isLoading && p.facetsSettled }
             try? await Task.sleep(nanoseconds: 2_000_000_000)      // thumbnails
             shot(p.view, "biocartoon_pane.png")
             shot(window.contentView, "biocartoon_filters_window.png")
