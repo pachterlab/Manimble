@@ -1930,8 +1930,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
             return
         }
-        let kind = ["text": "TEXT", "tex": "FORMULA", "image": "IMAGE", "line": (o.shape ?? "LINE").uppercased(), "shape": (o.shape ?? "SHAPE").uppercased(), "table": "TABLE"][o.kind] ?? o.kind.uppercased()
-        let symbols = ["text": "textformat", "tex": "function", "image": "photo", "line": "line.diagonal", "shape": "square.on.circle", "table": "tablecells"]
+        let kind = ["text": "TEXT", "tex": "FORMULA", "image": "IMAGE", "line": (o.shape ?? "LINE").uppercased(), "shape": (o.shape ?? "SHAPE").uppercased(), "table": "TABLE", "drawing": "DRAWING"][o.kind] ?? o.kind.uppercased()
+        let symbols = ["text": "textformat", "tex": "function", "image": "photo", "line": "line.diagonal", "shape": "square.on.circle", "table": "tablecells", "drawing": "scribble.variable"]
         inspector.addArrangedSubview(inspectorHeader(symbol: symbols[o.kind] ?? "square", title: kind.capitalized, detail: o.loc))
         inspector.addArrangedSubview(hairline())
         if o.kind == "text" {
@@ -1964,6 +1964,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             for v in tableEditor(o, width: width) { inspector.addArrangedSubview(v) }
         } else if o.kind == "image" {
             inspector.addArrangedSubview(label("File")); inspector.addArrangedSubview(NSTextField(labelWithString: o.image ?? ""))
+        } else if o.kind == "drawing" {
+            let n = NSTextField(wrappingLabelWithString: "\(o.value.capitalized) made by one line of code, kept together: drag to move it, "
+                                + "drag a corner to resize it. Change anything else in the source.")
+            n.textColor = .secondaryLabelColor; width(n); inspector.addArrangedSubview(n)
         } else {
             let w = NSColorWell(); w.color = NSColor(hex: o.color ?? "#FFFFFF")
             w.target = self; w.action = #selector(colorCommitted(_:))
@@ -2041,6 +2045,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         func row(_ views: [NSView]) { let r = NSStackView(views: views); r.spacing = 16; r.alignment = .bottom; inspector.addArrangedSubview(r) }
         let dims = o.dims ?? [b.w, b.h]
         row([field("X (px)", b.cx, #selector(xCommitted(_:))), field("Y (px)", b.cy, #selector(yCommitted(_:)))])
+        if o.kind == "drawing" { return }           // its size is its pieces': corner handles scale it
         row([field("Width", dims[0], #selector(wCommitted(_:))), field("Height", dims[1], #selector(hCommitted(_:)))])
         if o.kind != "line" {
             var views: [NSView] = [field("Rotation (°)", o.rotation ?? 0, #selector(rotationCommitted(_:)), decimals: 1)]

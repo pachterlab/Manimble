@@ -818,6 +818,20 @@ class Planner:
         a, b = t.src.span(t.node)
         return [Edit(t.src.rel, a, b, lit)]
 
+    def plan_drawing(self, obj: dict, text: str, each: bool = True) -> list[tuple[str, list[Edit]]]:
+        """A drawing (what one line of code makes in bulk) moves or scales as a whole: `text` (`.shift(...)`,
+        `.scale(...)`) goes at the end of the `name = ...` statement holding it, so layout calls on the whole
+        (`VGroup(*[...]).arrange(...).move_to(...)`) come first; `each`: else on every piece where it is made."""
+        attempts = []
+        src, _, top, stmt = self._creation(obj)
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.value, ast.Call) \
+                and stmt.value is not top and not src.in_loop(stmt):
+            _, end = src.span(stmt.value)
+            attempts.append(("appended it to the statement that makes the drawing", [Edit(src.rel, end, end, text)]))
+        if each:
+            attempts.append(("appended it where each piece is made", [self._append_chain(obj["frames"], text)]))
+        return attempts
+
     def _append_chain(self, frames: list, text: str) -> Edit:
         fr = frames[-1]
         src = self.p.src(fr["file"])
