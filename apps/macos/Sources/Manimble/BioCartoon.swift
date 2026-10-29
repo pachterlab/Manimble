@@ -159,6 +159,21 @@ enum BioCartoonCLI {
         return try JSONDecoder().decode(V.self, from: try await run(exe, ["--version", "--json"])).version
     }
 
+    /// The catalog file searches read (`--version --json`), nil before the first download.
+    static func catalogPath(_ exe: String) async -> String? {
+        struct V: Decodable { struct C: Decodable { var path: String? }; var catalog: C? }
+        return (try? JSONDecoder().decode(V.self, from: try await run(exe, ["--version", "--json"])))?.catalog?.path
+    }
+
+    /// `biocartoon sync`: download the published catalog when it is newer than the copy searches read (they never
+    /// check on their own, so new uploads would not show up). True when a newer one came in; with no copy yet it does
+    /// nothing, since the first search downloads it.
+    static func sync(_ exe: String) async throws -> Bool {
+        guard let before = await catalogPath(exe) else { return false }
+        _ = try await run(exe, ["sync"], timeout: 600)
+        return await catalogPath(exe) != before
+    }
+
     /// One page of `biocartoon search` keeping what passes `filter` (each option repeated per value; 0.3.0+).
     static func search(_ exe: String, query: String, filter: BCFilter, sort: String, offset: Int, limit: Int) async throws -> [BCIcon] {
         var args = ["search"]
@@ -1104,17 +1119,43 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             }
             self.exe = exe
             installButton.isHidden = true
+            syncCatalog(exe)
             // the first call downloads the catalog, so it goes alone; the dropdowns fill in behind the results
             if let s = try? await BioCartoonCLI.sources(exe) { setSources(s) }
             reload()
             syncStars()
-            async let cats = BioCartoonCLI.categories(exe)
-            async let lics = BioCartoonCLI.licenseCounts(exe)
-            async let own = BioCartoonCLI.sourceCategories(exe)
-            if let c = try? await cats { setCategories(c) }
-            if let l = try? await lics { setLicenses(l) }
-            if let d = try? await own { setDbCategories(d) }
+            await loadChoices(exe)
         }
+    }
+
+    /// Whether this run of Manimble has checked for a newer catalog.
+    private static var catalogSynced = false
+
+    /// Once per run, bring the downloaded catalog up to the published one in the background; searches use the copy
+    /// they have meanwhile, and start over on the new one when it comes in.
+    private func syncCatalog(_ exe: String) {
+        guard !Self.catalogSynced else { return }
+        Self.catalogSynced = true
+        Task {
+            do {
+                guard try await BioCartoonCLI.sync(exe), self.exe == exe else { return }
+                if let s = try? await BioCartoonCLI.sources(exe) { setSources(s) }
+                reload()
+                await loadChoices(exe)
+            } catch {
+                NSLog("BioCartoon catalog sync failed: \(error)")  // offline: keep the copy we have
+            }
+        }
+    }
+
+    /// The Category, License and database-category dropdowns' choices.
+    private func loadChoices(_ exe: String) async {
+        async let cats = BioCartoonCLI.categories(exe)
+        async let lics = BioCartoonCLI.licenseCounts(exe)
+        async let own = BioCartoonCLI.sourceCategories(exe)
+        if let c = try? await cats { setCategories(c) }
+        if let l = try? await lics { setLicenses(l) }
+        if let d = try? await own { setDbCategories(d) }
     }
 
     private func setMessage(_ s: String) {
