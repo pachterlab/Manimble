@@ -716,9 +716,9 @@ class Slide(Scene):
         for m in TRACKED:
             if id(m) not in top:
                 continue
-            site = (m._sl_frames[-1]["file"], tuple(m._sl_frames[-1]["pos"]))
-            if m._sl_kind in ("line", "shape", "table") and sites[site] > 12:
-                bulk.setdefault(site, []).append(m)
+            at = (m._sl_frames[-1]["file"], tuple(m._sl_frames[-1]["pos"]))
+            if m._sl_kind in ("line", "shape", "table") and sites[at] > 12:
+                bulk.setdefault(at, []).append(m)
                 continue          # data-point style bulk objects are not individually editable: one drawing, below
             try:
                 if m._sl_kind != "image" and max_opacity(m) < 0.03:
@@ -758,17 +758,17 @@ class Slide(Scene):
             except Exception:
                 traceback.print_exc()
         # What one line of code makes in bulk (a row of glyphs, a cloud of dots) selects and moves as one drawing
-        for site, ms in bulk.items():
+        for at, ms in bulk.items():
             try:
                 ms = [m for m in ms if max_opacity(m) >= 0.03]
                 if not ms:
                     continue
-                uid = DRAWING_BASE + first[site]
+                uid = DRAWING_BASE + first[at]
                 x0, x1 = min(m.get_left()[0] for m in ms), max(m.get_right()[0] for m in ms)
                 y0, y1 = max(m.get_top()[1] for m in ms), min(m.get_bottom()[1] for m in ms)
                 vis.append([uid, (x0 + fw / 2) / fw * pw, (fh / 2 - y0) / fh * ph,
                             (x1 + fw / 2) / fw * pw, (fh / 2 - y1) / fh * ph])
-                DRAWINGS[uid] = {"frames": ms[0]._sl_frames, "count": sites[site]}
+                DRAWINGS[uid] = {"frames": ms[0]._sl_frames, "count": sites[at]}
                 fam = [f for f in extract_mobject_family_members(ms, use_z_index=True, only_those_with_points=True)
                        if id(f) not in taken]
                 for f in fam:
