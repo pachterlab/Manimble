@@ -3,5 +3,5 @@ manim-slides==5.7.0
 Pillow==12.3.0
 matplotlib==3.11.2
 python-pptx==1.0.2
-biocartoon==0.4.2
+biocartoon==0.4.3
 imageio-ffmpeg==0.6.0
