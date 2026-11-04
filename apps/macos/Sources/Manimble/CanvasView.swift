@@ -295,6 +295,15 @@ final class CanvasView: MTKView {
     var onDelete: ((Int) -> Void)?
     /// Wraps the per-object edits of a multi-object move or delete so they undo as one step (label, edits).
     var onManyEdits: ((String, () -> Void) -> Void)?
+    /// Delete every selected object (Delete key, Edit ▸ Cut) as one undo step.
+    func deleteSelection() {
+        let all = selectedIDs
+        guard !all.isEmpty else { return }
+        // highest id first: ids follow creation order, so the rest keep theirs
+        together(all.count, "delete \(all.count) objects") { for id in all.sorted(by: >) { onDelete?(id) } }
+        others = []
+    }
+
     private func together(_ count: Int, _ label: String, _ body: () -> Void) {
         if count > 1, let f = onManyEdits { f(label, body) } else { body() }
     }
@@ -1517,9 +1526,7 @@ final class CanvasView: MTKView {
         case 126: for id in all { onNudge?(id, 0, -n) }
         case 125: for id in all { onNudge?(id, 0, n) }
         case 36: onEdit?(s, nil)
-        case 51, 117:                                  // highest id first: ids follow creation order, so the rest keep theirs
-            together(all.count, "delete \(all.count) objects") { for id in all.sorted(by: >) { onDelete?(id) } }
-            others = []
+        case 51, 117: deleteSelection()
         case 53: selection = nil; onSelect?(nil)
         default: super.keyDown(with: event)
         }

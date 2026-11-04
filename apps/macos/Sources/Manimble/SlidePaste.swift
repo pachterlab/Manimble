@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// web page or Google Slides, picture data from Preview, Keynote, PowerPoint or a screenshot), or else text with the
 /// bold, italics and colours of its characters.
 enum SlidePaste {
+    case objects(CopiedObjects)
     case pictures([Picture])
     case text(String, styles: [String: [CharRun]])
 
@@ -19,6 +20,9 @@ enum SlidePaste {
 
     /// What the clipboard holds that a slide can take, or nil.
     @MainActor static func read(_ pb: NSPasteboard) -> SlidePaste? {
+        if let d = pb.data(forType: CopiedObjects.type), let c = try? JSONDecoder().decode(CopiedObjects.self, from: d) {
+            return .objects(c)
+        }
         let files = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
             .filter { u in UTType(filenameExtension: u.pathExtension).map { t in pictureTypes.contains { t.conforms(to: $0) } } ?? false }
         if !files.isEmpty { return .pictures(files.map { .file($0) }) }
@@ -123,7 +127,101 @@ enum SlidePaste {
     }
 }
 
+/// What Copy puts on the clipboard for objects of a slide, in Manimble's own type (read back by Paste): per piece of
+/// code, the code that makes it again in the deck (nil when it cannot travel as code), where it sits, and a picture of
+/// each object it makes, pasted instead on another deck or where the code does not run.
+struct CopiedObjects: Codable {
+    static let type = NSPasteboard.PasteboardType("com.manimble.objects")
+    struct Picture: Codable { var png: Data; var box: [Double] }       // box: frame px (x0, y0, x1, y1)
+    struct Item: Codable {
+        var kind: String
+        var code: String?
+        var why: String?
+        var at: [Double]                 // its centre, manim units
+        var box: [Double]                // frame px
+        var pictures: [Picture]
+        var text: String?
+    }
+    var deck: String                     // the original deck folder they were copied from
+    var scene: String
+    var items: [Item]
+}
+
+/// The engine's answer to `copy` (copy_objects).
+private struct CopyResult: Decodable {
+    struct Picture: Decodable { var png: String; var box: [Double] }
+    struct Item: Decodable {
+        var kind: String, code: String?, why: String?, at: [Double], box: [Double], pictures: [Picture], text: String?
+    }
+    var ok: Bool?, error: String?, items: [Item]?
+}
+
 extension MainController {
+    // MARK: copying objects between slides
+
+    @objc func copy(_ sender: Any?) { copySelection(then: nil) }
+    @objc func cut(_ sender: Any?) { copySelection { [weak self] in self?.canvas.deleteSelection() } }
+
+    /// Edit ▸ Copy (⌘C) on the slide: the selected objects onto the clipboard as Manimble objects, and as a picture
+    /// and their text for other apps; `then` runs once they are there (Cut deletes them).
+    func copySelection(to pb: NSPasteboard = .general, then: (() -> Void)?) {
+        let oids = canvas.selectedIDs
+        guard let ws = workspace, let name = sceneName, !oids.isEmpty else { return }
+        submit { [weak self] in
+            guard let self = self else { return }
+            guard let r = try? await self.engine.call("copy", ["scene": name, "stop": self.stopIndex, "oids": oids], as: CopyResult.self),
+                  let items = r.items, !items.isEmpty else {
+                self.toast("Could not copy: these elements are not on this build", error: true); return
+            }
+            let copied = CopiedObjects(deck: ws.original.path, scene: name, items: items.map { it in
+                CopiedObjects.Item(kind: it.kind, code: it.code, why: it.why, at: it.at, box: it.box,
+                                   pictures: it.pictures.compactMap { p in
+                                       (try? Data(contentsOf: URL(fileURLWithPath: p.png))).map { CopiedObjects.Picture(png: $0, box: p.box) }
+                                   }, text: it.text)
+            })
+            pb.clearContents()
+            if let d = try? JSONEncoder().encode(copied) { pb.setData(d, forType: CopiedObjects.type) }
+            let texts = copied.items.compactMap(\.text)
+            if !texts.isEmpty { pb.setString(texts.joined(separator: "\n"), forType: .string) }
+            if let png = copied.items.first?.pictures.first?.png { pb.setData(png, forType: .png) }
+            if let why = copied.items.first(where: { $0.code == nil })?.why {
+                self.toast("Copied; part of it pastes as a picture: \(why)")
+            }
+            then?()
+        }
+    }
+
+    /// Paste objects copied from a slide: their code (in the same deck), on this slide where they were on theirs,
+    /// or a little below and right of them on their own slide; their pictures where the code cannot go.
+    func pasteObjects(_ c: CopiedObjects, into ws: Workspace) {
+        let w = Double(canvas.frameSize.width), unit = Double(canvas.unitPx)
+        let sameDeck = URL(fileURLWithPath: c.deck).standardizedFileURL.path == ws.original.standardizedFileURL.path
+        var d = 0.0
+        if c.scene == sceneName {
+            let k = MainController.pastes[sceneName ?? "", default: 0] + 1
+            MainController.pastes[sceneName ?? ""] = k % 6
+            d = Double(k) * 0.04 * w
+        }
+        let shifted = { (b: [Double]) in b.count == 4 ? [b[0] + d, b[1] + d, b[2] + d, b[3] + d] : b }
+        asOneUndoStep("paste") {
+            for item in c.items {
+                let pictures = { [weak self] in
+                    guard let self = self else { return }
+                    for p in item.pictures {
+                        guard let file = SlidePaste.save(p.png, ext: "png", into: ws.work) else { continue }
+                        let b = shifted(p.box), cy = (b[1] + b[3]) / 2
+                        self.insert(kind: "image", extra: ["file": file, "path": ws.work.appendingPathComponent(file).path,
+                                                           "sx": b[0], "sy": cy, "ex": b[2], "ey": cy])
+                    }
+                }
+                guard sameDeck, let code = item.code, item.at.count == 2 else { pictures(); continue }
+                let x = item.at[0] + d / unit, y = item.at[1] - d / unit
+                insert(kind: "code", extra: ["code": code + String(format: ".move_to((%.3f, %.3f, 0))", x, y), "box": shifted(item.box)],
+                       onFail: pictures)
+            }
+        }
+    }
+
     /// Edit ▸ Paste (⌘V) on the slide: pictures or text from the clipboard, inserted on the build on screen.
     @objc func paste(_ sender: Any?) { pasteOnSlide(from: .general) }
 
@@ -140,6 +238,8 @@ extension MainController {
             return (Double(canvas.frameSize.width) / 2 + d, Double(canvas.frameSize.height) / 2 + d)
         }
         switch what {
+        case .objects(let c):
+            pasteObjects(c, into: ws)
         case .text(let text, let styles):
             let (cx, cy) = centre()
             var extra: [String: Any] = ["value": text, "sx": cx - 1, "sy": cy, "ex": cx + 1, "ey": cy]
@@ -189,6 +289,6 @@ extension MainController {
     var canPasteOnSlide: Bool {
         guard sceneName != nil, player == nil else { return false }
         let pb = NSPasteboard.general
-        return pb.availableType(from: [.fileURL, .string, .html, .png, .tiff, .pdf]) != nil
+        return pb.availableType(from: [CopiedObjects.type, .fileURL, .string, .html, .png, .tiff, .pdf]) != nil
     }
 }

@@ -2849,6 +2849,8 @@ class Manimble:
                 codes["image"] = f'SVGMobject({where}).scale({fmt(k, 4)}, scale_stroke=True).move_to({origin})'
             else:
                 codes["image"] = f'ImageMobject({where}).set(width={iw}).move_to({origin})'
+        if kind == "code":                 # pasted: code Copy took from another slide (copy_objects)
+            return str(req.get("code") or "") or None
         if kind == "pen":
             pts = [p for p in (req.get("points") or []) if isinstance(p, (list, tuple)) and len(p) == 2]
             if len(pts) < 2:
@@ -2909,6 +2911,8 @@ class Manimble:
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
+            if kind == "code" and req.get("box"):
+                written, new = self._place_pasted(name, si, edit.rel, line, req["box"], written, new)
             self._commit(f"insert {kind}", written)
             d = new["data"]
             vis = {v[0] for v in d["stops"][min(si, len(d["stops"]) - 1)]["visible"]}
@@ -2916,6 +2920,43 @@ class Manimble:
                                                  if o["frames"][-1]["pos"][0] == line and o["frames"][-1]["file"] == edit.rel))
             return {"ok": True, "message": f"inserted {kind}", "line": line, "file": edit.rel,
                     "changed": self.last_changed, "hidden": not shown}
+
+    def _place_pasted(self, name, stop, rel, line, want, written, new):
+        """A pasted copy (code Copy took) moved so that what it makes sits where the copied objects did (`want`, their
+        box in frame px): its code is placed by the centre of what the call returns, which can be more than they are
+        (a helper's whole drawing). The `.move_to((x, y, 0))` ending the inserted line is corrected and the slide
+        rendered again when they are more than 2 px apart."""
+        d = new["data"]
+        st = d["stops"][min(stop, len(d["stops"]) - 1)]
+        boxes = [v for v in st["visible"] if (o := d["objects"].get(str(v[0]))) is not None
+                 and o["frames"][-1]["file"] == rel and o["frames"][-1]["pos"][0] == line]
+        if not boxes:
+            return written, new
+        dx = (want[0] + want[2]) / 2 - (min(b[1] for b in boxes) + max(b[3] for b in boxes)) / 2
+        dy = (want[1] + want[3]) / 2 - (min(b[2] for b in boxes) + max(b[4] for b in boxes)) / 2
+        if abs(dx) <= 2 and abs(dy) <= 2:
+            return written, new
+        src = self.project.src(rel)
+        a = src.line_starts[line - 1]
+        b = src.line_starts[line] if line < len(src.line_starts) else len(src.data)
+        text = src.data[a:b].decode("utf-8")
+        m = list(re.finditer(r"\.move_to\(\((-?[\d.]+), (-?[\d.]+), 0\)\)", text))
+        if not m:
+            return written, new
+        ux, uy, _, _ = self._units(name)
+        x, y = float(m[-1].group(1)) + dx * ux, float(m[-1].group(2)) - dy * uy
+        start = a + len(text[:m[-1].start()].encode("utf-8"))
+        end = a + len(text[:m[-1].end()].encode("utf-8"))
+        from .srcedit import Edit
+        again = self.project.apply([Edit(rel, start, end, f".move_to(({fmt(x)}, {fmt(y)}, 0))")])
+        placed = self.render_now(name, interactive=True)
+        if "error" in placed:
+            self._restore(again, 0)
+            self.results.pop(name, None)
+            return written, self.render_now(name, interactive=True)
+        for f, (before, after) in again.items():
+            written[f] = (written[f][0] if f in written else before, after)
+        return written, placed
 
     def _anchored_ends(self, data, scene, line, anchors):
         """Expressions for the ends of a line inserted at `line` of the scene's construct() that are attached to
@@ -3404,6 +3445,52 @@ class Manimble:
     def svg_icon(self, req: dict) -> dict:
         """{svg, png, out}: a manim-ready copy of a BioCartoon SVG when manim draws it like its PNG (svg_icon.prepare)."""
         return self.aux_worker.request(dict(req, cmd="svg_icon"))
+
+    def copy_objects(self, req: dict) -> dict:
+        """What Copy puts on the clipboard for objects of a slide (`oids`, at build `stop`), one entry per piece of code:
+        the code that makes it again elsewhere in the deck (srcedit.portable_code; None, with `why`, when it cannot
+        travel as code), where its centre is (`at`, manim units), its box (frame px), and the picture and box of each
+        object it makes (`pictures`, to paste instead), with its text. One call that makes several objects (a helper
+        drawing a scale bar with its labels) travels as code only when all of them are copied."""
+        name = req["scene"]
+        rec = self.fresh_record(name)
+        if "error" in rec:
+            return {"ok": False, "error": rec["error"]}
+        data = rec["data"]
+        st = data["stops"][min(int(req.get("stop", 0)), len(data["stops"]) - 1)]
+        vis = {str(v[0]): v for v in st["visible"]}
+        sprites = {str(sp["oid"]): sp for sp in st["sprites"]}
+        ux, uy, pw, ph = self._units(name)
+        site = lambda o: (o["frames"][-1]["file"], tuple(o["frames"][-1]["pos"]))  # noqa: E731
+        made = {}
+        for k, o in data["objects"].items():
+            if str(k) in vis and o["kind"] != "drawing":
+                made.setdefault(site(o), []).append(str(k))
+        groups: dict = {}                    # site -> the copied objects made there, in the order asked for
+        for oid in req.get("oids") or []:
+            o = data["objects"].get(str(oid))
+            if o is not None and str(oid) in vis:
+                groups.setdefault(site(o) if o["kind"] != "drawing" else ("drawing", oid), []).append(str(oid))
+        items = []
+        for key, oids in groups.items():
+            objs = [data["objects"][k] for k in oids]
+            whole = key in made and set(made[key]) <= set(oids)
+            if objs[0]["kind"] == "drawing":
+                code, why = None, "it is drawn by a loop"
+            elif not whole:
+                code, why = None, f"it is made together with {len(made[key]) - len(oids)} other element(s) by one call"
+            else:
+                code, why = self.planner.portable_code(objs[0])
+            boxes = [vis[k] for k in oids]
+            x0, y0 = min(b[1] for b in boxes), min(b[2] for b in boxes)
+            x1, y1 = max(b[3] for b in boxes), max(b[4] for b in boxes)
+            pics = [{"png": str(self.cache_dir / name / rec["dir"] / sprites[k]["file"]), "box": vis[k][1:5]}
+                    for k in oids if k in sprites]
+            texts = [o["value"] for o in objs if o["kind"] in ("text", "tex")]
+            items.append({"kind": objs[0]["kind"], "code": code, "why": why,
+                          "at": [round(((x0 + x1) / 2 - pw / 2) * ux, 3), round((ph / 2 - (y0 + y1) / 2) * uy, 3)],
+                          "box": [x0, y0, x1, y1], "pictures": pics, "text": "\n".join(texts) or None})
+        return {"ok": True, "items": items, "file": self.scene(name)["file"]}
 
     def sprite(self, req: dict) -> dict:
         """Rasterise a single text/formula for instant on-canvas preview."""

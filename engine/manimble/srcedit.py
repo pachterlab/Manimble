@@ -1368,6 +1368,40 @@ class Planner:
             raise EditError("statement not found")
         return src, call, top, stmt
 
+    # where a chain puts its object: left off a copy, which is placed by a move_to() of its own
+    PLACING = ("move_to", "shift", "next_to", "to_edge", "to_corner", "align_to", "set_x", "set_y", "set_z", "center")
+
+    def portable_code(self, obj: dict) -> tuple[str | None, str]:
+        """Code that makes the object again on another slide of the deck (Copy): the expression that made it, without
+        the calls at the end of its chain that placed it. None, with the reason, when that code reads names of its
+        own slide's code (a loop's variable, an object made earlier) or was not written in the slide."""
+        try:
+            src, call, top, stmt = self._creation(obj)
+        except EditError as e:
+            return None, str(e)
+        expr = top
+        while expr is not call and isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) \
+                and expr.func.attr in self.PLACING:
+            expr = expr.func.value
+        fdef = src.enclosing(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if fdef is None:
+            return None, "it is not made in a slide's code"
+        # names the slide's code binds (its variables, loop variables, arguments) are not there on another slide
+        local = {a.arg for a in fdef.args.args + fdef.args.kwonlyargs} - {"self"}
+        for n in ast.walk(fdef):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                local.add(n.id)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n is not fdef:
+                local.add(n.name)
+        bound = {n.id for c in ast.walk(expr) if isinstance(c, (ast.comprehension,))
+                 for n in ast.walk(c.target) if isinstance(n, ast.Name)}
+        bound |= {a.arg for lam in ast.walk(expr) if isinstance(lam, ast.Lambda) for a in lam.args.args}
+        used = sorted({n.id for n in ast.walk(expr) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)} - bound)
+        stuck = [n for n in used if n in local]
+        if stuck:
+            return None, f"its code reads {', '.join(stuck[:3])} from its slide"
+        return src.text(expr), ""
+
     def names_of(self, obj: dict) -> set[str]:
         """The variables the statement creating the object assigns (`img = ImageMobject(...)` -> {"img"})."""
         try:

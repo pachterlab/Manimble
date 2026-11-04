@@ -272,7 +272,9 @@ extension MainController: NSToolbarDelegate {
         insert(kind: "image", extra: ["file": name])
     }
 
-    func insert(kind: String, extra: [String: Any] = [:]) {
+    /// `onFail`: what to do instead of reporting the error when the insert does not go in (a pasted copy's code that
+    /// does not run on this slide, say).
+    func insert(kind: String, extra: [String: Any] = [:], onFail: (() -> Void)? = nil) {
         guard let scene = sceneName else { return }
         var req = extra; req["kind"] = kind; req["scene"] = scene
         // 1. show the element immediately (rasterised on its own, in parallel with the real insert)
@@ -293,6 +295,7 @@ extension MainController: NSToolbarDelegate {
             guard let r = res, r.ok == true else {
                 self.canvas.ghost = nil
                 if kind == "pen", !self.canvas.pendingStrokes.isEmpty { self.canvas.pendingStrokes.removeFirst() }
+                if let f = onFail { f(); return }
                 self.toast(res?.error ?? "insert failed", error: true); return
             }
             self.lastChanged = ChangedLines(file: r.file, ranges: [[r.line ?? 1, r.line ?? 1]])

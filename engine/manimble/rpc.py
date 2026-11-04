@@ -75,6 +75,7 @@ def main():
         "export": lambda a: need().export(a),
         "insert": lambda a: need().insert(a),
         "insert_sprite": lambda a: need().insert_sprite(a),
+        "copy": lambda a: need().copy_objects(a),
         "svg_icon": lambda a: need().svg_icon(a),
         "pages": lambda a: need().pages(a),
         "slide": lambda a: need().slide_op(a),
