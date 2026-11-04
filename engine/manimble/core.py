@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from .srcedit import (BLANK_CELLS, BOX_PAD, EditError, Planner, Project, Src, _stmt_lines, box_tag, ensure_helpers, fmt, py_str, py_tex,
-                      insert_kwarg, map_ranges, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
+                      CHAR_STYLES, insert_kwarg, map_ranges, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
 
 HERE = Path(__file__).resolve().parent
 
@@ -133,6 +133,17 @@ def _merged(ranges) -> list:
             out[-1][1] = max(out[-1][1], b)
         else:
             out.append([a, b])
+    return out
+
+
+def _color_runs(runs) -> list:
+    """[start, end, colour] ranges sorted, upper-case, with touching ones of one colour joined."""
+    out = []
+    for a, b, c in sorted((int(a), int(b), str(c).upper()) for a, b, c in runs if int(b) > int(a)):
+        if out and a <= out[-1][1] and c == out[-1][2]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b, c])
     return out
 
 
@@ -704,13 +715,16 @@ class Manimble:
             k = (o["frames"][-1]["file"], tuple(o["frames"][-1]["pos"]))
             info = {
                 "kind": o["kind"], "value": o["value"], "fontSize": o["font_size"], "color": o["color"],
-                "siblings": counts[k], "font": o.get("font"), "weight": o.get("weight"), "slant": o.get("slant"), "italic": o.get("italic"),
+                "siblings": counts[k], "font": o.get("font"), "weight": o.get("weight"), "slant": o.get("slant"),
+                "italic": o.get("italic"), "bold": o.get("bold"), "colors": o.get("colors"),
                 "loc": f"{o['frames'][-1]['file']}:{o['frames'][-1]['pos'][0]}",
                 "rotation": o.get("rotation"), "dims": o.get("dims"),
                 "group": o["group"]["id"] if o.get("group") else None,
             }
             if o["kind"] in ("text", "tex"):
                 info["format"] = self.planner.format_info(o)
+                if o["kind"] == "text":
+                    info["decorations"] = self.planner.char_decorations(o)
                 frame = self.planner.frame_box(o) if o["kind"] == "text" else None
                 if frame:
                     info["frame"] = [(frame["x"] + fw / 2) * pw / fw, (fh / 2 - frame["y"]) * ph / fh,
@@ -875,19 +889,20 @@ class Manimble:
             try:
                 if op == "text":
                     label = "edit text" if obj["kind"] == "text" else "edit formula"
-                    # italics on part of the text: [start, end] character ranges of the new text
-                    italic = req.get("italic") if obj["kind"] == "text" else None
+                    # formatting of part of the text (srcedit.CHAR_STYLES): [start, end(, colour)] ranges of the new text
+                    styles = {k: v for k, v in (req.get("styles") or {}).items() if k in CHAR_STYLES} \
+                        if obj["kind"] == "text" else {}
                     box = self.planner.box_width(obj) if obj["kind"] == "text" else None
                     if box and before_box:          # a text box: the new text flows to its width
                         value = self._wrapped(obj, req["value"], box, (before_box[3] - before_box[1]) * ux)
                         stored = (self.planner.box_info(obj) or {}).get("w") or box
-                        if italic is not None:      # the same characters once wrapped
-                            italic = map_ranges(req["value"], value, italic)
-                        attempts = [(label, self.planner.plan_wrap(obj, value, stored, italic=italic))]
+                        styles = {k: [m + list(r[2:]) for r in runs for m in map_ranges(req["value"], value, [r[:2]])]
+                                  for k, runs in styles.items()}          # the same characters once wrapped
+                        attempts = [(label, self.planner.plan_wrap(obj, value, stored, styles=styles))]
                     else:
-                        attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True), italic=italic))]
-                    if italic is not None:
-                        req = dict(req, want_italic=_merged(italic))
+                        attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True), styles=styles))]
+                    if styles:
+                        req = dict(req, want_styles=styles)
                 elif op == "wrap":
                     label = "text box width"
                     if obj["kind"] != "text" or not before_box:
@@ -1129,9 +1144,10 @@ class Manimble:
                     hint = ""
                     if "NoneType" in last_error or "get_part" in last_error:
                         hint = " The slide's code picks out parts of this text/formula by name, so the new content must keep those parts."
-                    elif "unexpected keyword argument 't2s'" in last_error:
-                        hint = (" This text is made by a helper function that does not pass t2s on to Text, so italics"
-                                " cannot be set on part of it here: give the helper **kwargs, or write Text(...) itself.")
+                    elif re.search(r"unexpected keyword argument 't2[swc]'", last_error):
+                        hint = (" This text is made by a helper function that does not pass t2s / t2w / t2c on to"
+                                " Text, so part of it cannot be formatted here: give the helper **kwargs, or write"
+                                " Text(...) itself.")
                     return {"ok": False, "error": "The slide no longer renders with this change, so it was undone: "
                             + last_error[-300:] + hint}
                 continue
@@ -1653,10 +1669,18 @@ class Manimble:
             if abs(((got - want) + 180.0) % 360.0 - 180.0) > 0.5:
                 return False, "later code in the slide overrides this rotation"
             return True, ""
-        if op == "text" and req.get("want_italic") is not None:
-            got = _merged((data["objects"].get(oid) or {}).get("italic") or [])
-            if got != req["want_italic"]:
-                return False, "the text's italics are set elsewhere in the code (a helper that makes it, say)"
+        if op == "text" and req.get("want_styles"):
+            o = data["objects"].get(oid) or {}
+            for kind, field in (("italic", "italic"), ("bold", "bold"), ("color", "colors")):
+                if kind not in req["want_styles"]:
+                    continue
+                want, got = req["want_styles"][kind], o.get(field) or []
+                if kind == "color":
+                    same = _color_runs(want) == _color_runs(got)
+                else:
+                    same = _merged(want) == _merged(got)
+                if not same:
+                    return False, f"the text's {kind} is set elsewhere in the code (a helper that makes it, say)"
             return True, ""
         if op not in ("move", "resize", "size"):
             return True, ""

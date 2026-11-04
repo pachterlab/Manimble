@@ -396,7 +396,7 @@ final class CanvasView: MTKView {
         var fontPx: CGFloat                  // font size in frame px
         var family: String?, bold: Bool, italic: Bool
         var original: String
-        var italicTouched = false            // italics were set or cleared on part of the text while typing
+        var touched: Set<String> = []        // formatting kinds set or cleared on part of the text while typing
         var done: ((String?, @escaping () -> Void) -> Void)?
         var cell: (row: Int, col: Int, area: Box)?   // typing into one cell of a table; the rest of it stays drawn
         var placeholder: Int?                // typing into the layout box on this line (oid is -1)
@@ -408,9 +408,13 @@ final class CanvasView: MTKView {
     /// top (`top`) or vertical centre.
     struct TextAnchor { var x: Double; var y: Double; var top: Bool; var align: String }
     fileprivate var inline: InlineEdit?
-    /// The characters left in italics by the last text edit ([start, end) ranges, Python string indices), or nil
-    /// when italics were not changed in it; read in `beginTextEdit`'s `done`.
-    private(set) var committedItalic: [[Int]]?
+    /// The formatting the last text edit changed, by kind (CanvasView.charKinds): the characters that have it, or
+    /// nil when it changed none; read in `beginTextEdit`'s `done`.
+    private(set) var committedStyles: [String: [CharRun]]?
+    /// The colour the text being typed is drawn in, where none of its own is set.
+    private var editorTextColor = NSColor.white
+    /// While typing on the slide: the formatting of the selection changed (to update the format bar's toggles).
+    var onInlineSelectionStyle: ((Set<String>) -> Void)?
     private var colorCache: [String: NSColor] = [:]
     private var promptCache: [String: MTLTexture] = [:]
     /// The object whose text is being edited on the slide, if any.
@@ -1584,8 +1588,8 @@ extension CanvasView: NSTextViewDelegate {
     /// With `cell`, types into that cell of a table instead (`sizing`: the text its ink shows, when not `text`).
     /// `align`, `valign` and `lineSpacing` lay the lines out as Manim will; with `frame`, the text is pinned
     /// in that frame by them.
-    func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool, italicRuns: [[Int]]? = nil,
-                       color: String?,
+    func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool,
+                       styles: [String: [CharRun]]? = nil, color: String?,
                        at: CGPoint?, cell: (row: Int, col: Int, cell: Box, ink: Box)? = nil, sizing: String? = nil,
                        placeholder: Placeholder? = nil, align: String = "left", valign: String = "top",
                        lineSpacing: Double? = nil, frame: Box? = nil,
@@ -1621,11 +1625,17 @@ extension CanvasView: NSTextViewDelegate {
         tv.textColor = c; tv.insertionPointColor = c
         tv.string = text
         tv.typingAttributes[.foregroundColor] = c
-        let ns = text as NSString
-        for r in italicRuns ?? (italic ? [[0, text.unicodeScalars.count]] : []) where r.count == 2 {
-            let a = CanvasView.utf16(ns, r[0]), b = CanvasView.utf16(ns, r[1])
-            if b > a { tv.textStorage?.addAttribute(CanvasView.italicMark, value: true, range: NSRange(location: a, length: b - a)) }
+        let ns = text as NSString, all = [CharRun(0, text.unicodeScalars.count)]
+        var given = styles ?? [:]
+        given["italic"] = given["italic"] ?? (italic ? all : [])
+        given["bold"] = given["bold"] ?? (bold ? all : [])
+        for (kind, runs) in given {
+            for r in runs {
+                let a = CanvasView.utf16(ns, r.start), b = CanvasView.utf16(ns, r.end)
+                if b > a, let ts = tv.textStorage { CanvasView.mark(ts, kind, r.color, NSRange(location: a, length: b - a)) }
+            }
         }
+        editorTextColor = c
         tv.bullets = placeholder?.role == "body"
             || (!text.isEmpty && text.components(separatedBy: "\n").allSatisfy { $0.hasPrefix(CanvasView.bullet) })
         if let line = placeholder?.line {
@@ -1675,18 +1685,47 @@ extension CanvasView: NSTextViewDelegate {
         e.view.setSelectedRange(NSRange(location: 0, length: 0))
         if window?.firstResponder === e.view { window?.makeFirstResponder(self) }
         let v = e.view.string
-        committedItalic = e.italicTouched ? italicRuns(e.view) : nil
+        committedStyles = e.touched.isEmpty ? nil : Dictionary(uniqueKeysWithValues: e.touched.map { ($0, charRuns(e.view, $0)) })
         let release: () -> Void = { [weak self, weak view = e.view] in
             guard let self = self, let e = self.inline, e.view === view else { return }
             e.view.removeFromSuperview()
             self.inline = nil
             self.setNeedsDisplay(self.bounds)
         }
-        done(commit && (v != e.original || committedItalic != nil) ? v : nil, release)
+        done(commit && (v != e.original || committedStyles != nil) ? v : nil, release)
     }
 
-    /// Marks the characters set in italics in the editor (the face itself is chosen in `layoutTextEditor`).
+    /// What the editor marks a character's formatting with (the faces themselves are chosen in `layoutTextEditor`).
     static let italicMark = NSAttributedString.Key("manimble.italic")
+    static let boldMark = NSAttributedString.Key("manimble.bold")
+    static let colorMark = NSAttributedString.Key("manimble.color")          // "#RRGGBB"
+    static let highlightMark = NSAttributedString.Key("manimble.highlight")  // "#RRGGBB"
+    /// The kinds of formatting that can be set on part of a text (srcedit.CHAR_STYLES).
+    static let charKinds = ["italic", "bold", "color", "underline", "strike", "highlight"]
+
+    /// Mark characters with a kind of formatting (`hex` for colour and highlight), or clear it (`on` false).
+    static func mark(_ ts: NSTextStorage, _ kind: String, _ hex: String?, _ r: NSRange, on: Bool = true) {
+        let keys: [NSAttributedString.Key]
+        var values: [Any] = []
+        switch kind {
+        case "italic": keys = [italicMark]; values = [true]
+        case "bold": keys = [boldMark]; values = [true]
+        case "underline": keys = [.underlineStyle]; values = [NSUnderlineStyle.single.rawValue]
+        case "strike": keys = [.strikethroughStyle]; values = [NSUnderlineStyle.single.rawValue]
+        case "color": keys = [colorMark, .foregroundColor]; values = [hex ?? "#FFFFFF", NSColor(hex: hex ?? "#FFFFFF")]
+        case "highlight": keys = [highlightMark, .backgroundColor]; values = [hex ?? "#FFD400", NSColor(hex: hex ?? "#FFD400").withAlphaComponent(0.6)]
+        default: return
+        }
+        for (i, k) in keys.enumerated() {
+            if on { ts.addAttribute(k, value: values[i], range: r) } else { ts.removeAttribute(k, range: r) }
+        }
+    }
+
+    /// The key that tells whether a character has a kind of formatting.
+    private static func markKey(_ kind: String) -> NSAttributedString.Key {
+        ["italic": italicMark, "bold": boldMark, "underline": .underlineStyle, "strike": .strikethroughStyle,
+         "color": colorMark, "highlight": highlightMark][kind] ?? italicMark
+    }
 
     /// The UTF-16 offset of the `scalars`-th character (Python indexes strings by code point).
     static func utf16(_ s: NSString, _ scalars: Int) -> Int {
@@ -1699,43 +1738,76 @@ extension CanvasView: NSTextViewDelegate {
         return i
     }
 
-    /// The editor's italic characters as [start, end) code point ranges.
-    private func italicRuns(_ tv: NSTextView) -> [[Int]] {
+    /// The editor's characters with a kind of formatting, as [start, end) code point ranges (colour: per colour).
+    private func charRuns(_ tv: NSTextView, _ kind: String) -> [CharRun] {
         guard let ts = tv.textStorage else { return [] }
-        var runs: [[Int]] = []
-        ts.enumerateAttribute(CanvasView.italicMark, in: NSRange(location: 0, length: ts.length)) { v, r, _ in
-            guard v != nil else { return }
-            let scalars = { (n: Int) in String(decoding: Array(ts.string.utf16.prefix(n)), as: UTF16.self).unicodeScalars.count }
+        let key = CanvasView.markKey(kind)
+        let scalars = { (n: Int) in String(decoding: Array(ts.string.utf16.prefix(n)), as: UTF16.self).unicodeScalars.count }
+        var runs: [CharRun] = []
+        ts.enumerateAttribute(key, in: NSRange(location: 0, length: ts.length)) { v, r, _ in
+            guard let v = v, (v as? Int).map({ $0 != 0 }) ?? true else { return }
+            let hex = v as? String
             let a = scalars(r.location), b = scalars(r.location + r.length)
-            if let last = runs.last, last[1] == a { runs[runs.count - 1][1] = b } else { runs.append([a, b]) }
+            if let last = runs.last, last.end == a, last.color == hex { runs[runs.count - 1].end = b }
+            else { runs.append(CharRun(a, b, hex)) }
         }
         return runs
     }
 
-    /// Format ▸ Italic (⌘I) while typing on the slide: the selected characters in italics, or upright again when they
-    /// all are; with nothing selected, what is typed next. The new state, or nil when no text is being typed.
-    func toggleInlineItalic() -> Bool? {
-        guard var e = inline, e.done != nil, e.placeholder == nil, e.cell == nil, let ts = e.view.textStorage else { return nil }
+    /// The kinds of formatting all the selected characters have (with nothing selected, what will be typed).
+    private func selectionKinds(_ tv: NSTextView) -> Set<String> {
+        let sel = tv.selectedRange()
+        var out = Set<String>()
+        for kind in CanvasView.charKinds {
+            let key = CanvasView.markKey(kind)
+            if sel.length == 0 {
+                if tv.typingAttributes[key] != nil { out.insert(kind) }
+                continue
+            }
+            var all = true
+            tv.textStorage?.enumerateAttribute(key, in: sel) { v, _, _ in if v == nil { all = false } }
+            if all { out.insert(kind) }
+        }
+        return out
+    }
+
+    /// Format ▸ Bold / Italic / Underline / Strikethrough (and the format bar's buttons) while typing on the slide:
+    /// the selected characters get it, or lose it when they all have it; with nothing selected, what is typed next.
+    /// The new state, or nil when no text is being typed.
+    func toggleInlineStyle(_ kind: String) -> Bool? {
+        guard let e = inline, e.done != nil, e.placeholder == nil, e.cell == nil else { return nil }
+        let on = !selectionKinds(e.view).contains(kind)
+        return setInlineStyle(kind, on: on, hex: nil) ? on : nil
+    }
+
+    /// Colour or highlight (`hex`, nil to clear) on the selected characters while typing on the slide. False when no
+    /// text is being typed.
+    func setInlineStyle(_ kind: String, on: Bool, hex: String?) -> Bool {
+        guard var e = inline, e.done != nil, e.placeholder == nil, e.cell == nil, let ts = e.view.textStorage else { return false }
         let tv = e.view
         let sel = tv.selectedRange()
-        let on: Bool
         if sel.length == 0 {
-            on = tv.typingAttributes[CanvasView.italicMark] == nil
-            tv.typingAttributes[CanvasView.italicMark] = on ? true : nil
+            let scratch = NSTextStorage(string: " ", attributes: tv.typingAttributes)
+            CanvasView.mark(scratch, kind, hex, NSRange(location: 0, length: 1), on: on)
+            if kind == "color" && !on { scratch.addAttribute(.foregroundColor, value: editorTextColor, range: NSRange(location: 0, length: 1)) }
+            tv.typingAttributes = scratch.attributes(at: 0, effectiveRange: nil)
         } else {
-            var all = true
-            ts.enumerateAttribute(CanvasView.italicMark, in: sel) { v, _, _ in if v == nil { all = false } }
-            on = !all
-            guard tv.shouldChangeText(in: sel, replacementString: nil) else { return nil }   // undoable with ⌘Z
-            if on { ts.addAttribute(CanvasView.italicMark, value: true, range: sel) }
-            else { ts.removeAttribute(CanvasView.italicMark, range: sel) }
+            guard tv.shouldChangeText(in: sel, replacementString: nil) else { return false }   // undoable with ⌘Z
+            CanvasView.mark(ts, kind, hex, sel, on: on)
+            if kind == "color" && !on { ts.addAttribute(.foregroundColor, value: editorTextColor, range: sel) }
             tv.didChangeText()
         }
-        e.italicTouched = true
+        e.touched.insert(kind)
         inline = e
         layoutTextEditor()
         setNeedsDisplay(bounds)
-        return on
+        onInlineSelectionStyle?(selectionKinds(tv))
+        return true
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard let e = inline, e.done != nil else { return }
+        onInlineSelectionStyle?(selectionKinds(e.view))
     }
 
     func textDidChange(_ notification: Notification) {
@@ -1754,21 +1826,24 @@ extension CanvasView: NSTextViewDelegate {
         let ps = NSMutableParagraphStyle()
         ps.alignment = e.align == "center" ? .center : e.align == "right" ? .right : .left
         ps.lineSpacing = max(0, font.pointSize * (1 + (e.lineSpacing ?? 0.3)) - lm.defaultLineHeight(for: font))
-        let slanted = CanvasView.editorFont(e.family, bold: e.bold, italic: true, size: font.pointSize)
         if e.view.defaultParagraphStyle != ps {
             e.view.defaultParagraphStyle = ps
             if let ts = e.view.textStorage { ts.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: ts.length)) }
         }
-        // each run in its own face: upright, or italic where marked (typed text takes the mark of the text before it)
+        // each run in its own face, upright or italic, regular or bold, as marked (typed text takes the marks of the
+        // text before it)
+        let face = { (attrs: [NSAttributedString.Key: Any]) -> NSFont in
+            CanvasView.editorFont(e.family, bold: attrs[CanvasView.boldMark] != nil, italic: attrs[CanvasView.italicMark] != nil,
+                                  size: font.pointSize)
+        }
         if let ts = e.view.textStorage {
             ts.beginEditing()
-            ts.addAttribute(.font, value: font, range: NSRange(location: 0, length: ts.length))
-            ts.enumerateAttribute(CanvasView.italicMark, in: NSRange(location: 0, length: ts.length)) { v, r, _ in
-                if v != nil { ts.addAttribute(.font, value: slanted, range: r) }
+            ts.enumerateAttributes(in: NSRange(location: 0, length: ts.length)) { attrs, r, _ in
+                ts.addAttribute(.font, value: face(attrs), range: r)
             }
             ts.endEditing()
         }
-        e.view.typingAttributes[.font] = e.view.typingAttributes[CanvasView.italicMark] != nil ? slanted : font
+        e.view.typingAttributes[.font] = face(e.view.typingAttributes)
         e.view.typingAttributes[.paragraphStyle] = ps
         // the lines align within the widest one: measure them unconstrained, then lay out at that width
         tc.containerSize = NSSize(width: 1e6, height: 1e6)

@@ -402,6 +402,7 @@ extension MainController {
     }
 
     func commitColor(_ hex: String) {
+        if canvas.setInlineStyle("color", on: true, hex: hex.uppercased()) { return }  // the selected characters
         guard let s = selection, let o = objInfo, o.color?.uppercased() != hex.uppercased() else { return }
         submit { [weak self] in
             guard let self = self else { return }
@@ -436,10 +437,23 @@ extension MainController {
 
     // MARK: character formatting
 
-    @objc func underlineToggled(_ b: NSButton) { commitDecoration("underline", on: b.state == .on) }
-    @objc func strikeToggled(_ b: NSButton) { commitDecoration("strike", on: b.state == .on) }
-    @objc func formatUnderline() { commitDecoration("underline", on: objInfo?.format?.underline != true) }
-    @objc func formatStrikethrough() { commitDecoration("strike", on: objInfo?.format?.strike != true) }
+    // while typing on the slide, these format the selected characters only
+    @objc func underlineToggled(_ b: NSButton) {
+        if let on = canvas.toggleInlineStyle("underline") { b.state = on ? .on : .off; return }
+        commitDecoration("underline", on: b.state == .on)
+    }
+    @objc func strikeToggled(_ b: NSButton) {
+        if let on = canvas.toggleInlineStyle("strike") { b.state = on ? .on : .off; return }
+        commitDecoration("strike", on: b.state == .on)
+    }
+    @objc func formatUnderline() {
+        if let on = canvas.toggleInlineStyle("underline") { formatBar?.underline.state = on ? .on : .off; return }
+        commitDecoration("underline", on: objInfo?.format?.underline != true)
+    }
+    @objc func formatStrikethrough() {
+        if let on = canvas.toggleInlineStyle("strike") { formatBar?.strike.state = on ? .on : .off; return }
+        commitDecoration("strike", on: objInfo?.format?.strike != true)
+    }
 
     func commitDecoration(_ kind: String, on: Bool) {
         guard let s = selection, let o = objInfo, o.kind == "text" || o.kind == "tex" else { return }
@@ -474,6 +488,8 @@ extension MainController {
     }
 
     @objc func highlightChosen(_ m: NSMenuItem) {
+        let hex = m.representedObject as? String
+        if canvas.setInlineStyle("highlight", on: hex != nil, hex: hex) { return }      // the selected characters
         guard let s = selection, let o = objInfo, o.kind == "text" || o.kind == "tex" else { return }
         var req: [String: Any] = ["op": "highlight", "oid": s, "opacity": 0.6]
         if let hex = m.representedObject as? String { req["color"] = hex }

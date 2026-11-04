@@ -235,6 +235,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         canvas.onCornerEdit = { [weak self] oid in self?.editPlot(oid) }
         canvas.onPlaceholder = { [weak self] ph in self?.beginPlaceholder(ph) }
         canvas.onPlaceholderDelete = { [weak self] line in self?.removePlaceholder(line) }
+        canvas.onInlineSelectionStyle = { [weak self] kinds in        // the format bar shows the selected characters'
+            guard let bar = self?.formatBar else { return }
+            for (b, kind) in [(bar.bold, "bold"), (bar.italic, "italic"), (bar.underline, "underline"), (bar.strike, "strike")] {
+                b.state = kinds.contains(kind) ? .on : .off
+            }
+        }
         canvas.onNudge = { [weak self] oid, dx, dy in self?.nudgeObject(oid, dx, dy) }
         stepsBar.orientation = .horizontal; stepsBar.spacing = 8
         stepsBar.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
@@ -2223,9 +2229,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     /// Show a freshly rasterised text/formula at once, then patch the source.
     func previewSprite(_ oid: Int, kind: String, value: String, size: Double, color: String?, font: String?,
-                       weight: String? = nil, slant: String? = nil, italic: [[Int]]? = nil) async {
+                       weight: String? = nil, slant: String? = nil, styles: [String: [CharRun]]? = nil) async {
         var args: [String: Any] = ["kind": kind, "value": value, "font_size": size]
-        if let it = italic { args["italic"] = it }
+        if let st = styles { args["styles"] = st.mapValues { $0.map(\.json) } }
         if let c = color { args["color"] = c }
         if let f = font { args["font"] = f }
         if let w = weight { args["weight"] = w }
@@ -2239,17 +2245,17 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     /// `previewed` runs once the new text shows on the canvas (or at once when there is nothing to apply).
     /// `italic`: the characters to set in italics ([start, end) ranges of `value`), when that was changed.
-    func commitText(_ oid: Int, _ value: String, shared: Bool, italic: [[Int]]? = nil, previewed: (() -> Void)? = nil) {
-        guard let o = scene?.objects?[String(oid)], value != o.value || (italic != nil && italic! != (o.italic ?? [])) else {
-            previewed?(); return
-        }
+    /// `styles`: the formatting kinds set on part of the text while typing, and the characters that have each.
+    func commitText(_ oid: Int, _ value: String, shared: Bool, styles: [String: [CharRun]]? = nil, previewed: (() -> Void)? = nil) {
+        let changed = styles?.filter { kind, runs in runs != (scene?.objects?[String(oid)]?.charStyles[kind] ?? []) }
+        guard let o = scene?.objects?[String(oid)], value != o.value || changed?.isEmpty == false else { previewed?(); return }
         submit { [weak self] in
             guard let self = self else { previewed?(); return }
             await self.previewSprite(oid, kind: o.kind, value: value, size: o.fontSize ?? 30, color: o.color, font: o.font,
-                                     weight: o.weight, slant: o.slant, italic: italic)
+                                     weight: o.weight, slant: o.slant, styles: styles)
             previewed?()
             var req: [String: Any] = ["op": "text", "oid": oid, "value": value, "shared": shared]
-            if let it = italic { req["italic"] = it }
+            if let st = styles, !st.isEmpty { req["styles"] = st.mapValues { $0.map(\.json) } }
             await self.runEdit(req)
         }
     }
@@ -2285,16 +2291,20 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
     @objc func familyChanged(_ p: NSPopUpButton) { if let t = p.titleOfSelectedItem { commitStyle(font: t) } }
-    @objc func boldToggled(_ b: NSButton) { commitStyle(weight: b.state == .on ? "BOLD" : "NORMAL") }
+    // while typing on the slide, these format the selected characters only
+    @objc func boldToggled(_ b: NSButton) {
+        if let on = canvas.toggleInlineStyle("bold") { b.state = on ? .on : .off; return }
+        commitStyle(weight: b.state == .on ? "BOLD" : "NORMAL")
+    }
     @objc func italicToggled(_ b: NSButton) {
-        // while typing on the slide: the selected characters only
-        if let on = canvas.toggleInlineItalic() { b.state = on ? .on : .off; return }
+        if let on = canvas.toggleInlineStyle("italic") { b.state = on ? .on : .off; return }
         commitStyle(slant: b.state == .on ? "ITALIC" : "NORMAL")
     }
 
     @objc func colorCommitted(_ w: NSColorWell) {
-        guard let s = selection, let o = objInfo else { return }
         let hex = w.color.hexString
+        if canvas.setInlineStyle("color", on: true, hex: hex.uppercased()) { return }  // the selected characters
+        guard let s = selection, let o = objInfo else { return }
         submit { [weak self] in
             guard let self = self else { return }
             if o.kind == "text" || o.kind == "tex" { await self.previewSprite(s, kind: o.kind, value: o.value, size: o.fontSize ?? 30, color: hex, font: o.font, weight: o.weight, slant: o.slant) }
@@ -2339,13 +2349,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func beginInlineText(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
         let current = textField?.stringValue ?? o.value          // includes an applied edit still rendering
         return canvas.beginTextEdit(oid, text: current, family: o.font, bold: o.weight == "BOLD", italic: o.slant == "ITALIC",
-                                    italicRuns: textField?.stringValue == nil || current == o.value ? o.italic : nil,
+                                    styles: current == o.value ? o.charStyles : nil,
                                     color: o.color, at: at, align: o.format?.align ?? "left", valign: o.format?.valign ?? "top",
                                     lineSpacing: o.format?.lineSpacing, frame: o.frameBox,
                                     changed: { [weak self] v in self?.textField?.setText(v) },
                                     done: { [weak self] v, release in
                                         guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
-                                        self.commitText(oid, v, shared: self.sharedChoice, italic: self.canvas.committedItalic,
+                                        self.commitText(oid, v, shared: self.sharedChoice, styles: self.canvas.committedStyles,
                                                         previewed: release)
                                     })
     }
@@ -2905,11 +2915,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     // MARK: Format menu (acts on the selected text)
 
     @objc func formatBold() {
+        if let on = canvas.toggleInlineStyle("bold") { formatBar?.bold.state = on ? .on : .off; return }   // the selected characters
         guard let o = objInfo, o.kind == "text" else { return }
         commitStyle(weight: o.weight?.uppercased() == "BOLD" ? "NORMAL" : "BOLD")
     }
     @objc func formatItalic() {
-        if let on = canvas.toggleInlineItalic() { formatBar?.italic.state = on ? .on : .off; return }   // the selected characters
+        if let on = canvas.toggleInlineStyle("italic") { formatBar?.italic.state = on ? .on : .off; return }   // the selected characters
         guard let o = objInfo, o.kind == "text" else { return }
         commitStyle(slant: ["ITALIC", "OBLIQUE"].contains(o.slant?.uppercased() ?? "") ? "NORMAL" : "ITALIC")
     }

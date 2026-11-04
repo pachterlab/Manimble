@@ -934,12 +934,18 @@ def purge_project_modules():
 
 
 def hexcolor(m):
+    """The colour of an object: for a text, the colour most of its glyphs have (some may be coloured on their own)."""
     try:
+        # a text highlight, or a line Manimble drew under or through it, is not the text's colour
+        deco = {id(x) for d in m.submobjects if getattr(d, "manimble_decoration", False) for x in d.get_family()}
+        seen = []
         for sub in m.get_family():
-            if isinstance(sub, BackgroundRectangle):
-                continue              # a text highlight, not the text's colour
-            if sub.has_points():
-                return sub.get_color().to_hex()
+            if isinstance(sub, BackgroundRectangle) or id(sub) in deco or not sub.has_points():
+                continue
+            seen.append(sub.get_color().to_hex())
+            if getattr(m, "_sl_kind", None) not in ("text", "tex"):
+                break
+        return max(dict.fromkeys(seen), key=seen.count) if seen else None
     except Exception:
         pass
     return None
@@ -964,28 +970,38 @@ def text_attr(m, name):
     return v
 
 
-def italic_runs(m):
-    """[start, end] ranges of the characters of a Text (or a Paragraph's lines joined by newlines) set in italics:
-    its slant, then its t2s ranges and words on top, as manim applies them."""
+def char_styles(m):
+    """Which characters of a Text (or a Paragraph's lines joined by newlines) are italic and bold, and their own
+    colours: {"italic": [[start, end], ...], "bold": [...], "colors": [[start, end, "#RRGGBB"], ...]}, from its
+    slant / weight, then its t2s / t2w / t2c ranges and words on top, as manim applies them."""
     t = m if hasattr(m, "t2s") else getattr(m, "lines_text", None)
     try:
-        text = t.original_text.replace("\t", " " * t.tab_width)      # what t2s ranges index, as in Text._text2svg
-        flags = [str(t.slant).upper() in ("ITALIC", "OBLIQUE")] * len(text)
-        for word, v in (t.t2s or {}).items():
-            for a, b in t._find_indexes(word, text):
-                for k in range(max(a, 0), min(b, len(text))):
-                    flags[k] = str(v).upper() in ("ITALIC", "OBLIQUE")
+        text = t.original_text.replace("\t", " " * t.tab_width)      # what t2* ranges index, as in Text._text2svg
+        n = len(text)
+        italic = [str(t.slant).upper() in ("ITALIC", "OBLIQUE")] * n
+        bold = [str(t.weight).upper() in ("BOLD", "SEMIBOLD", "ULTRABOLD", "HEAVY", "ULTRAHEAVY")] * n
+        colors = [None] * n
+        for flags, t2x, test in ((italic, t.t2s, lambda v: str(v).upper() in ("ITALIC", "OBLIQUE")),
+                                 (bold, t.t2w, lambda v: str(v).upper() in ("BOLD", "SEMIBOLD", "ULTRABOLD", "HEAVY", "ULTRAHEAVY")),
+                                 (colors, t.t2c, lambda v: ManimColor(v).to_hex().upper()[:7])):
+            for word, v in (t2x or {}).items():
+                for a, b in t._find_indexes(word, text):
+                    for k in range(max(a, 0), min(b, n)):
+                        flags[k] = test(v)
     except Exception:
-        return None
-    runs, k = [], 0
-    while k < len(flags):
-        e = k
-        while e < len(flags) and flags[e] == flags[k]:
-            e += 1
-        if flags[k]:
-            runs.append([k, e])
-        k = e
-    return runs
+        return {}
+
+    def runs(vals, with_value=False):
+        out, k = [], 0
+        while k < n:
+            e = k
+            while e < n and vals[e] == vals[k]:
+                e += 1
+            if vals[k]:
+                out.append([k, e, vals[k]] if with_value else [k, e])
+            k = e
+        return out
+    return {"italic": runs(italic), "bold": runs(bold), "colors": runs(colors, True)}
 
 
 def dims_px(m):
@@ -1112,7 +1128,7 @@ def render(req):
             "font": text_attr(m, "font") if m._sl_kind == "text" else None,
             "weight": text_attr(m, "weight") if m._sl_kind == "text" else None,
             "slant": text_attr(m, "slant") if m._sl_kind == "text" else None,
-            "italic": italic_runs(m) if m._sl_kind == "text" else None,
+            **(char_styles(m) if m._sl_kind == "text" else {}),
             "color": (hexcolor(m) if m._sl_kind in ("text", "tex") else shape_color(m)) if m._sl_kind != "image" else None,
             "path": picture_path(m) if m._sl_kind == "image" else None,
             "rotation": rotation_deg(m),
@@ -1165,9 +1181,15 @@ def sprite(req):
             kw["weight"] = req["weight"]
         if req.get("slant"):
             kw["slant"] = req["slant"]
-        if req.get("italic") is not None:        # italics on part of it: these ranges, the rest upright
+        styles = req.get("styles") or {}         # formatting of part of it: these ranges, the rest plain
+        if "italic" in styles:
             kw["slant"] = "NORMAL"
-            kw["t2s"] = {f"[{a}:{b}]": "ITALIC" for a, b in req["italic"]}
+            kw["t2s"] = {f"[{a}:{b}]": "ITALIC" for a, b, *_ in styles["italic"]}
+        if "bold" in styles:
+            kw["weight"] = "NORMAL"
+            kw["t2w"] = {f"[{a}:{b}]": "BOLD" for a, b, *_ in styles["bold"]}
+        if "color" in styles:
+            kw["t2c"] = {f"[{a}:{b}]": c for a, b, c in styles["color"]}
         m = T(req["value"], **kw)
     else:
         m = M(req["value"], font_size=req["font_size"], color=color)

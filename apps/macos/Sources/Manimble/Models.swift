@@ -57,6 +57,25 @@ struct FormatInfo: Decodable {
     var link: String?                // hyperlink opened when the text is clicked in a show
 }
 
+/// Characters [start, end) of a text (Python string indices), with a colour for colour and highlight runs.
+struct CharRun: Decodable, Equatable {
+    var start: Int, end: Int, color: String?
+    init(_ start: Int, _ end: Int, _ color: String? = nil) { self.start = start; self.end = end; self.color = color }
+    init(from decoder: Decoder) throws {           // [start, end] or [start, end, "#RRGGBB"]
+        var c = try decoder.unkeyedContainer()
+        start = try c.decode(Int.self); end = try c.decode(Int.self)
+        color = c.isAtEnd ? nil : try c.decode(String.self)
+    }
+    var json: [Any] { color.map { [start, end, $0] } ?? [start, end] }
+}
+
+/// Underline / strikethrough / highlight of a text's characters (a kind on the whole text covers all of it).
+struct CharDecorations: Decodable {
+    var underline: [CharRun]?
+    var strike: [CharRun]?
+    var highlight: [CharRun]?
+}
+
 struct ObjInfo: Decodable {
     var kind: String                 // text | tex | image | line | shape | table | drawing
     var value: String
@@ -65,7 +84,11 @@ struct ObjInfo: Decodable {
     var font: String?
     var weight: String?
     var slant: String?
-    var italic: [[Int]]?        // characters in italics: [start, end) ranges (Python string indices) of value
+    // formatting of part of a text: [start, end) ranges of value (Python string indices), some with a colour
+    var italic: [CharRun]?
+    var bold: [CharRun]?
+    var colors: [CharRun]?
+    var decorations: CharDecorations?
     var siblings: Int
     var loc: String
     var textOk: Bool?
@@ -273,4 +296,16 @@ struct SlideResult: Decodable {
     var select: String?
     var stop: Int?                   // delete_build: the build to show afterwards
     var changed: ChangedLines?
+}
+
+extension ObjInfo {
+    /// The formatting set on characters of this text, by kind (CanvasView.charKinds); kinds it does not report left out.
+    var charStyles: [String: [CharRun]] {
+        var out: [String: [CharRun]] = [:]
+        out["italic"] = italic; out["bold"] = bold; out["color"] = colors
+        out["underline"] = decorations?.underline ?? (decorations != nil ? [] : nil)
+        out["strike"] = decorations?.strike ?? (decorations != nil ? [] : nil)
+        out["highlight"] = decorations?.highlight ?? (decorations != nil ? [] : nil)
+        return out
+    }
 }
