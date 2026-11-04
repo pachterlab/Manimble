@@ -157,9 +157,19 @@ final class ProgressBar: NSView {
 }
 
 /// Translucent rounded "pill" used for toasts and the busy indicator (text with a progress bar beneath).
+/// The pill's leading icon: a click copies the pill's message (see `Pill.copyMessage`).
+final class PillIcon: NSImageView {
+    var onClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) { if let onClick { onClick() } else { super.mouseDown(with: event) } }
+    override func resetCursorRects() { if onClick != nil { addCursorRect(bounds, cursor: .pointingHand) } }
+}
+
 final class Pill: NSVisualEffectView {
     let label = NSTextField(labelWithString: "")
-    let icon = NSImageView()
+    let icon = PillIcon()
+    /// True while the pointer is over the pill: the toast timer waits so the message can be selected or copied.
+    private(set) var hovered = false
+    private var copyFeedback: DispatchWorkItem?
     let bar = ProgressBar()
     /// The X at the right of a spinning pill; set on the busy pill to let the user stop what is rendering.
     let cancelButton = NSButton()
@@ -171,7 +181,10 @@ final class Pill: NSVisualEffectView {
         wantsLayer = true; layer?.cornerRadius = 15; layer?.masksToBounds = true
         label.font = Theme.font(12, .medium); label.textColor = .labelColor
         label.maximumNumberOfLines = 3; label.lineBreakMode = .byWordWrapping
+        label.isSelectable = true                        // warnings and errors can be highlighted and copied
         icon.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
+        icon.toolTip = "Click to copy this message"
+        icon.onClick = { [weak self] in self?.copyMessage() }
         cancelButton.isBordered = false; cancelButton.bezelStyle = .inline; cancelButton.imagePosition = .imageOnly
         cancelButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel")
         cancelButton.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
@@ -194,8 +207,32 @@ final class Pill: NSVisualEffectView {
             bar.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
         ])
         isHidden = true; alphaValue = 0
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                       owner: self, userInfo: nil))
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true }
+    override func mouseExited(with event: NSEvent) { hovered = false }
+
+    /// Put the message on the clipboard and flash a checkmark in place of the icon.
+    func copyMessage() {
+        let text = label.stringValue
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        let (image, tint) = (icon.image, icon.contentTintColor)
+        copyFeedback?.cancel()
+        icon.image = NSImage(systemSymbolName: "doc.on.doc.fill", accessibilityDescription: "Copied")
+        icon.contentTintColor = .systemGreen
+        icon.toolTip = "Copied"
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, self.label.stringValue == text else { return }
+            self.icon.image = image; self.icon.contentTintColor = tint; self.icon.toolTip = "Click to copy this message"
+        }
+        copyFeedback = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: w)
+    }
 
     /// `spinning`: the pill reports work in progress and shows the bar. `progress` 0…1 fills it by count; otherwise
     /// `remaining` seconds drive it as a time estimate; with neither, a running estimate keeps going or a default
@@ -203,6 +240,7 @@ final class Pill: NSVisualEffectView {
     func show(_ text: String, symbol: String?, tint: NSColor?, spinning: Bool = false, progress: Double? = nil,
               remaining: Double? = nil, cancellable: Bool = true) {
         label.stringValue = text
+        copyFeedback?.cancel(); icon.toolTip = "Click to copy this message"
         icon.isHidden = symbol == nil || spinning
         cancelButton.isHidden = !(spinning && cancellable && onCancel != nil)
         cancelButton.isEnabled = true
@@ -230,5 +268,35 @@ final class Pill: NSVisualEffectView {
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; animator().alphaValue = 0 }, completionHandler: { [weak self] in
             if self?.alphaValue == 0 { self?.isHidden = true; self?.bar.reset() }
         })
+    }
+}
+
+extension NSAlert {
+    private static var copierKey = 0
+
+    /// Add a "Copy" button that puts the alert's title and text on the clipboard without closing the alert. Call it
+    /// after the alert's other buttons so their responses (first, second, … button) keep their meaning; an alert with
+    /// no buttons gets an "OK" first, as `runModal` would have added.
+    func addCopyButton() {
+        if buttons.isEmpty { addButton(withTitle: "OK") }
+        let copier = AlertCopier(self)
+        objc_setAssociatedObject(self, &Self.copierKey, copier, .OBJC_ASSOCIATION_RETAIN)
+        let b = addButton(withTitle: "Copy")
+        b.target = copier; b.action = #selector(AlertCopier.copy(_:))   // retargeted, so it no longer ends the alert
+        b.keyEquivalent = ""
+        b.toolTip = "Copy this message to the clipboard"
+    }
+}
+
+private final class AlertCopier: NSObject {
+    weak var alert: NSAlert?
+    init(_ alert: NSAlert) { self.alert = alert }
+    @objc func copy(_ sender: NSButton) {
+        guard let a = alert else { return }
+        let text = [a.messageText, a.informativeText].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        sender.title = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak sender] in sender?.title = "Copy" }
     }
 }

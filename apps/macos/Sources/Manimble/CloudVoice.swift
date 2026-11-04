@@ -222,7 +222,7 @@ enum CloudVoiceAccount {
                         let e = NSAlert()
                         e.messageText = "\(service.name) did not accept the key"
                         e.informativeText = error.localizedDescription
-                        e.runModal()
+                        e.addCopyButton(); e.runModal()
                         done(service.connected)
                     }
                 }

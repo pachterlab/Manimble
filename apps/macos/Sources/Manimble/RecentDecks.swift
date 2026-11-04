@@ -57,7 +57,7 @@ extension AppDelegate: NSMenuDelegate {
         guard let p = sender.representedObject as? String else { return }
         guard FileManager.default.fileExists(atPath: p) else {
             RecentDecks.forget(p)
-            let a = NSAlert(); a.messageText = "Could not open deck"; a.informativeText = "\(p) no longer exists."; a.runModal()
+            let a = NSAlert(); a.messageText = "Could not open deck"; a.informativeText = "\(p) no longer exists."; a.addCopyButton(); a.runModal()
             return
         }
         controller.openInWindow(deck: p)

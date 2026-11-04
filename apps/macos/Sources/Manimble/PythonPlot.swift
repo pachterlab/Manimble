@@ -423,7 +423,7 @@ extension MainController {
         a.informativeText = "This plot uses seaborn, which the Python that runs plots doesn't have:\n\(python)\n\n"
             + "Manimble can install it there with “pip install seaborn” and then run the plot again."
         a.addButton(withTitle: "Install Seaborn")
-        a.addButton(withTitle: "Close")
+        a.addButton(withTitle: "Close"); a.addCopyButton()
         let name = sceneName
         let reopen = { [weak self] (error: String) in
             guard let self = self, self.sceneName == name else { return }

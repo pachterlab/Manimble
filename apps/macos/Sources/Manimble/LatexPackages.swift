@@ -91,6 +91,7 @@ extension MainController {
                 + "Pictures that need them are imported as placeholders."
             a.addButton(withTitle: "Import Without Them"); a.addButton(withTitle: "Cancel")
         }
+        a.addCopyButton()
         let r = a.runModal()
         let choice = m.tlmgr ? r : NSApplication.ModalResponse(rawValue: r.rawValue + 1)
         switch choice {

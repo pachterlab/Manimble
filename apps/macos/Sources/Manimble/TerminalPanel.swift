@@ -231,7 +231,7 @@ final class TerminalPanel: NSView {
         alert.informativeText = a.map { "Install it with:\n\n\($0.install)\n\nthen sign in the first time you run it." }
             ?? "`\(name)` wasn't found on your shell's PATH."
         if a != nil { alert.addButton(withTitle: "Type Install Command") }
-        alert.addButton(withTitle: a != nil ? "Cancel" : "OK")
+        alert.addButton(withTitle: a != nil ? "Cancel" : "OK"); alert.addCopyButton()
         guard let w = window else { return }
         alert.beginSheetModal(for: w) { [weak self] r in
             guard let self = self, let a = a, r == .alertFirstButtonReturn else { return }

@@ -629,7 +629,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                     a.alertStyle = .warning
                     a.messageText = "Some slides did not render during the dependency check"
                     a.informativeText = "Manimble found dependencies in \(report.scannedScenes) slides, but the package may be incomplete.\n\n\(details)\n\nContinue with the project copy?"
-                    a.addButton(withTitle: "Continue Anyway"); a.addButton(withTitle: "Cancel")
+                    a.addButton(withTitle: "Continue Anyway"); a.addButton(withTitle: "Cancel"); a.addCopyButton()
                     guard a.runModal() == .alertFirstButtonReturn else { return }
                 }
                 if archive {
@@ -701,7 +701,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let a = NSAlert(); a.alertStyle = .warning
             a.messageText = "The original changed on disk"
             a.informativeText = "\(ws.conflictFiles.joined(separator: ", ")) was modified outside Manimble since this copy was made. Overwrite it with your edits?"
-            a.addButton(withTitle: "Overwrite"); a.addButton(withTitle: "Cancel")
+            a.addButton(withTitle: "Overwrite"); a.addButton(withTitle: "Cancel"); a.addCopyButton()
             if a.runModal() != .alertFirstButtonReturn { return }
         }
         do { try ws.save(); toast("Saved to \(ws.original.path)"); updateDocumentState() }
@@ -758,7 +758,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 let c = NSAlert(); c.alertStyle = .warning
                 c.messageText = "The original changed on disk"
                 c.informativeText = "\(ws.conflictFiles.joined(separator: ", ")) was modified outside Manimble. Overwrite it?"
-                c.addButton(withTitle: "Overwrite"); c.addButton(withTitle: "Cancel")
+                c.addButton(withTitle: "Overwrite"); c.addButton(withTitle: "Cancel"); c.addCopyButton()
                 if c.runModal() != .alertFirstButtonReturn { return false }
             }
             do { try ws.save(); return true } catch { alert("Could not save", "\(error)"); return false }
@@ -2500,7 +2500,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let alert = NSAlert(); alert.alertStyle = .critical
         alert.messageText = "Python error"
         alert.informativeText = message
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "OK"); alert.addCopyButton()
         alert.runModal()
     }
 
@@ -3137,14 +3137,22 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             toastPill.show(s, symbol: error ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
                            tint: error ? .systemOrange : Theme.accent)
         }
+        scheduleToastHide(after: error ? 8 : 2.6)
+    }
+
+    /// Hide the toast after `delay`, but not while the pointer is over it (the user may be selecting or copying it).
+    func scheduleToastHide(after delay: Double) {
         toastWork?.cancel()
-        let w = DispatchWorkItem { [weak self] in self?.toastPill.hide() }
+        let w = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.toastPill.hovered { self.scheduleToastHide(after: 1.5) } else { self.toastPill.hide() }
+        }
         toastWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + (error ? 8 : 2.6), execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
     }
 
     func alert(_ title: String, _ text: String) {
-        let a = NSAlert(); a.messageText = title; a.informativeText = text; a.runModal()
+        let a = NSAlert(); a.messageText = title; a.informativeText = text; a.addCopyButton(); a.runModal()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { confirmClose(for: "closing") }

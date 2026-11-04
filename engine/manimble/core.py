@@ -1289,9 +1289,9 @@ class Manimble:
                             c[i] = tx(k, c[i])
                         for i in (3, 5, 7, 9):
                             c[i] = ty(k, c[i])
-            for k, boxes in st.get("glyphs", {}).items():
+            for k, glyphs in st.get("glyphs", {}).items():
                 if k in centres:
-                    for g in boxes:
+                    for g in glyphs:
                         g[0], g[2] = tx(k, g[0]), tx(k, g[2])
                         g[1], g[3] = ty(k, g[1]), ty(k, g[3])
             for k in attached:
