@@ -1050,18 +1050,36 @@ class Planner:
 
     # ------------------------------------------------------- insert / delete
     def plan_insert(self, scene: dict, stop: int, nstops: int, code: str, site: dict | None = None,
-                    tag: str = "") -> tuple[Edit, int]:
+                    tag: str = "", anim: dict | None = None, prev: dict | None = None) -> tuple[Edit, int]:
         """Insert `self.add(code)  # manimble` so the element exists at the given build.
 
-        `site` is the next_slide() call that ends that build (recorded while the scene ran);
-        without it (the last build) the element goes at the end of construct(). `tag` extends the marker
-        (`# manimble pen`) for elements the worker recognises by it."""
+        Only play() and wait() draw frames, so the element goes before the construct() statement that made the
+        build's last one (`anim`, recorded while the scene ran): added after it, the element would be in the
+        editor's picture of the build but not in the clip the show plays. Failing that it goes before `site`, the
+        next_slide() call that ends that build, or (the last build) at the end of construct(). `prev` is the
+        next_slide() that ended the build before. `tag` extends the marker (`# manimble pen`) for elements the worker
+        recognises by it."""
         src = self.p.src(scene["file"])
         cls = next((n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == scene["name"]), None)
         fn = next((n for n in (cls.body if cls else []) if isinstance(n, ast.FunctionDef) and n.name == "construct"), None)
         if fn is None:
             raise EditError("scene has no construct()")
         line = f"self.add({code})  # manimble" + (f" {tag}" if tag else "")
+
+        def top(at):
+            """The statement of construct()'s own body that holds the call recorded at `at`."""
+            if not at or at.get("file") != scene["file"]:
+                return None
+            node = src.find_call(at["pos"])
+            while node is not None and src.parent.get(node) is not fn:
+                node = src.parent.get(node)
+            return node
+        last, end, before = top(anim), top(site), top(prev)
+        # not when the build's last animation shares a statement (a loop, say) with the next_slide() either side
+        if last is not None and (end is None) == (site is None) and (end is None or last.lineno < end.lineno) \
+                and (before is None or last.lineno > before.end_lineno):
+            at = src.line_starts[last.lineno - 1]
+            return Edit(src.rel, at, at, " " * last.col_offset + line + "\n"), last.lineno
         if site and site.get("file") == scene["file"]:
             call = src.find_call(site["pos"])
             stmt = call

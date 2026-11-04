@@ -554,6 +554,7 @@ class Slide(Scene):
 
     _sl_dirty = False
     _sl_animated = False      # a play() or wait() has run (what manim-slides counts before its first slide)
+    _sl_anim = None           # where the build's last play() or wait() was called from construct()
 
     def next_slide(self, *a, **k):
         if not self._sl_animated and not _STATE["stops"]:
@@ -571,6 +572,7 @@ class Slide(Scene):
 
     def play(self, *a, **k):
         self._sl_dirty = self._sl_animated = True
+        self._sl_note_anim(sys._getframe(1))
         _sl_progress()
         if not REAL_PLAY and self._fast_play(a):
             return None
@@ -645,9 +647,16 @@ class Slide(Scene):
 
     def wait(self, *a, **k):
         self._sl_dirty = self._sl_animated = True          # a wait() counts as an animation for manim-slides
+        self._sl_note_anim(sys._getframe(1))
         _sl_progress()
         self.update_mobjects(0)            # as slides_render.py does: see _wait_updated there
         return super().wait(*a, **k)
+
+    def _sl_note_anim(self, f):
+        """Only play() and wait() draw frames: what is added after the build's last one is not in its clip, so
+        inserts go before it (srcedit.plan_insert)."""
+        stack = project_stack(f)
+        self._sl_anim = stack[-1] if stack else None
 
     def add(self, *a, **k):
         self._sl_dirty = True
@@ -787,7 +796,8 @@ class Slide(Scene):
         Image.fromarray(np.array(cam.pixel_array)[..., :3].astype("uint8")).save(os.path.join(out, f"bg{n}.png"))
         _STATE["stops"].append({"png": f"stop{n}.png", "bg": f"bg{n}.png", "visible": vis, "sprites": sprites, "lines": lines,
                                 "cells": cells, "glyphs": glyphs,
-                                "site": site})
+                                "site": site, "anim": self._sl_anim})
+        self._sl_anim = None
         _sl_progress()
 
 
@@ -1024,7 +1034,14 @@ def render(req):
     PARENTS.clear()
     GROUPS.clear()
     DRAWINGS.clear()
-    _STATE.update(stops=[], out=out, scene=req["scene"])
+    # the code as it is before it is read: an edit landing during the render leaves the record stale (core.fresh_record),
+    # where hashing afterwards would pass off this render's positions as the edited file's
+    files = {}
+    for name in os.listdir(DECK):
+        if name.endswith(".py"):
+            with open(os.path.join(DECK, name), "rb") as fh:
+                files[name] = hashlib.sha1(fh.read()).hexdigest()
+    _STATE.update(stops=[], out=out, scene=req["scene"], files=files)
     purge_project_modules()
     mod = importlib.import_module(req["module"])
     cls = getattr(mod, req["scene"])
@@ -1086,11 +1103,7 @@ def render(req):
         for m in members:
             if "_sl_id" in m.__dict__ and m._sl_id < len(TRACKED) and TRACKED[m._sl_id] is m:
                 objects[m._sl_id]["group"] = {"id": gi, "frames": frames}
-    files = {}
-    for name in os.listdir(DECK):
-        if name.endswith(".py"):
-            with open(os.path.join(DECK, name), "rb") as fh:
-                files[name] = hashlib.sha1(fh.read()).hexdigest()
+    files = _STATE["files"]
     last = _STATE["stops"][-1]["png"] if _STATE["stops"] else None
     if last:
         im = Image.open(os.path.join(out, last)).convert("RGB")

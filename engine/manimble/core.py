@@ -125,6 +125,12 @@ class WorkerProc:
 
 # ------------------------------------------------------------------- state
 
+def _insert_where(stops: list, i: int) -> dict:
+    """What plan_insert needs to put an element in build `i`'s clip: where the build's last play()/wait() is, and the
+    next_slide() that ended the build before it."""
+    return {"anim": stops[i].get("anim"), "prev": stops[i - 1].get("site") if i > 0 else None}
+
+
 TEXT_OPS = ("text", "wrap", "font", "color", "style", "table", "delete", "decorate", "highlight", "align", "columns",
             "spacing", "clear_format")
 
@@ -279,7 +285,7 @@ class Manimble:
 
     def _scene_key(self, s: dict) -> str:
         """Hash of everything that can change how this scene renders."""
-        h = hashlib.sha1(b"manimble-engine-5")
+        h = hashlib.sha1(b"manimble-engine-6")
         scene_names = {x["name"] for x in self.all_scenes}
         for rel in self.project.py_files():
             src = self.project.src(rel)
@@ -2827,14 +2833,16 @@ class Manimble:
                 si = min(int(req.get("stop", 0)), nstops - 1)
                 scene = self.scene(name)
                 site = stops[si].get("site") if si < nstops - 1 else None
-                edit, line = self.planner.plan_insert(scene, si, nstops, code, site, tag="pen" if kind == "pen" else "")
+                where = _insert_where(stops, si)
+                edit, line = self.planner.plan_insert(scene, si, nstops, code, site, tag="pen" if kind == "pen" else "",
+                                                      **where)
                 extra = []
                 if kind in ("line", "arrow", "darrow") and (req.get("startAnchor") or req.get("endAnchor")):
                     ends, extra = self._anchored_ends(rec["data"], scene, line, [req.get("startAnchor"), req.get("endAnchor")])
                     if extra or any(ends):
                         # redrawn every frame, so the attached ends follow the objects when they move later
                         code = f"always_redraw(lambda: {self._insert_code(kind, req, ends=ends)})"
-                        edit, line = self.planner.plan_insert(scene, si, nstops, code, site)
+                        edit, line = self.planner.plan_insert(scene, si, nstops, code, site, **where)
                         # naming an object (`shape1 = ...` + `self.add(shape1)`) above the insert pushes it down
                         src = self.project.src(edit.rel)
                         line += sum(e.text.count("\n") - src.data[e.start:e.end].count(b"\n")
@@ -2899,7 +2907,7 @@ class Manimble:
                     if code is None:
                         return {"ok": False, "error": f"unknown element {it['kind']}"}
                     edit, _ = self.planner.plan_insert(self.scene(name), si, nstops, code, site,
-                                                       tag="pen" if it["kind"] == "pen" else "")
+                                                       tag="pen" if it["kind"] == "pen" else "", **_insert_where(stops, si))
                     edits.append(edit)
                 swap = req.get("replace_image")
                 if isinstance(swap, dict) and swap.get("file"):
