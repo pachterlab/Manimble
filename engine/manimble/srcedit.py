@@ -2391,11 +2391,11 @@ def _t2_keys(styles: dict) -> set:
     return {_T2[k] for k in styles if k in _T2}
 
 
-def _set_t2(src: Src, call: ast.Call, text: str, styles: dict, obj: dict) -> list[Edit]:
-    """The call's t2s / t2w / t2c set from `styles` (italic, bold, color): ITALIC / BOLD ranges, NORMAL ones where
-    the whole text is italic or bold (slant= / weight=) and these characters are not, colours where they are set.
-    Other entries of those dicts (words) give way to these ranges; a dict left empty is dropped."""
-    edits = []
+def t2_literals(text: str, styles: dict, obj: dict) -> dict:
+    """{t2s / t2w / t2c: dict literal, or None for none} for the kinds `styles` names (italic, bold, color):
+    ITALIC / BOLD ranges, NORMAL ones where the whole text is italic or bold (`obj`'s slant / weight) and these
+    characters are not, colours where they are set."""
+    out = {}
     n = len(text)
     for kind, key in _T2.items():
         if kind not in styles:
@@ -2422,15 +2422,23 @@ def _set_t2(src: Src, call: ast.Call, text: str, styles: dict, obj: dict) -> lis
             if vals[k] is not None:
                 runs.append((k, e, vals[k]))
             k = e
+        out[key] = ("{" + ", ".join(f"{py_str(f'[{a}:{b}]')}: {py_str(v)}" for a, b, v in runs) + "}") if runs else None
+    return out
+
+
+def _set_t2(src: Src, call: ast.Call, text: str, styles: dict, obj: dict) -> list[Edit]:
+    """The call's t2s / t2w / t2c set from `styles` (t2_literals). Other entries of those dicts (words) give way to
+    these ranges; a dict left empty is dropped."""
+    edits = []
+    for key, literal in t2_literals(text, styles, obj).items():
         kw = next((x for x in call.keywords if x.arg == key), None)
-        if not runs:
+        if literal is None:
             if kw is not None:
                 # from the end of the argument before it, so an edit of the text itself (the first argument) stays apart
                 items = sorted(list(call.args) + list(call.keywords), key=lambda x: (x.lineno, x.col_offset))
                 prev = items[items.index(kw) - 1]
                 edits.append(Edit(src.rel, src.span(prev)[1], src.span(kw)[1], ""))
             continue
-        literal = "{" + ", ".join(f"{py_str(f'[{a}:{b}]')}: {py_str(v)}" for a, b, v in runs) + "}"
         if kw is not None:
             a, b = src.span(kw.value)
             edits.append(Edit(src.rel, a, b, literal))

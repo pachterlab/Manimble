@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from .srcedit import (BLANK_CELLS, BOX_PAD, EditError, Planner, Project, Src, _stmt_lines, box_tag, ensure_helpers, fmt, py_str, py_tex,
-                      CHAR_STYLES, insert_kwarg, map_ranges, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
+                      CHAR_STYLES, insert_kwarg, map_ranges, t2_literals, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
 
 HERE = Path(__file__).resolve().parent
 
@@ -2816,8 +2816,11 @@ class Manimble:
         pa, pb = f"({fmt(a[0])}, {fmt(a[1])}, 0)", f"({fmt(b[0])}, {fmt(b[1])}, 0)"
         pa, pb = ends[0] or pa, ends[1] or pb            # ends attached to objects (`rect.get_right()`)
         drawn = req.get("sx") is not None
+        # pasted text comes with its words, and the bold, italics and colours of some of its characters
+        value = str(req.get("value") or "Text")
+        t2 = "".join(f", {k}={v}" for k, v in t2_literals(value, req.get("styles") or {}, {}).items() if v)
         codes = {
-            "text": f'Text("Text", font_size=36{font}{tc}).move_to({origin})',
+            "text": f'Text({py_str(value)}, font_size=36{font}{tc}{t2}).move_to({origin})',
             "formula": f'MathTex({py_tex(req.get("tex") or "x^2 + y^2 = z^2", True)}, font_size=48{tc}).move_to({origin})',
             "rectangle": f'Rectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, color={ink}, stroke_width=4).move_to({origin})',
             "rounded": f'RoundedRectangle(width={fmt(w) if drawn else 3}, height={fmt(h) if drawn else 1.8}, corner_radius=0.25, color={ink}, stroke_width=4).move_to({origin})',

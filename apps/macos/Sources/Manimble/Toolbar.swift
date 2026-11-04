@@ -302,7 +302,7 @@ extension MainController: NSToolbarDelegate {
             let target = "\(r.file ?? ""):\(r.line ?? 0)"
             if kind != "pen", let oid = self.scene?.objects?.first(where: { $0.value.loc == target })?.key, let id = Int(oid) {
                 self.selection = id
-                if kind == "text" { self.beginEdit(id) }
+                if kind == "text" && req["value"] == nil { self.beginEdit(id) }      // a new box to type in (not pasted text)
             }
             self.toast("Inserted \(kind)")
             await self.reloadState()

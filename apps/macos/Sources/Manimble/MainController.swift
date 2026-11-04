@@ -3024,6 +3024,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(themeChosen(_:)):
             item.state = DeckTheme.all.first { $0.id == item.representedObject as? String }?.name == scene?.theme ? .on : .off
             return sceneName != nil
+        case #selector(paste(_:)): return canPasteOnSlide
         case #selector(formatBold), #selector(formatItalic): return objInfo?.kind == "text"
         case #selector(formatBigger), #selector(formatSmaller), #selector(formatUnderline), #selector(formatStrikethrough),
              #selector(highlightChosen(_:)), #selector(clearFormatting), #selector(hyperlinkPressed):
