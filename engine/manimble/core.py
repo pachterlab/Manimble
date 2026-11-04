@@ -279,7 +279,7 @@ class Manimble:
 
     def _scene_key(self, s: dict) -> str:
         """Hash of everything that can change how this scene renders."""
-        h = hashlib.sha1(b"manimble-engine-4")
+        h = hashlib.sha1(b"manimble-engine-5")
         scene_names = {x["name"] for x in self.all_scenes}
         for rel in self.project.py_files():
             src = self.project.src(rel)

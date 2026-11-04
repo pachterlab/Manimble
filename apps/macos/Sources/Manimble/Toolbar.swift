@@ -276,12 +276,12 @@ extension MainController: NSToolbarDelegate {
         guard let scene = sceneName else { return }
         var req = extra; req["kind"] = kind; req["scene"] = scene
         // 1. show the element immediately (rasterised on its own, in parallel with the real insert)
-        if kind != "pen" { Task { @MainActor in
+        let sprite = kind == "pen" ? nil : Task { @MainActor in
             if let sp = try? await engine.call("insert_sprite", req, as: SpriteResult.self), let path = sp.path,
-               let tex = canvas.texture(path: path), let w = sp.w, let h = sp.h, sceneName != nil, canvas.ghost == nil || true {
+               let tex = canvas.texture(path: path), let w = sp.w, let h = sp.h, sceneName != nil {
                 canvas.ghost = (tex, Double(canvas.frameSize.width) / 2 + (sp.cx ?? 0), Double(canvas.frameSize.height) / 2 + (sp.cy ?? 0), w, h)
             }
-        } }
+        }
         // 2. patch the source and re-render in the background
         submit { [weak self] in
             guard let self = self, let name = self.sceneName else { return }
@@ -289,6 +289,7 @@ extension MainController: NSToolbarDelegate {
             var r2 = req; r2["scene"] = name; r2["stop"] = self.stopIndex
             let res = try? await self.engine.call("insert", r2, as: InsertResult.self)
             self.busy -= 1
+            await sprite?.value          // a preview arriving after the insert ended would stay on screen for good
             guard let r = res, r.ok == true else {
                 self.canvas.ghost = nil
                 if kind == "pen", !self.canvas.pendingStrokes.isEmpty { self.canvas.pendingStrokes.removeFirst() }
