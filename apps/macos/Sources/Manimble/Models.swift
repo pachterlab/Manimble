@@ -65,6 +65,7 @@ struct ObjInfo: Decodable {
     var font: String?
     var weight: String?
     var slant: String?
+    var italic: [[Int]]?        // characters in italics: [start, end) ranges (Python string indices) of value
     var siblings: Int
     var loc: String
     var textOk: Bool?

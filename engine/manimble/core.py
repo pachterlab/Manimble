@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from .srcedit import (BLANK_CELLS, BOX_PAD, EditError, Planner, Project, Src, _stmt_lines, box_tag, ensure_helpers, fmt, py_str, py_tex,
-                      insert_kwarg, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
+                      insert_kwarg, map_ranges, remove_kwargs, unwrap_soft, vec_expr, wrap_soft)
 
 HERE = Path(__file__).resolve().parent
 
@@ -124,6 +124,17 @@ class WorkerProc:
 
 
 # ------------------------------------------------------------------- state
+
+def _merged(ranges) -> list:
+    """[start, end] ranges sorted, with overlapping and touching ones joined."""
+    out = []
+    for a, b in sorted((int(a), int(b)) for a, b in ranges if int(b) > int(a)):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
 
 def _insert_where(stops: list, i: int) -> dict:
     """What plan_insert needs to put an element in build `i`'s clip: where the build's last play()/wait() is, and the
@@ -693,7 +704,7 @@ class Manimble:
             k = (o["frames"][-1]["file"], tuple(o["frames"][-1]["pos"]))
             info = {
                 "kind": o["kind"], "value": o["value"], "fontSize": o["font_size"], "color": o["color"],
-                "siblings": counts[k], "font": o.get("font"), "weight": o.get("weight"), "slant": o.get("slant"),
+                "siblings": counts[k], "font": o.get("font"), "weight": o.get("weight"), "slant": o.get("slant"), "italic": o.get("italic"),
                 "loc": f"{o['frames'][-1]['file']}:{o['frames'][-1]['pos'][0]}",
                 "rotation": o.get("rotation"), "dims": o.get("dims"),
                 "group": o["group"]["id"] if o.get("group") else None,
@@ -864,13 +875,19 @@ class Manimble:
             try:
                 if op == "text":
                     label = "edit text" if obj["kind"] == "text" else "edit formula"
+                    # italics on part of the text: [start, end] character ranges of the new text
+                    italic = req.get("italic") if obj["kind"] == "text" else None
                     box = self.planner.box_width(obj) if obj["kind"] == "text" else None
                     if box and before_box:          # a text box: the new text flows to its width
                         value = self._wrapped(obj, req["value"], box, (before_box[3] - before_box[1]) * ux)
                         stored = (self.planner.box_info(obj) or {}).get("w") or box
-                        attempts = [(label, self.planner.plan_wrap(obj, value, stored))]
+                        if italic is not None:      # the same characters once wrapped
+                            italic = map_ranges(req["value"], value, italic)
+                        attempts = [(label, self.planner.plan_wrap(obj, value, stored, italic=italic))]
                     else:
-                        attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True)))]
+                        attempts = [(label, self.planner.plan_text(obj, req["value"], req.get("shared", True), italic=italic))]
+                    if italic is not None:
+                        req = dict(req, want_italic=_merged(italic))
                 elif op == "wrap":
                     label = "text box width"
                     if obj["kind"] != "text" or not before_box:
@@ -1112,6 +1129,9 @@ class Manimble:
                     hint = ""
                     if "NoneType" in last_error or "get_part" in last_error:
                         hint = " The slide's code picks out parts of this text/formula by name, so the new content must keep those parts."
+                    elif "unexpected keyword argument 't2s'" in last_error:
+                        hint = (" This text is made by a helper function that does not pass t2s on to Text, so italics"
+                                " cannot be set on part of it here: give the helper **kwargs, or write Text(...) itself.")
                     return {"ok": False, "error": "The slide no longer renders with this change, so it was undone: "
                             + last_error[-300:] + hint}
                 continue
@@ -1632,6 +1652,11 @@ class Manimble:
             want = float(req["degrees"]) % 360.0
             if abs(((got - want) + 180.0) % 360.0 - 180.0) > 0.5:
                 return False, "later code in the slide overrides this rotation"
+            return True, ""
+        if op == "text" and req.get("want_italic") is not None:
+            got = _merged((data["objects"].get(oid) or {}).get("italic") or [])
+            if got != req["want_italic"]:
+                return False, "the text's italics are set elsewhere in the code (a helper that makes it, say)"
             return True, ""
         if op not in ("move", "resize", "size"):
             return True, ""

@@ -2223,8 +2223,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     /// Show a freshly rasterised text/formula at once, then patch the source.
     func previewSprite(_ oid: Int, kind: String, value: String, size: Double, color: String?, font: String?,
-                       weight: String? = nil, slant: String? = nil) async {
+                       weight: String? = nil, slant: String? = nil, italic: [[Int]]? = nil) async {
         var args: [String: Any] = ["kind": kind, "value": value, "font_size": size]
+        if let it = italic { args["italic"] = it }
         if let c = color { args["color"] = c }
         if let f = font { args["font"] = f }
         if let w = weight { args["weight"] = w }
@@ -2237,13 +2238,19 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     /// `previewed` runs once the new text shows on the canvas (or at once when there is nothing to apply).
-    func commitText(_ oid: Int, _ value: String, shared: Bool, previewed: (() -> Void)? = nil) {
-        guard let o = scene?.objects?[String(oid)], value != o.value else { previewed?(); return }
+    /// `italic`: the characters to set in italics ([start, end) ranges of `value`), when that was changed.
+    func commitText(_ oid: Int, _ value: String, shared: Bool, italic: [[Int]]? = nil, previewed: (() -> Void)? = nil) {
+        guard let o = scene?.objects?[String(oid)], value != o.value || (italic != nil && italic! != (o.italic ?? [])) else {
+            previewed?(); return
+        }
         submit { [weak self] in
             guard let self = self else { previewed?(); return }
-            await self.previewSprite(oid, kind: o.kind, value: value, size: o.fontSize ?? 30, color: o.color, font: o.font, weight: o.weight, slant: o.slant)
+            await self.previewSprite(oid, kind: o.kind, value: value, size: o.fontSize ?? 30, color: o.color, font: o.font,
+                                     weight: o.weight, slant: o.slant, italic: italic)
             previewed?()
-            await self.runEdit(["op": "text", "oid": oid, "value": value, "shared": shared])
+            var req: [String: Any] = ["op": "text", "oid": oid, "value": value, "shared": shared]
+            if let it = italic { req["italic"] = it }
+            await self.runEdit(req)
         }
     }
 
@@ -2279,7 +2286,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     @objc func familyChanged(_ p: NSPopUpButton) { if let t = p.titleOfSelectedItem { commitStyle(font: t) } }
     @objc func boldToggled(_ b: NSButton) { commitStyle(weight: b.state == .on ? "BOLD" : "NORMAL") }
-    @objc func italicToggled(_ b: NSButton) { commitStyle(slant: b.state == .on ? "ITALIC" : "NORMAL") }
+    @objc func italicToggled(_ b: NSButton) {
+        // while typing on the slide: the selected characters only
+        if let on = canvas.toggleInlineItalic() { b.state = on ? .on : .off; return }
+        commitStyle(slant: b.state == .on ? "ITALIC" : "NORMAL")
+    }
 
     @objc func colorCommitted(_ w: NSColorWell) {
         guard let s = selection, let o = objInfo else { return }
@@ -2328,12 +2339,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func beginInlineText(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
         let current = textField?.stringValue ?? o.value          // includes an applied edit still rendering
         return canvas.beginTextEdit(oid, text: current, family: o.font, bold: o.weight == "BOLD", italic: o.slant == "ITALIC",
+                                    italicRuns: textField?.stringValue == nil || current == o.value ? o.italic : nil,
                                     color: o.color, at: at, align: o.format?.align ?? "left", valign: o.format?.valign ?? "top",
                                     lineSpacing: o.format?.lineSpacing, frame: o.frameBox,
                                     changed: { [weak self] v in self?.textField?.setText(v) },
                                     done: { [weak self] v, release in
                                         guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
-                                        self.commitText(oid, v, shared: self.sharedChoice, previewed: release)
+                                        self.commitText(oid, v, shared: self.sharedChoice, italic: self.canvas.committedItalic,
+                                                        previewed: release)
                                     })
     }
     /// Type into an empty layout box; the text lands left-aligned at the box's left edge, as in PowerPoint.
@@ -2896,6 +2909,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         commitStyle(weight: o.weight?.uppercased() == "BOLD" ? "NORMAL" : "BOLD")
     }
     @objc func formatItalic() {
+        if let on = canvas.toggleInlineItalic() { formatBar?.italic.state = on ? .on : .off; return }   // the selected characters
         guard let o = objInfo, o.kind == "text" else { return }
         commitStyle(slant: ["ITALIC", "OBLIQUE"].contains(o.slant?.uppercased() ?? "") ? "NORMAL" : "ITALIC")
     }

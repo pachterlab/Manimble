@@ -396,6 +396,7 @@ final class CanvasView: MTKView {
         var fontPx: CGFloat                  // font size in frame px
         var family: String?, bold: Bool, italic: Bool
         var original: String
+        var italicTouched = false            // italics were set or cleared on part of the text while typing
         var done: ((String?, @escaping () -> Void) -> Void)?
         var cell: (row: Int, col: Int, area: Box)?   // typing into one cell of a table; the rest of it stays drawn
         var placeholder: Int?                // typing into the layout box on this line (oid is -1)
@@ -407,6 +408,9 @@ final class CanvasView: MTKView {
     /// top (`top`) or vertical centre.
     struct TextAnchor { var x: Double; var y: Double; var top: Bool; var align: String }
     fileprivate var inline: InlineEdit?
+    /// The characters left in italics by the last text edit ([start, end) ranges, Python string indices), or nil
+    /// when italics were not changed in it; read in `beginTextEdit`'s `done`.
+    private(set) var committedItalic: [[Int]]?
     private var colorCache: [String: NSColor] = [:]
     private var promptCache: [String: MTLTexture] = [:]
     /// The object whose text is being edited on the slide, if any.
@@ -1556,6 +1560,8 @@ fileprivate final class InlineTextView: NSTextView {
         return super.performKeyEquivalent(with: event)
     }
     override func cancelOperation(_ sender: Any?) { onCancel?() }
+    // rich text only for italics set here: what is pasted comes in as plain text
+    override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
     override func resignFirstResponder() -> Bool {
         let accepted = super.resignFirstResponder()
         if accepted { onBlur?() }
@@ -1578,7 +1584,8 @@ extension CanvasView: NSTextViewDelegate {
     /// With `cell`, types into that cell of a table instead (`sizing`: the text its ink shows, when not `text`).
     /// `align`, `valign` and `lineSpacing` lay the lines out as Manim will; with `frame`, the text is pinned
     /// in that frame by them.
-    func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool, color: String?,
+    func beginTextEdit(_ oid: Int, text: String, family: String?, bold: Bool, italic: Bool, italicRuns: [[Int]]? = nil,
+                       color: String?,
                        at: CGPoint?, cell: (row: Int, col: Int, cell: Box, ink: Box)? = nil, sizing: String? = nil,
                        placeholder: Placeholder? = nil, align: String = "left", valign: String = "top",
                        lineSpacing: Double? = nil, frame: Box? = nil,
@@ -1601,7 +1608,8 @@ extension CanvasView: NSTextViewDelegate {
             c = NSColor(srgbRed: CGFloat(r), green: CGFloat(g), blue: CGFloat(bl), alpha: 1)
         }
         let tv = InlineTextView(frame: .zero)
-        tv.isRichText = false; tv.allowsUndo = true; tv.drawsBackground = false; tv.focusRingType = .none
+        tv.isRichText = true; tv.usesFontPanel = false; tv.importsGraphics = false     // rich for italics on part of it
+        tv.allowsUndo = true; tv.drawsBackground = false; tv.focusRingType = .none
         tv.isAutomaticQuoteSubstitutionEnabled = false; tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticTextReplacementEnabled = false; tv.isAutomaticSpellingCorrectionEnabled = false
         tv.isContinuousSpellCheckingEnabled = false
@@ -1612,6 +1620,12 @@ extension CanvasView: NSTextViewDelegate {
         tv.isHorizontallyResizable = false; tv.isVerticallyResizable = false; tv.clipsToBounds = true
         tv.textColor = c; tv.insertionPointColor = c
         tv.string = text
+        tv.typingAttributes[.foregroundColor] = c
+        let ns = text as NSString
+        for r in italicRuns ?? (italic ? [[0, text.unicodeScalars.count]] : []) where r.count == 2 {
+            let a = CanvasView.utf16(ns, r[0]), b = CanvasView.utf16(ns, r[1])
+            if b > a { tv.textStorage?.addAttribute(CanvasView.italicMark, value: true, range: NSRange(location: a, length: b - a)) }
+        }
         tv.bullets = placeholder?.role == "body"
             || (!text.isEmpty && text.components(separatedBy: "\n").allSatisfy { $0.hasPrefix(CanvasView.bullet) })
         if let line = placeholder?.line {
@@ -1661,13 +1675,67 @@ extension CanvasView: NSTextViewDelegate {
         e.view.setSelectedRange(NSRange(location: 0, length: 0))
         if window?.firstResponder === e.view { window?.makeFirstResponder(self) }
         let v = e.view.string
+        committedItalic = e.italicTouched ? italicRuns(e.view) : nil
         let release: () -> Void = { [weak self, weak view = e.view] in
             guard let self = self, let e = self.inline, e.view === view else { return }
             e.view.removeFromSuperview()
             self.inline = nil
             self.setNeedsDisplay(self.bounds)
         }
-        done(commit && v != e.original ? v : nil, release)
+        done(commit && (v != e.original || committedItalic != nil) ? v : nil, release)
+    }
+
+    /// Marks the characters set in italics in the editor (the face itself is chosen in `layoutTextEditor`).
+    static let italicMark = NSAttributedString.Key("manimble.italic")
+
+    /// The UTF-16 offset of the `scalars`-th character (Python indexes strings by code point).
+    static func utf16(_ s: NSString, _ scalars: Int) -> Int {
+        var n = 0, i = 0
+        while i < s.length && n < scalars {
+            let c = s.character(at: i)
+            i += (0xD800...0xDBFF).contains(c) && i + 1 < s.length ? 2 : 1
+            n += 1
+        }
+        return i
+    }
+
+    /// The editor's italic characters as [start, end) code point ranges.
+    private func italicRuns(_ tv: NSTextView) -> [[Int]] {
+        guard let ts = tv.textStorage else { return [] }
+        var runs: [[Int]] = []
+        ts.enumerateAttribute(CanvasView.italicMark, in: NSRange(location: 0, length: ts.length)) { v, r, _ in
+            guard v != nil else { return }
+            let scalars = { (n: Int) in String(decoding: Array(ts.string.utf16.prefix(n)), as: UTF16.self).unicodeScalars.count }
+            let a = scalars(r.location), b = scalars(r.location + r.length)
+            if let last = runs.last, last[1] == a { runs[runs.count - 1][1] = b } else { runs.append([a, b]) }
+        }
+        return runs
+    }
+
+    /// Format ▸ Italic (⌘I) while typing on the slide: the selected characters in italics, or upright again when they
+    /// all are; with nothing selected, what is typed next. The new state, or nil when no text is being typed.
+    func toggleInlineItalic() -> Bool? {
+        guard var e = inline, e.done != nil, e.placeholder == nil, e.cell == nil, let ts = e.view.textStorage else { return nil }
+        let tv = e.view
+        let sel = tv.selectedRange()
+        let on: Bool
+        if sel.length == 0 {
+            on = tv.typingAttributes[CanvasView.italicMark] == nil
+            tv.typingAttributes[CanvasView.italicMark] = on ? true : nil
+        } else {
+            var all = true
+            ts.enumerateAttribute(CanvasView.italicMark, in: sel) { v, _, _ in if v == nil { all = false } }
+            on = !all
+            guard tv.shouldChangeText(in: sel, replacementString: nil) else { return nil }   // undoable with ⌘Z
+            if on { ts.addAttribute(CanvasView.italicMark, value: true, range: sel) }
+            else { ts.removeAttribute(CanvasView.italicMark, range: sel) }
+            tv.didChangeText()
+        }
+        e.italicTouched = true
+        inline = e
+        layoutTextEditor()
+        setNeedsDisplay(bounds)
+        return on
     }
 
     func textDidChange(_ notification: Notification) {
@@ -1686,12 +1754,21 @@ extension CanvasView: NSTextViewDelegate {
         let ps = NSMutableParagraphStyle()
         ps.alignment = e.align == "center" ? .center : e.align == "right" ? .right : .left
         ps.lineSpacing = max(0, font.pointSize * (1 + (e.lineSpacing ?? 0.3)) - lm.defaultLineHeight(for: font))
-        if e.view.font?.pointSize != font.pointSize || e.view.defaultParagraphStyle != ps {
-            e.view.font = font
+        let slanted = CanvasView.editorFont(e.family, bold: e.bold, italic: true, size: font.pointSize)
+        if e.view.defaultParagraphStyle != ps {
             e.view.defaultParagraphStyle = ps
             if let ts = e.view.textStorage { ts.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: ts.length)) }
         }
-        e.view.typingAttributes[.font] = font
+        // each run in its own face: upright, or italic where marked (typed text takes the mark of the text before it)
+        if let ts = e.view.textStorage {
+            ts.beginEditing()
+            ts.addAttribute(.font, value: font, range: NSRange(location: 0, length: ts.length))
+            ts.enumerateAttribute(CanvasView.italicMark, in: NSRange(location: 0, length: ts.length)) { v, r, _ in
+                if v != nil { ts.addAttribute(.font, value: slanted, range: r) }
+            }
+            ts.endEditing()
+        }
+        e.view.typingAttributes[.font] = e.view.typingAttributes[CanvasView.italicMark] != nil ? slanted : font
         e.view.typingAttributes[.paragraphStyle] = ps
         // the lines align within the widest one: measure them unconstrained, then lay out at that width
         tc.containerSize = NSSize(width: 1e6, height: 1e6)

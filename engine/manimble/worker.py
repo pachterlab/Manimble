@@ -964,6 +964,30 @@ def text_attr(m, name):
     return v
 
 
+def italic_runs(m):
+    """[start, end] ranges of the characters of a Text (or a Paragraph's lines joined by newlines) set in italics:
+    its slant, then its t2s ranges and words on top, as manim applies them."""
+    t = m if hasattr(m, "t2s") else getattr(m, "lines_text", None)
+    try:
+        text = t.original_text.replace("\t", " " * t.tab_width)      # what t2s ranges index, as in Text._text2svg
+        flags = [str(t.slant).upper() in ("ITALIC", "OBLIQUE")] * len(text)
+        for word, v in (t.t2s or {}).items():
+            for a, b in t._find_indexes(word, text):
+                for k in range(max(a, 0), min(b, len(text))):
+                    flags[k] = str(v).upper() in ("ITALIC", "OBLIQUE")
+    except Exception:
+        return None
+    runs, k = [], 0
+    while k < len(flags):
+        e = k
+        while e < len(flags) and flags[e] == flags[k]:
+            e += 1
+        if flags[k]:
+            runs.append([k, e])
+        k = e
+    return runs
+
+
 def dims_px(m):
     """Manim's width and height of the object (all points, like stretch_to_fit_*), in frame pixels."""
     try:
@@ -1088,6 +1112,7 @@ def render(req):
             "font": text_attr(m, "font") if m._sl_kind == "text" else None,
             "weight": text_attr(m, "weight") if m._sl_kind == "text" else None,
             "slant": text_attr(m, "slant") if m._sl_kind == "text" else None,
+            "italic": italic_runs(m) if m._sl_kind == "text" else None,
             "color": (hexcolor(m) if m._sl_kind in ("text", "tex") else shape_color(m)) if m._sl_kind != "image" else None,
             "path": picture_path(m) if m._sl_kind == "image" else None,
             "rotation": rotation_deg(m),
@@ -1140,6 +1165,9 @@ def sprite(req):
             kw["weight"] = req["weight"]
         if req.get("slant"):
             kw["slant"] = req["slant"]
+        if req.get("italic") is not None:        # italics on part of it: these ranges, the rest upright
+            kw["slant"] = "NORMAL"
+            kw["t2s"] = {f"[{a}:{b}]": "ITALIC" for a, b in req["italic"]}
         m = T(req["value"], **kw)
     else:
         m = M(req["value"], font_size=req["font_size"], color=color)
