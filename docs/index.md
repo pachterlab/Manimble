@@ -17,7 +17,7 @@ them, all on the same deck.
 
 <div class="mb-buttons" markdown>
 [Download for macOS](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg){ .md-button .md-button--primary }
-[Read the introduction](getting-started/introduction.md){ .md-button }
+[Manual](getting-started/introduction.md){ .md-button }
 [View on GitHub](https://github.com/pachterlab/Manimble){ .md-button }
 </div>
 
