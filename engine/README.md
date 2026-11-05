@@ -1,7 +1,7 @@
 # Manimble engine
 
 The platform-independent core of Manimble (Python 3.11+). A front end starts it as a subprocess and talks to it with
-JSON lines over stdin/stdout, see [`../docs/protocol.md`](../docs/protocol.md).
+JSON lines over stdin/stdout, see [`../docs/developers/protocol.md`](../docs/developers/protocol.md).
 
 ```bash
 PYTHONPATH=engine MANIMBLE_PYTHON=$(which python3) python3 -m manimble.rpc

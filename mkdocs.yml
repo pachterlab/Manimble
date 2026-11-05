@@ -1,0 +1,121 @@
+site_name: Manimble
+site_description: The Manimble user guide. Manimble is a macOS slide editor for Manim presentations, where every slide is Python code you can edit by hand, on the canvas, or with an AI coding agent.
+site_url: https://pachterlab.github.io/Manimble/
+repo_url: https://github.com/pachterlab/Manimble
+repo_name: pachterlab/Manimble
+edit_uri: ""
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+copyright: Copyright &copy; Pachter Lab. Manimble is free and open source under the BSD 2-Clause License.
+
+theme:
+  name: material
+  logo: assets/manimble-icon.png
+  favicon: assets/manimble-icon.png
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+extra_css:
+  - assets/extra.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/pachterlab/Manimble
+      name: Manimble on GitHub
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Introduction: getting-started/introduction.md
+      - Installation: getting-started/installation.md
+      - Quick start: getting-started/quick-start.md
+      - Key concepts: getting-started/concepts.md
+  - Editing slides:
+      - The Manimble window: guide/window.md
+      - Selecting and arranging: guide/arranging.md
+      - Text and formatting: guide/text.md
+      - Formulas: guide/formulas.md
+      - Inserting content: guide/inserting.md
+      - Pictures and Python plots: guide/pictures.md
+      - Slides and builds: guide/slides.md
+      - Notes and alt text: guide/notes.md
+      - Themes, backgrounds and colour: guide/design.md
+      - Grids, guides and rulers: guide/layout-aids.md
+      - Find and replace: guide/find.md
+      - Editing the Python source: guide/source.md
+  - AI agents and the terminal:
+      - Building slides with an AI agent: ai/agents.md
+      - The terminal: ai/terminal.md
+  - Presenting:
+      - Playing a presentation: presenting/playing.md
+      - Presenter View: presenting/presenter.md
+      - Scripted presentations: presenting/scripted.md
+      - Collecting feedback: presenting/feedback.md
+  - Sharing:
+      - Importing presentations: sharing/import.md
+      - Exporting: sharing/export.md
+      - Projects and packages: sharing/projects.md
+  - Reference:
+      - Keyboard shortcuts: reference/shortcuts.md
+      - Deck file format: reference/deck-format.md
+      - Limitations: reference/limitations.md
+      - Troubleshooting and FAQ: reference/faq.md
+  - Developers:
+      - How Manimble works: developers/architecture.md
+      - Engine protocol: developers/protocol.md

@@ -1,0 +1,99 @@
+/* Manimble's accent (#FF6C0C, the app's orange) on a neutral dark header. */
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #1f1f24;
+  --md-primary-fg-color--light: #2c2c33;
+  --md-primary-fg-color--dark: #141417;
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: #e85d00;
+  --md-accent-fg-color--transparent: rgba(255, 108, 12, 0.1);
+  --md-typeset-a-color: #d35400;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #1a1a1f;
+  --md-primary-fg-color--light: #26262c;
+  --md-primary-fg-color--dark: #111114;
+  --md-accent-fg-color: #ff8a3d;
+  --md-accent-fg-color--transparent: rgba(255, 138, 61, 0.12);
+  --md-typeset-a-color: #ff9b57;
+  --md-default-bg-color: #18181c;
+}
+
+/* Menu paths such as File ▸ Save read as UI labels. */
+.md-typeset .menu {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Home page */
+.md-typeset .mb-hero {
+  display: flex;
+  align-items: center;
+  gap: 1.6rem;
+  margin: 0.4rem 0 1.6rem;
+}
+.md-typeset .mb-hero > p {
+  flex: none;
+  margin: 0;
+}
+.md-typeset .mb-hero img {
+  width: 104px;
+  min-width: 104px;
+  height: 104px;
+  flex: none;
+}
+.md-typeset .mb-hero h1 {
+  margin: 0 0 0.3rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.md-typeset .mb-hero p {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--md-default-fg-color--light);
+}
+.md-typeset .mb-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0 0 1.8rem;
+}
+.md-typeset .mb-buttons .md-button {
+  margin: 0;
+}
+@media screen and (max-width: 600px) {
+  .md-typeset .mb-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.8rem;
+  }
+  .md-typeset .mb-hero img {
+    width: 80px;
+    height: 80px;
+  }
+}
+
+/* Page titles in the body colour rather than Material's light grey. */
+.md-typeset h1 {
+  color: var(--md-default-fg-color);
+  font-weight: 600;
+}
+
+/* Keys read at the size of the text around them, also in tables. */
+.md-typeset kbd {
+  font-size: 0.8em;
+}
+.md-typeset table:not([class]) kbd {
+  font-size: 0.95em;
+}
+.md-typeset table:not([class]) td:first-child kbd {
+  white-space: nowrap;
+}
+
+/* Home page cards: two per row. */
+@media screen and (min-width: 45em) {
+  .md-typeset .grid.cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

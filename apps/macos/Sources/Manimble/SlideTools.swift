@@ -1,7 +1,7 @@
 import AppKit
 
 /// Slide-level tools: new-slide layouts, slide numbers, the speaker-notes pane, the pen, image element extraction
-/// and the presenter view. Each one is an engine command (see docs/protocol.md) or a window of its own.
+/// and the presenter view. Each one is an engine command (see docs/developers/protocol.md) or a window of its own.
 extension MainController {
     // MARK: new slide layouts
 
