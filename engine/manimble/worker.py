@@ -625,11 +625,11 @@ class Slide(Scene):
                 # manim's _MethodAnimation.finish(): the methods for their side effects, then the target's geometry
                 for item in getattr(a, "methods", ()):
                     item.method.__func__(a.mobject, *item.args, **item.kwargs)
-                a.mobject.become(a.mobject.target)
+                _become(a.mobject, a.mobject.target)
             elif type(a) is Transform:
                 target = a.target_mobject
                 # become() aligns both structures; keep the real target untouched like Transform.begin() does
-                a.mobject.become(target if _same_shape(a.mobject, target) else target.copy())
+                _become(a.mobject, target if _same_shape(a.mobject, target) else target.copy())
                 if a.replace_mobject_with_target_in_scene:
                     self.replace(a.mobject, target)
             elif isinstance(a, TransformMatchingAbstractBase):
@@ -909,6 +909,17 @@ def _same_shape(a, b) -> bool:
     if a.has_points() != b.has_points() or len(a.submobjects) != len(b.submobjects):
         return False
     return all(_same_shape(x, y) for x, y in zip(a.submobjects, b.submobjects))
+
+
+def _become(m, target):
+    """m.become(target) for the end of an animation. become() blends the colour of every member, which a Group or a
+    ValueTracker cannot (manim raises); they have no colour of their own, and manim's animations leave it alone too."""
+    m.align_data(target, skip_point_alignment=True)
+    for a, b in zip(m.get_family(), target.get_family(), strict=True):
+        a.points = np.array(b.points)
+        if type(a).interpolate_color is not Mobject.interpolate_color:
+            a.interpolate_color(a, b, 1)
+    return m
 
 fake = types.ModuleType("manim_slides")
 fake.Slide = Slide

@@ -192,6 +192,7 @@ class Project:
     def __init__(self, deck_dir: str):
         self.dir = os.path.realpath(deck_dir)
         self._cache: dict = {}
+        self._found: dict = {}          # rel -> the slides last found in it, kept while it does not parse
 
     def py_files(self):
         return sorted(f for f in os.listdir(self.dir) if f.endswith(".py"))
@@ -228,18 +229,24 @@ class Project:
 
     # ---------------------------------------------------------- scenes
     def scenes(self):
-        """[(name, rel, line)] for every class with a construct() method."""
+        """[(name, rel, line)] for every class with a construct() method.
+
+        A file that does not parse (half written by an editor or an agent, or with a typo) keeps the slides it had,
+        so they stay listed and show the error rather than vanishing."""
         found = []
         for rel in self.py_files():
             try:
                 tree = self.src(rel).tree
             except SyntaxError:
+                found += self._found.get(rel, [])
                 continue
-            for node in tree.body:
-                if isinstance(node, ast.ClassDef) and any(
-                    isinstance(b, ast.FunctionDef) and b.name == "construct" for b in node.body
-                ):
-                    found.append((node.name, rel, node.lineno, node.end_lineno))
+            except OSError:                         # removed while listing
+                continue
+            mine = [(node.name, rel, node.lineno, node.end_lineno) for node in tree.body
+                    if isinstance(node, ast.ClassDef)
+                    and any(isinstance(b, ast.FunctionDef) and b.name == "construct" for b in node.body)]
+            self._found[rel] = mine
+            found += mine
         order_file = os.path.join(self.dir, "order.txt")
         if os.path.exists(order_file):
             with open(order_file, encoding="utf-8") as fh:

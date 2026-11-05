@@ -309,8 +309,16 @@ class Manimble:
         """Hash of everything that can change how this scene renders."""
         h = hashlib.sha1(b"manimble-engine-6")
         scene_names = {x["name"] for x in self.all_scenes}
+        scene_files = {x["file"] for x in self.all_scenes}
         for rel in self.project.py_files():
-            src = self.project.src(rel)
+            try:
+                src = self.project.src(rel)
+            except SyntaxError:
+                # mid-edit or a typo: its own slides re-render (and show the error), other slides only when it
+                # is a module they share
+                if rel == s["file"] or rel not in scene_files:
+                    h.update(self.project.read(rel))
+                continue
             data = src.data
             if rel == s["file"]:
                 # the scene's own class in full; all other scene classes blanked out
@@ -369,9 +377,13 @@ class Manimble:
             return "rendering"
         if r is None:
             return "queued" if name in self.queue else "pending"
-        if "error" in r and r.get("key") == self.scene_key(self.scene(name)):
+        try:
+            key = self.scene_key(self.scene(name))
+        except KeyError:                    # renamed or deleted since the caller listed it
+            return "missing"
+        if "error" in r and r.get("key") == key:
             return "error"
-        if r.get("key") != self.scene_key(self.scene(name)):
+        if r.get("key") != key:
             return "queued" if name in self.queue else "stale"
         return "ready"
 
@@ -401,6 +413,8 @@ class Manimble:
                 self.render_now(name)
                 if self.on_event:
                     self.on_event({"event": "rendered", "name": name})
+            except KeyError:
+                pass                        # the slide was renamed or deleted while it waited
             except Exception:
                 traceback.print_exc()
 
@@ -781,12 +795,17 @@ class Manimble:
         s = self.scene(name)
         self.refresh_scenes()
         s = self.scene(name)
-        src = self.project.src(s["file"])
-        cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name)
-        a, b = src.span(cls)
+        try:
+            src = self.project.src(s["file"])
+            cls = next(n for n in src.tree.body if isinstance(n, ast.ClassDef) and n.name == name)
+            text = src.data[slice(*src.span(cls))].decode("utf-8")
+        except SyntaxError:
+            # the file does not parse: the lines the class had when it last did
+            lines = self.project.read(s["file"]).decode("utf-8", "replace").splitlines(keepends=True)
+            text = "".join(lines[s["line"] - 1:s["end"]])
         return {
             "file": s["file"], "start": s["line"], "end": s["end"],
-            "text": src.data[a:b].decode("utf-8"),
+            "text": text,
             "changed": self.last_changed if self.last_changed.get("file") == s["file"] else None,
         }
 
