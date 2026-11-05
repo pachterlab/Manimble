@@ -12,6 +12,7 @@ final class Workspace {
     let projectName: String
     let deckRelativePath: String
     private var baseline: [String: Data] = [:]     // original contents when the copy was made
+    private(set) var ownFiles: Set<String> = []          // written here for coding agents; never saved to the original
 
     static var base: URL {
         let u = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Manimble")
@@ -63,12 +64,16 @@ final class Workspace {
                 baseline[e] = try? Data(contentsOf: src)
             }
         }
+        // what a coding agent started in the terminal reads first (Claude Code, Codex, Gemini CLI); a deck's own wins
+        for e in AgentInstructions.files where !fm.fileExists(atPath: work.appendingPathComponent(e).path) {
+            if (try? Data(AgentInstructions.text.utf8).write(to: work.appendingPathComponent(e))) != nil { ownFiles.insert(e) }
+        }
     }
 
     private func regularFiles(_ dir: URL) -> [String] {
         let fm = FileManager.default
         return ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { e in
-            if e.hasPrefix(".") { return false }
+            if e.hasPrefix(".") || ownFiles.contains(e) { return false }
             var isDir: ObjCBool = false
             let u = dir.appendingPathComponent(e)
             if (try? u.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true { return false }

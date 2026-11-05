@@ -79,7 +79,7 @@ enum PortableProject {
         let fm = FileManager.default
         let deckDestination = project.appendingPathComponent(workspace.deckRelativePath)
         try fm.createDirectory(at: deckDestination, withIntermediateDirectories: true)
-        try copyDeck(from: workspace.work, to: deckDestination)
+        try copyDeck(from: workspace.work, to: deckDestination, skipping: workspace.ownFiles)
 
         // Assets are a conventional part of a Manim Slides project. Copy them
         // even if a slide did not access every file during the dependency scan.
@@ -141,12 +141,12 @@ enum PortableProject {
         try encoder.encode(manifest).write(to: project.appendingPathComponent(manifestName), options: .atomic)
     }
 
-    private static func copyDeck(from source: URL, to destination: URL) throws {
+    private static func copyDeck(from source: URL, to destination: URL, skipping own: Set<String>) throws {
         let fm = FileManager.default
         // Portable projects include existing Manim Slides builds and their
         // media so a recipient can present the deck before rendering it again.
         let excluded: Set<String> = ["snap", "__pycache__", ".manimble"]
-        for name in try fm.contentsOfDirectory(atPath: source.path).sorted() where !name.hasPrefix(".") && !excluded.contains(name) {
+        for name in try fm.contentsOfDirectory(atPath: source.path).sorted() where !name.hasPrefix(".") && !excluded.contains(name) && !own.contains(name) {
             let child = source.appendingPathComponent(name)
             try copyNode(from: child, to: destination.appendingPathComponent(name))
         }

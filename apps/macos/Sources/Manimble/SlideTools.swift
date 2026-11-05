@@ -675,8 +675,9 @@ extension MainController {
         toast(now ? "New terminals open in the working copy (what the slides show)" : "New terminals open in the project repository")
     }
 
-    /// Where a terminal starts: the project repository of the original deck (its git root, else the deck's parent
-    /// folder), or the working copy when View ▸ Terminal Starts in Working Copy is on.
+    /// Where a terminal starts: the working copy (the default, View ▸ Terminal Starts in Working Copy), where the
+    /// agent instructions are and edits re-render live, or else the original deck's repository (its git root, else
+    /// the deck's parent folder).
     func terminalDirectory(_ ws: Workspace) -> String {
         if UserDefaults.standard.bool(forKey: "terminalInWorkCopy") { return ws.work.path }
         var dir = ws.original
