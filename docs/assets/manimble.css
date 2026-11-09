@@ -26,54 +26,58 @@
   white-space: nowrap;
 }
 
-/* Home page */
+/* Home page: the introduction; the animation runs across the full width at the bottom. */
+.md-typeset .mb-intro {
+  margin: 0.4rem 0 1.8rem;
+}
+.md-typeset .mb-video {
+  margin: 2rem 0 0;
+}
+.md-typeset .mb-video video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1864 / 150;
+  border-radius: 0.4rem;
+  background: #000;
+  box-shadow: 0 0.3rem 1.2rem rgba(0, 0, 0, 0.22);
+}
 .md-typeset .mb-hero {
   display: flex;
   align-items: center;
-  gap: 1.6rem;
-  margin: 0.4rem 0 1.6rem;
+  gap: 1rem;
+  margin: 0 0 0.9rem;
 }
 .md-typeset .mb-hero > p {
   flex: none;
   margin: 0;
 }
 .md-typeset .mb-hero img {
-  width: 104px;
-  min-width: 104px;
-  height: 104px;
+  width: 72px;
+  min-width: 72px;
+  height: 72px;
   flex: none;
 }
 .md-typeset .mb-hero h1 {
-  margin: 0 0 0.3rem;
+  margin: 0;
   font-weight: 700;
   letter-spacing: -0.01em;
 }
-.md-typeset .mb-hero p {
-  margin: 0;
-  font-size: 1.05rem;
+.md-typeset .mb-lead {
+  margin: 0 0 1.3rem;
+  font-size: 0.95rem;
   color: var(--md-default-fg-color--light);
 }
-.md-typeset .mb-buttons {
+.md-typeset .mb-buttons > p {        /* Markdown wraps the three links in a paragraph */
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
-  margin: 0 0 1.8rem;
+  margin: 0;
 }
 .md-typeset .mb-buttons .md-button {
   margin: 0;
+  padding: 0.55em 1.25em;
 }
-@media screen and (max-width: 600px) {
-  .md-typeset .mb-hero {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.8rem;
-  }
-  .md-typeset .mb-hero img {
-    width: 80px;
-    height: 80px;
-  }
-}
-
 /* Page titles in the body colour rather than Material's light grey. */
 .md-typeset h1 {
   color: var(--md-default-fg-color);

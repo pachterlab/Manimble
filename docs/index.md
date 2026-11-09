@@ -5,20 +5,22 @@ hide:
   - toc
 ---
 
+<div class="mb-intro" markdown>
 <div class="mb-hero" markdown>
 <img src="assets/manimble-icon.png" alt="Manimble icon">
-<div markdown>
 # Manimble
+</div>
+
 A slide editor for presentations made with [Manim](https://www.manim.community), the animation engine behind
 mathematical videos. Edit your slides with the mouse, write them in Python, or ask an AI coding agent to build
 them, all on the same deck.
-</div>
-</div>
+{ .mb-lead }
 
 <div class="mb-buttons" markdown>
 [Download for macOS](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg){ .md-button .md-button--primary }
 [Manual](getting-started/introduction.md){ .md-button }
 [View on GitHub](https://github.com/pachterlab/Manimble){ .md-button }
+</div>
 </div>
 
 ## What Manimble does
@@ -67,7 +69,7 @@ agent write or revise slides while you watch them update and keep editing them b
 
     ---
 
-    Bring in PowerPoint, Keynote and Beamer decks. Export to PowerPoint, Keynote, Beamer, PDF and MP4, or package a
+    Import PowerPoint, Keynote and Beamer decks. Export to PowerPoint, Keynote, Beamer, PDF and MP4, or package a
     deck for another Manimble user.
 
     [:octicons-arrow-right-24: Sharing](sharing/import.md)
@@ -83,3 +85,10 @@ agent write or revise slides while you watch them update and keep editing them b
 
 Manimble is free and open source under the BSD 2-Clause License. Report problems and suggest features on
 [GitHub Issues](https://github.com/pachterlab/Manimble/issues).
+
+<div class="mb-video">
+  <video autoplay muted loop playsinline preload="auto" poster="assets/manimble-features-poster.jpg?v=4"
+         aria-label="The word Manimble opens into icons for what Manimble does and closes again">
+    <source src="assets/manimble-features.mp4?v=4" type="video/mp4">
+  </video>
+</div>

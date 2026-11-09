@@ -49,7 +49,7 @@ theme:
     - content.code.copy
 
 extra_css:
-  - assets/extra.css
+  - assets/manimble.css
 
 extra:
   generator: false
