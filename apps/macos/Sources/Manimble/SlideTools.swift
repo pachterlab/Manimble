@@ -805,14 +805,13 @@ extension MainController {
             let s = stillPages(d)
             if !broken.isEmpty { toast("Skipping slides that fail to render: " + broken.joined(separator: ", "), error: true) }
             guard !s.slides.isEmpty else { return }
-            var start = 0
-            if let n = sceneName, let i = s.scenes.firstIndex(of: n) { start = i }
+            let start = showStart(s.scenes)
             let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
             let other = NSScreen.screens.first { $0 != here }
             let p = PresenterController(slides: s.slides, links: s.links, scenes: s.scenes, notes: s.notes, buildNotes: s.buildNotes,
                                         startSlide: start, presenterScreen: here, audienceScreen: other)
             showPending = s.pending
-            p.onExit = { [weak self] in self?.presenter = nil; self?.showPending = false }
+            p.onExit = { [weak self, unowned p] in self?.presenter = nil; self?.showPending = false; self?.returnFromShow(p.source) }
             p.onGone = { [weak self] in NSApp.activate(ignoringOtherApps: true); self?.window.makeKeyAndOrderFront(nil) }
             p.onSaveNotes = { [weak self] scene, build, text, done in self?.savePresenterNotes(scene: scene, build: build, text: text, done: done) }
             p.noteImageBase = workspace?.work
@@ -821,7 +820,7 @@ extension MainController {
             p.onDetach = { [weak self] src in
                 self?.presenter = nil
                 guard let s = src as? SlidePlayer else { return }
-                s.onExit = { [weak self] in self?.player = nil; self?.showPending = false; self?.window.makeKeyAndOrderFront(nil) }
+                s.onExit = { [weak self, unowned s] in self?.player = nil; self?.showPending = false; self?.returnFromShow(s) }
                 self?.player = s
             }
             presenter = p

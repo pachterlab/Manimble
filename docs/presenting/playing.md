@@ -18,7 +18,8 @@ commands, Presenter View and scripted presentations use animations; when it isn'
 | **Play ▸ Play from Current Slide** | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>P</kbd> |
 | **Play ▸ Presenter View** | <kbd>⌃</kbd><kbd>⌘</kbd><kbd>P</kbd> |
 
-Press <kbd>Esc</kbd> or <kbd>Q</kbd> to end the show. Hidden slides are skipped.
+Press <kbd>Esc</kbd> or <kbd>Q</kbd> to end the show. The editor then shows the slide and build the show ended on.
+Hidden slides are skipped; playing from a hidden slide starts at the next slide that is shown.
 
 ## Building the animations
 

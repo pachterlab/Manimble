@@ -17,7 +17,7 @@
 | <kbd>⌘</kbd><kbd>Z</kbd> | Undo |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd> | Redo |
 | <kbd>⌘</kbd><kbd>X</kbd> / <kbd>⌘</kbd><kbd>C</kbd> / <kbd>⌘</kbd><kbd>V</kbd> | Cut / Copy / Paste |
-| <kbd>⌘</kbd><kbd>A</kbd> | Select all text in a text box; right after moving an object in one build, apply the move to every build |
+| <kbd>⌘</kbd><kbd>A</kbd> | Select every object on the slide; in a text box, the code editor or the terminal, select all of its text |
 | <kbd>⌘</kbd><kbd>F</kbd> | Find… |
 | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>F</kbd> | Find and Replace… |
 
@@ -91,6 +91,7 @@
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>B</kbd> | Send to Back |
 | <kbd>⌘</kbd><kbd>G</kbd> | Group |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd> | Ungroup |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd> | Apply Move to All Builds (right after moving an object in one build) |
 
 ## View
 

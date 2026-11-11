@@ -1,4 +1,5 @@
 import AppKit
+import SwiftTerm
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One controller per deck window, like PowerPoint; the main menu acts on the frontmost one.
@@ -319,6 +320,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .separator(),
             item("Group", #selector(MainController.groupObjects), "g"),
             item("Ungroup", #selector(MainController.ungroupObjects), "g", [.command, .shift]),
+            .separator(),
+            item("Apply Move to All Builds", #selector(MainController.spreadLastMove), "a", [.command, .shift]),
         ])
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j", [.command, .option]),
@@ -381,10 +384,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// Target of the main menu's deck commands: forwards each one (and its validation) to the frontmost deck window's
 /// controller, so items keep their explicit target instead of going through the key window's responder chain.
-final class MenuRouter: NSObject {
+final class MenuRouter: NSObject, NSMenuItemValidation {
     var target: () -> MainController? = { nil }
+    private static let textActions: Set<Selector> = [#selector(NSText.cut(_:)), #selector(NSText.copy(_:)), #selector(NSText.paste(_:)),
+                                                     #selector(NSTextView.pasteAsPlainText(_:)), #selector(NSText.selectAll(_:))]
+    /// While typing in a text box, the code editor, a field or a terminal, Cut, Copy, Paste and Select All act on
+    /// what is typed there rather than on the slide.
+    private func textTarget(for s: Selector) -> NSResponder? {
+        guard Self.textActions.contains(s), let r = NSApp.keyWindow?.firstResponder,
+              r is NSText || r is TerminalView, r.responds(to: s) else { return nil }
+        return r
+    }
     override func responds(to s: Selector!) -> Bool { super.responds(to: s) || MainController.instancesRespond(to: s) }
     override func forwardingTarget(for s: Selector!) -> Any? {
-        MainController.instancesRespond(to: s) ? target() : super.forwardingTarget(for: s)
+        if let r = textTarget(for: s) { return r }
+        return MainController.instancesRespond(to: s) ? target() : super.forwardingTarget(for: s)
+    }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if let a = item.action, let r = textTarget(for: a) {
+            return (r as? NSUserInterfaceValidations)?.validateUserInterfaceItem(item) ?? true
+        }
+        return MainActor.assumeIsolated { target()?.validateMenuItem(item) ?? false }
     }
 }

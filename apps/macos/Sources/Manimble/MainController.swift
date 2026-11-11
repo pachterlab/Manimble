@@ -145,6 +145,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var tableCells: [[NSTextField]] = []
     var tableGrid: NSScrollView?
     var textField: MultilineTextBox?
+    /// Text edits sent and not yet rendered, by "scene:oid": typing into the object again starts from them.
+    var pendingTexts: [String: String] = [:]
     var sizeField: NSTextField?
     var colorWell: NSColorWell?
 
@@ -1078,6 +1080,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if let sel = selection, sc.objects?[String(sel)] == nil { selection = nil }
         applyStop()
         if !keepOverrides { canvas.overrides = [:]; canvas.lineOverrides = [:] }
+        refreshInspectorText()
         if ProcessInfo.processInfo.environment["MANIMBLE_SELFTEST"] != nil { selfTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLAY"] != nil, !testRan { testRan = true; playTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PRESENT"] != nil, !testRan { testRan = true; presentTest() }
@@ -1095,6 +1098,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BIOCARTOON"] != nil, !testRan { testRan = true; biocartoonTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BCLIBRARY"] != nil, !testRan { testRan = true; bcLibraryTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_EDITING"] != nil, !testRan { testRan = true; editingTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FEEDBACK"] != nil, !testRan { testRan = true; feedbackTest() }
@@ -1944,8 +1948,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if o.kind == "text" {
             if o.textOk == true {
                 inspector.addArrangedSubview(label("Text"))
-                let f = MultilineTextBox(string: o.value)
-                f.onCommit = { [weak self] v in self?.commitText(sel, v, shared: self?.sharedChoice ?? true) }
+                let slide = sceneName
+                let f = MultilineTextBox(string: pendingTexts["\(slide ?? ""):\(sel)"] ?? o.value)
+                f.onCommit = { [weak self] v in self?.commitText(sel, v, shared: self?.sharedChoice ?? true, slide: slide) }
                 width(f)
                 textField = f; inspector.addArrangedSubview(f)
                 let hint = NSTextField(labelWithString: "↵ new line  ·  ⌘↵ apply  ·  esc revert")
@@ -2143,7 +2148,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             lastChanged = res.changed
             if res.oneBuild == true, let oid = oid { lastBuildMove = (name, oid, r["stop"] as? Int ?? 0) }
             var msg = res.message == "no change" ? "No change" : "Saved · \(res.message ?? "")"
-            if res.oneBuild == true { msg += " · ⌘A applies it to every build" }
+            if res.oneBuild == true { msg += " · ⇧⌘A applies it to every build" }
             if let n = res.siblings { msg += " (\(n) similar objects share this line; all moved)" }
             toast(msg)
         } else {
@@ -2174,12 +2179,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
-    /// Cmd-A: selects all the text in a focused text box, else, right after a move in one build, applies that
-    /// move to every build of the slide instead. (Every menu item the controller answers to is targeted at it,
-    /// so the text box never sees the key on its own.)
+    /// Edit ▸ Select All (⌘A) on the slide: every object in the build on screen. (In a text box, the code editor or
+    /// the terminal the menu sends it there instead; see MenuRouter.)
     @objc func selectAll(_ sender: Any?) {
-        if let t = otherWindowText { t.selectAll(sender); return }
-        if let t = window.firstResponder as? NSText { t.selectAll(sender); return }
+        guard sceneName != nil, player == nil else { return }
+        canvas.selectAllObjects()
+        window.makeFirstResponder(canvas)
+    }
+
+    /// Arrange ▸ Apply Move to All Builds (⇧⌘A): right after a move in one build, that move in every build instead.
+    @objc func spreadLastMove() {
         submit { [weak self] in                 // after the move itself, when it is still queued
             guard let self = self, let m = self.lastBuildMove, m.scene == self.sceneName, m.stop == self.stopIndex else { return }
             await self.runEdit(["op": "spread", "oid": m.oid, "scene": m.scene])
@@ -2246,18 +2255,40 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// `previewed` runs once the new text shows on the canvas (or at once when there is nothing to apply).
     /// `italic`: the characters to set in italics ([start, end) ranges of `value`), when that was changed.
     /// `styles`: the formatting kinds set on part of the text while typing, and the characters that have each.
-    func commitText(_ oid: Int, _ value: String, shared: Bool, styles: [String: [CharRun]]? = nil, previewed: (() -> Void)? = nil) {
-        let changed = styles?.filter { kind, runs in runs != (scene?.objects?[String(oid)]?.charStyles[kind] ?? []) }
-        guard let o = scene?.objects?[String(oid)], value != o.value || changed?.isEmpty == false else { previewed?(); return }
+    /// `slide`: the slide the text was typed on (the one on screen when not given); the edit goes there even when
+    /// another slide is shown by the time it is sent.
+    func commitText(_ oid: Int, _ value: String, shared: Bool, styles: [String: [CharRun]]? = nil, slide: String? = nil,
+                    previewed: (() -> Void)? = nil) {
+        guard let name = slide ?? sceneName else { previewed?(); return }
+        let o = name == sceneName ? scene?.objects?[String(oid)] : nil
+        if let o = o {
+            let changed = styles?.filter { kind, runs in runs != (o.charStyles[kind] ?? []) }
+            guard value != o.value || changed?.isEmpty == false else { previewed?(); return }
+        }
+        let key = "\(name):\(oid)"
+        pendingTexts[key] = value
         submit { [weak self] in
             guard let self = self else { previewed?(); return }
-            await self.previewSprite(oid, kind: o.kind, value: value, size: o.fontSize ?? 30, color: o.color, font: o.font,
-                                     weight: o.weight, slant: o.slant, styles: styles)
+            if let o = o, self.sceneName == name {
+                await self.previewSprite(oid, kind: o.kind, value: value, size: o.fontSize ?? 30, color: o.color, font: o.font,
+                                         weight: o.weight, slant: o.slant, styles: styles)
+            }
             previewed?()
-            var req: [String: Any] = ["op": "text", "oid": oid, "value": value, "shared": shared]
+            var req: [String: Any] = ["op": "text", "oid": oid, "value": value, "shared": shared, "scene": name]
             if let st = styles, !st.isEmpty { req["styles"] = st.mapValues { $0.map(\.json) } }
             await self.runEdit(req)
+            if self.pendingTexts[key] == value { self.pendingTexts[key] = nil }
+            self.refreshInspectorText()
         }
+    }
+
+    /// The inspector's text box shows the slide's own text again (after an undo, an agent's edit, or an edit that
+    /// failed), unless it is being typed in, on the slide or in the box, or an edit of it is still on its way.
+    func refreshInspectorText() {
+        guard let f = textField, !f.isEditing, canvas.editingText == nil, let sel = selection, let name = sceneName,
+              let o = scene?.objects?[String(sel)], o.kind == "text", pendingTexts["\(name):\(sel)"] == nil,
+              f.stringValue != o.value else { return }
+        f.setText(o.value)
     }
 
     @objc func sizeCommitted(_ f: NSTextField) { commitFontSize(f.doubleValue) }
@@ -2347,7 +2378,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     /// Type into a Text object right on the slide; the inspector's box follows along.
     func beginInlineText(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
-        let current = textField?.stringValue ?? o.value          // includes an applied edit still rendering
+        let slide = sceneName
+        let current = pendingTexts["\(slide ?? ""):\(oid)"] ?? o.value      // an edit of it still rendering, else the slide's
         return canvas.beginTextEdit(oid, text: current, family: o.font, bold: o.weight == "BOLD", italic: o.slant == "ITALIC",
                                     styles: current == o.value ? o.charStyles : nil,
                                     color: o.color, at: at, align: o.format?.align ?? "left", valign: o.format?.valign ?? "top",
@@ -2356,7 +2388,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                                     done: { [weak self] v, release in
                                         guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
                                         self.commitText(oid, v, shared: self.sharedChoice, styles: self.canvas.committedStyles,
-                                                        previewed: release)
+                                                        slide: slide, previewed: release)
                                     })
     }
     /// Type into an empty layout box; the text lands left-aligned at the box's left edge, as in PowerPoint.
@@ -2726,7 +2758,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let here = window.screen ?? NSScreen.main ?? NSScreen.screens[0]
             let other = NSScreen.screens.first { $0 != here }
             let p = PresenterController(deck: d, startScene: presentFrom, presenterScreen: here, audienceScreen: other)
-            p.onExit = { [weak self] in self?.presenter = nil }
+            p.onExit = { [weak self, unowned p] in self?.presenter = nil; self?.returnFromShow(p.source) }
             p.onGone = { [weak self] in NSApp.activate(ignoringOtherApps: true); self?.window.makeKeyAndOrderFront(nil) }
             p.onSaveNotes = { [weak self] scene, build, text, done in self?.savePresenterNotes(scene: scene, build: build, text: text, done: done) }
             p.noteImageBase = workspace?.work
@@ -2735,7 +2767,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             p.onDetach = { [weak self] src in
                 self?.presenter = nil
                 guard let a = src as? AnimatedPlayer else { return }
-                a.onExit = { [weak self] in self?.animatedPlayer = nil; self?.window.makeKeyAndOrderFront(nil) }
+                a.onExit = { [weak self, unowned a] in self?.animatedPlayer = nil; self?.returnFromShow(a) }
                 self?.animatedPlayer = a
             }
             presenter = p
@@ -2743,7 +2775,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         let p = AnimatedPlayer(screen: window.screen ?? NSScreen.main ?? NSScreen.screens[0])
-        p.onExit = { [weak self] in self?.animatedPlayer = nil; self?.window.makeKeyAndOrderFront(nil) }
+        p.onExit = { [weak self, unowned p] in self?.animatedPlayer = nil; self?.returnFromShow(p) }
         animatedPlayer = p
         p.play(d, startScene: presentFrom)
         if script.autoPending { script.autoPending = false; startScriptRunner(on: p) }
@@ -2818,15 +2850,36 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             let s = stillPages(d)
             if !broken.isEmpty { toast("Skipping slides that fail to render: " + broken.joined(separator: ", "), error: true) }
             guard !s.slides.isEmpty else { return }
-            var start = 0
-            if fromCurrent, let n = sceneName, let i = s.scenes.firstIndex(of: n) { start = i }
+            let start = fromCurrent ? showStart(s.scenes) : 0
             let p = SlidePlayer(screen: window.screen ?? NSScreen.main ?? NSScreen.screens[0])
             p.scenes = s.scenes; p.notes = s.notes; p.buildNotes = s.buildNotes
-            p.onExit = { [weak self] in self?.player = nil; self?.showPending = false; self?.window.makeKeyAndOrderFront(nil) }
+            p.onExit = { [weak self, unowned p] in self?.player = nil; self?.showPending = false; self?.returnFromShow(p) }
             player = p
             showPending = s.pending
             p.play(slides: s.slides, links: s.links, startSlide: start)
             if auto { startScriptRunner(on: p) }
+        }
+    }
+
+    /// Where a show of `shown` (its slides' scenes, in show order) starts from the slide on screen: that slide, or
+    /// when it is left out of the show (hidden, or failing to render) the next one after it that is in it.
+    func showStart(_ shown: [String]) -> Int {
+        guard let n = sceneName else { return 0 }
+        if let i = shown.firstIndex(of: n) { return i }
+        let order = state?.scenes.map(\.name) ?? []
+        guard let at = order.firstIndex(of: n) else { return 0 }
+        return order[at...].lazy.compactMap { shown.firstIndex(of: $0) }.first ?? 0
+    }
+
+    /// Leaving a show: back to the editor, on the slide and build the show was on.
+    func returnFromShow(_ show: PresenterSource) {
+        window.makeKeyAndOrderFront(nil)
+        guard (0..<show.pageCount).contains(show.pageIndex) else { return }
+        let page = show.presenterPage(show.pageIndex)
+        guard let name = page.scene, state?.scenes.contains(where: { $0.name == name }) == true else { return }
+        Task { @MainActor in
+            if name != sceneName { await selectScene(name) }
+            if sceneName == name { goToStop(min(page.build, (scene?.stops?.count ?? 1) - 1)) }
         }
     }
 
@@ -3025,6 +3078,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             item.state = DeckTheme.all.first { $0.id == item.representedObject as? String }?.name == scene?.theme ? .on : .off
             return sceneName != nil
         case #selector(paste(_:)): return canPasteOnSlide
+        case #selector(selectAll(_:)): return sceneName != nil && player == nil
+        case #selector(spreadLastMove): return lastBuildMove.map { $0.scene == sceneName && $0.stop == stopIndex } ?? false
         case #selector(copy(_:)), #selector(cut(_:)): return sceneName != nil && player == nil && !canvas.selectedIDs.isEmpty
         case #selector(formatBold), #selector(formatItalic): return objInfo?.kind == "text"
         case #selector(formatBigger), #selector(formatSmaller), #selector(formatUnderline), #selector(formatStrikethrough),

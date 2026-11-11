@@ -48,7 +48,7 @@ when that build has finished. Use <kbd>⌘</kbd><kbd>[</kbd> and <kbd>⌘</kbd><
 
 Objects you insert are added to the build on screen, so they appear at that step. When a slide has several builds,
 dragging an object moves it in the build on screen only, and the other builds keep its old position. To move it in
-every build instead, press <kbd>⌘</kbd><kbd>A</kbd> right after the move. Restyling an object (its text, colour or
+every build instead, press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd> right after the move. Restyling an object (its text, colour or
 size) changes it wherever it appears.
 
 ## Objects

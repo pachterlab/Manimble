@@ -5,6 +5,7 @@
 - **Click** an object to select it. Its handles appear, and the inspector shows its properties.
 - **Shift-click** more objects to add them to the selection, or **drag a rectangle** on an empty part of the slide to
   select everything inside it. Selected objects move, nudge and delete together.
+- Press <kbd>⌘</kbd><kbd>A</kbd> (**Edit ▸ Select All**) to select every object in the build on screen.
 - Click an empty part of the slide, or press <kbd>Esc</kbd>, to deselect.
 - Press <kbd>↩</kbd> to edit the selected object: retype its text, or open its formula.
 
@@ -27,7 +28,8 @@ On a slide with several builds, a drag moves the object in the build on screen o
 its position, so you can lay out each step of a slide separately. Manimble writes this as a marked `shift` at the
 start of the build and the opposite shift at its end.
 
-To move the object in every build instead, press <kbd>⌘</kbd><kbd>A</kbd> right after the move.
+To move the object in every build instead, choose **Arrange ▸ Apply Move to All Builds**
+(<kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd>) right after the move.
 
 ## Resize and rotate
 

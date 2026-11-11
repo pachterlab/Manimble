@@ -219,6 +219,26 @@ final class CanvasView: MTKView {
         keepOthers = true; selection = first; keepOthers = false
         onSelect?(first)
     }
+    /// The objects of this build a box fully encloses (all of them without one), as in PowerPoint; a parent's own
+    /// parts (a table's labels, which have no sprite of their own) come along with the parent rather than being
+    /// selected twice.
+    func objects(within m: Box? = nil) -> [Int] {
+        guard let stop = stop else { return [] }
+        var z: [Int: Int] = [:]
+        for sp in stop.sprites { z[sp.oid] = sp.z }
+        var inside: [(oid: Int, box: Box)] = []
+        for v in stop.visible {
+            let oid = Int(v[0])
+            guard let b = rawBox(oid) else { continue }
+            if let m = m, !(b.x0 >= m.x0 && b.x1 <= m.x1 && b.y0 >= m.y0 && b.y1 <= m.y1) { continue }
+            inside.append((oid, b))
+        }
+        return inside.filter { i in
+            z[i.oid] != nil || !inside.contains { $0.oid != i.oid && $0.box.x0 <= i.box.x0 && $0.box.x1 >= i.box.x1 && $0.box.y0 <= i.box.y0 && $0.box.y1 >= i.box.y1 }
+        }.map { $0.oid }
+    }
+    /// Select All: every object in the build on screen.
+    func selectAllObjects() { selectGroup(objects()) }
     /// The object and the others of its group shown in this build (just the object when it is not grouped).
     func groupMates(_ oid: Int) -> [Int] {
         guard let g = sceneObjects[String(oid)]?.group, let stop = stop else { return [oid] }
@@ -1424,20 +1444,8 @@ final class CanvasView: MTKView {
         if marqueeStart != nil {
             marqueeStart = nil
             let band = marquee; marquee = nil
-            guard let m = band, let stop = stop, max(m.w, m.h) >= 3 * pxPerPoint else { return }
-            // everything the box fully encloses, as in PowerPoint; a parent's own parts (a table's labels, which have no
-            // sprite of their own) come along with the parent rather than being selected twice
-            var z: [Int: Int] = [:]
-            for sp in stop.sprites { z[sp.oid] = sp.z }
-            var inside: [(oid: Int, box: Box)] = []
-            for v in stop.visible {
-                let oid = Int(v[0])
-                guard let b = rawBox(oid), b.x0 >= m.x0, b.x1 <= m.x1, b.y0 >= m.y0, b.y1 <= m.y1 else { continue }
-                inside.append((oid, b))
-            }
-            let ids = inside.filter { i in
-                z[i.oid] != nil || !inside.contains { $0.oid != i.oid && $0.box.x0 <= i.box.x0 && $0.box.x1 >= i.box.x1 && $0.box.y0 <= i.box.y0 && $0.box.y1 >= i.box.y1 }
-            }.map { $0.oid }
+            guard let m = band, max(m.w, m.h) >= 3 * pxPerPoint else { return }
+            let ids = objects(within: m)
             if ids.isEmpty && !marqueeAdds { return }
             let kept = marqueeAdds ? selectedIDs : []
             var all = kept
