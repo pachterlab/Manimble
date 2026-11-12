@@ -388,22 +388,63 @@ final class MenuRouter: NSObject, NSMenuItemValidation {
     var target: () -> MainController? = { nil }
     private static let textActions: Set<Selector> = [#selector(NSText.cut(_:)), #selector(NSText.copy(_:)), #selector(NSText.paste(_:)),
                                                      #selector(NSTextView.pasteAsPlainText(_:)), #selector(NSText.selectAll(_:))]
-    /// While typing in a text box, the code editor, a field or a terminal, Cut, Copy, Paste and Select All act on
-    /// what is typed there rather than on the slide.
-    private func textTarget(for s: Selector) -> NSResponder? {
-        guard Self.textActions.contains(s), let r = NSApp.keyWindow?.firstResponder,
-              r is NSText || r is TerminalView, r.responds(to: s) else { return nil }
+    /// Commands that belong to the window they're given in: from Presenter View, a show, the picture editor or a
+    /// sheet they never reach the deck behind it.
+    private static let windowActions = textActions.union([#selector(MainController.undo), #selector(MainController.redo)])
+    /// Find in a terminal searches its scrollback (SwiftTerm's find bar), not the deck.
+    private static let terminalFind: [Selector: NSTextFinder.Action] = [
+        #selector(MainController.showFind(_:)): .showFindInterface, #selector(MainController.showFindReplace(_:)): .showFindInterface,
+        #selector(MainController.findNext(_:)): .nextMatch, #selector(MainController.findPrevious(_:)): .previousMatch]
+
+    private var typedIn: NSResponder? {
+        guard let r = NSApp.keyWindow?.firstResponder, r is NSText || r is TerminalView else { return nil }
         return r
     }
+    /// The key window when it isn't a deck window.
+    private var otherWindow: NSWindow? {
+        guard let w = NSApp.keyWindow, !(w.delegate is MainController) else { return nil }
+        return w
+    }
+    /// While typing in a text box, the code editor, a field or a terminal, Cut, Copy, Paste and Select All act on
+    /// what is typed there rather than on the slide; in another window they act on whatever there takes them.
+    private func localTarget(for s: Selector) -> NSResponder? {
+        guard Self.textActions.contains(s) else { return nil }
+        if let r = typedIn { return r.responds(to: s) ? r : nil }
+        guard otherWindow != nil, let r = NSApp.target(forAction: s, to: nil, from: nil) as? NSResponder,
+              !(r is NSApplication) else { return nil }
+        return r
+    }
+    /// A command with nothing to act on where it was given: Cut in a terminal, Copy or Undo in a show.
+    private func blocked(_ s: Selector) -> Bool {
+        guard Self.windowActions.contains(s), localTarget(for: s) == nil else { return false }
+        if Self.textActions.contains(s) { return typedIn != nil || otherWindow != nil }
+        return otherWindow != nil && typedIn == nil          // undo in another window's text is MainController's to route
+    }
+    private var terminal: TerminalView? { NSApp.keyWindow?.firstResponder as? TerminalView }
+
     override func responds(to s: Selector!) -> Bool { super.responds(to: s) || MainController.instancesRespond(to: s) }
     override func forwardingTarget(for s: Selector!) -> Any? {
-        if let r = textTarget(for: s) { return r }
+        if let r = localTarget(for: s) { return r }
         return MainController.instancesRespond(to: s) ? target() : super.forwardingTarget(for: s)
     }
+    @objc func showFind(_ sender: Any?) { findInTerminal(#selector(showFind(_:))) }
+    @objc func showFindReplace(_ sender: Any?) { findInTerminal(#selector(showFindReplace(_:))) }
+    @objc func findNext(_ sender: Any?) { findInTerminal(#selector(findNext(_:))) }
+    @objc func findPrevious(_ sender: Any?) { findInTerminal(#selector(findPrevious(_:))) }
+    private func findInTerminal(_ s: Selector) {
+        if let t = terminal, let a = Self.terminalFind[s] { t.performTextFinderAction(Self.finderItem(a)) }
+        else { target()?.perform(s, with: nil) }
+    }
+    private static func finderItem(_ a: NSTextFinder.Action) -> NSMenuItem {
+        let i = NSMenuItem(title: "", action: #selector(NSResponder.performTextFinderAction(_:)), keyEquivalent: ""); i.tag = a.rawValue; return i
+    }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if let a = item.action, let r = textTarget(for: a) {
+        guard let a = item.action else { return false }
+        if let r = localTarget(for: a) {
             return (r as? NSUserInterfaceValidations)?.validateUserInterfaceItem(item) ?? true
         }
+        if blocked(a) { return false }
+        if let t = terminal, let f = Self.terminalFind[a] { return t.validateUserInterfaceItem(Self.finderItem(f)) }
         return MainActor.assumeIsolated { target()?.validateMenuItem(item) ?? false }
     }
 }

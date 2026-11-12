@@ -1,4 +1,5 @@
 import AppKit
+import SwiftTerm
 import UniformTypeIdentifiers
 
 @MainActor
@@ -1099,6 +1100,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_BCLIBRARY"] != nil, !testRan { testRan = true; bcLibraryTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_INLINE"] != nil, !testRan { testRan = true; inlineTextTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_EDITING"] != nil, !testRan { testRan = true; editingTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_UNDO"] != nil, !testRan { testRan = true; undoTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_CLIPBOARD"] != nil, !testRan { testRan = true; clipboardTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FEEDBACK"] != nil, !testRan { testRan = true; feedbackTest() }
@@ -2681,17 +2684,38 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         return w.firstResponder as? NSText
     }
 
+    /// A terminal being typed in: ⌘Z there is the shell's undo (Ctrl-_, which zsh, bash and Claude Code all take),
+    /// never the deck's.
+    private var focusedTerminal: TerminalView? { NSApp.keyWindow?.firstResponder as? TerminalView }
+
+    /// Text typed in this window other than the code pane: the inspector's fields and the slide's text editor.
+    private var focusedText: NSText? {
+        guard let t = window.firstResponder as? NSText, t !== sourceView else { return nil }
+        return t
+    }
+
+    /// The code pane takes ⌘Z while its typing can be undone; once that runs out (or after the code went to the
+    /// deck), ⌘Z undoes the deck, as it does for the slide.
+    private var sourceUndoes: Bool {
+        guard window.firstResponder === sourceView || sourceDraft != nil, let u = sourceView.undoManager else { return false }
+        return u.canUndo || u.canRedo || sourceDraft != nil
+    }
+
     func doUndo(redo: Bool) {
-        if let t = otherWindowText {
+        if let term = focusedTerminal {
+            if redo { NSSound.beep() } else { term.send(txt: "\u{1f}") }
+            return
+        }
+        if let t = otherWindowText ?? focusedText {
             if redo { t.undoManager?.redo() } else { t.undoManager?.undo() }
             return
         }
-        if window.firstResponder === sourceView || sourceDraft != nil {
+        if sourceUndoes, let u = sourceView.undoManager, redo ? u.canRedo : u.canUndo {
             window.makeFirstResponder(sourceView)
-            if redo { sourceView.undoManager?.redo() } else { sourceView.undoManager?.undo() }
+            if redo { u.redo() } else { u.undo() }
             return
         }
-        if window.firstResponder is NSTextView && window.firstResponder !== sourceView && window.firstResponder !== canvas { return }
+        if sourceDraft != nil { NSSound.beep(); return }      // unsaved code is not undone from under the pane
         submit { [weak self] in
             guard let self = self else { return }
             self.busy += 1
@@ -3180,8 +3204,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         case #selector(autoPresentFromCurrent):
             return sceneName != nil && player == nil && presenter == nil && animatedPlayer == nil
         case #selector(deleteSlide): return sceneName != nil && ((state?.scenes.count ?? 0) > 1 || selectedSlideIsUnused) && player == nil
-        case #selector(undo): if let t = otherWindowText { return t.undoManager?.canUndo ?? false }; return state?.canUndo ?? true
-        case #selector(redo): if let t = otherWindowText { return t.undoManager?.canRedo ?? false }; return state?.canRedo ?? true
+        case #selector(undo):
+            if focusedTerminal != nil { return true }
+            if let t = otherWindowText ?? focusedText { return t.undoManager?.canUndo ?? false }
+            if sourceView.undoManager?.canUndo == true && sourceUndoes { return true }
+            return sourceDraft == nil && (state?.canUndo ?? true)
+        case #selector(redo):
+            if focusedTerminal != nil { return false }
+            if let t = otherWindowText ?? focusedText { return t.undoManager?.canRedo ?? false }
+            if sourceView.undoManager?.canRedo == true && sourceUndoes { return true }
+            return sourceDraft == nil && (state?.canRedo ?? true)
         default: return true
         }
     }

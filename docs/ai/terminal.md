@@ -39,6 +39,20 @@ The buttons in the drawer's header act on the active terminal:
 When you choose an agent that isn't installed, Manimble shows how to install it and offers to type the install
 command into the terminal.
 
+## Edit commands in the terminal
+
+While you're typing in the terminal, the Edit menu acts on the terminal, never on the slide:
+
+| Command | In the terminal |
+|---|---|
+| **Copy** (<kbd>⌘</kbd><kbd>C</kbd>) | Copies the text you selected with the mouse. |
+| **Paste** (<kbd>⌘</kbd><kbd>V</kbd>) | Types the clipboard into the shell. |
+| **Select All** (<kbd>⌘</kbd><kbd>A</kbd>) | Selects everything in the terminal, including the scrollback. |
+| **Undo** (<kbd>⌘</kbd><kbd>Z</kbd>) | The shell's own undo, the same as <kbd>⌃</kbd><kbd>_</kbd>. |
+| **Find…** (<kbd>⌘</kbd><kbd>F</kbd>) | Opens a find bar that searches the terminal's text. |
+
+Cut and Redo are greyed out: a terminal has no Cut, and shells have no standard key for redo.
+
 ## Where the terminal starts
 
 By default every terminal starts in the deck's **working copy**: the folder Manimble renders the slides from. Files

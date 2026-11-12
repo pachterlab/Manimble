@@ -105,3 +105,7 @@ Manimble shows slides in two forms:
 Every change you make in Manimble can be undone with <kbd>⌘</kbd><kbd>Z</kbd> and redone with
 <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd>, while the deck is open. Undo history is kept in memory and is cleared when you
 close the deck.
+
+<kbd>⌘</kbd><kbd>Z</kbd> acts on whatever you're typing in. In the Python pane it takes back your typing first, then
+undoes changes to the deck. In a terminal it is the shell's own undo (the same as <kbd>⌃</kbd><kbd>_</kbd>, which zsh,
+bash and Claude Code understand), and it never undoes the deck.

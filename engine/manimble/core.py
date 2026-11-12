@@ -550,13 +550,15 @@ class Manimble:
                 failures.append({"scene": s["name"], "error": rec["error"]})
         with self.lock:
             results = [self.results[s["name"]] for s in self.scenes if s["name"] in self.results]
-        media_root = Path(self.deck).parent / "media" / "manimble"
-        media_roots = (media_root.absolute(), media_root.resolve())
+        # Manimble's own output, which older render records may still list: rendered media, the workers' media
+        # dirs and their shared Text/Tex SVG pool (kept with the render cache), and compiled deck modules.
+        roots = [Path(self.deck).parent / "media" / "manimble", Path(self.render_worker.media_dir).parent]
+        media_roots = {r for root in roots for r in (root.absolute(), root.resolve())}
 
         def generated_media(path: str) -> bool:
             file = Path(path)
-            return any(file.absolute().is_relative_to(root) or file.resolve().is_relative_to(root)
-                       for root in media_roots)
+            return file.suffix == ".pyc" or any(file.absolute().is_relative_to(root) or file.resolve().is_relative_to(root)
+                                                for root in media_roots)
 
         paths = sorted({
             path

@@ -7,6 +7,14 @@ final class SourceCodeView: NSTextView {
     var onFocus: (() -> Void)?
     var onBlur: (() -> Void)?
     var onChange: (() -> Void)?
+    /// Its own undo stack, apart from the window's (shared by the inspector's fields and the slide's text editor),
+    /// emptied when the code is replaced from the deck so ⌘Z never replays typing against a different text.
+    private let ownUndo = UndoManager()
+    override var undoManager: UndoManager? { ownUndo }
+    override var string: String {
+        get { super.string }
+        set { super.string = newValue; ownUndo.removeAllActions() }
+    }
 
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()

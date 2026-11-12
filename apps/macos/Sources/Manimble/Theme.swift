@@ -276,10 +276,23 @@ extension NSAlert {
 
     /// Add a "Copy" button that puts the alert's title and text on the clipboard without closing the alert. Call it
     /// after the alert's other buttons so their responses (first, second, … button) keep their meaning; an alert with
-    /// no buttons gets an "OK" first, as `runModal` would have added.
+    /// no buttons gets an "OK" first, as `runModal` would have added. A long text (a list of file paths, a traceback)
+    /// moves into a scrolling box, since NSAlert grows to fit it and would push its buttons below the screen.
     func addCopyButton() {
         if buttons.isEmpty { addButton(withTitle: "OK") }
-        let copier = AlertCopier(self)
+        let copier = AlertCopier(text: [messageText, informativeText].filter { !$0.isEmpty }.joined(separator: "\n\n"))
+        if accessoryView == nil, informativeText.count > 700 || informativeText.filter({ $0 == "\n" }).count > 14 {
+            let scroll = NSTextView.scrollableTextView()
+            scroll.frame = NSRect(x: 0, y: 0, width: 460, height: 260)
+            scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+            if let tv = scroll.documentView as? NSTextView {
+                tv.string = informativeText; tv.isEditable = false; tv.isSelectable = true
+                tv.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+                tv.textContainerInset = NSSize(width: 4, height: 4)
+            }
+            accessoryView = scroll
+            informativeText = ""
+        }
         objc_setAssociatedObject(self, &Self.copierKey, copier, .OBJC_ASSOCIATION_RETAIN)
         let b = addButton(withTitle: "Copy")
         b.target = copier; b.action = #selector(AlertCopier.copy(_:))   // retargeted, so it no longer ends the alert
@@ -289,11 +302,9 @@ extension NSAlert {
 }
 
 private final class AlertCopier: NSObject {
-    weak var alert: NSAlert?
-    init(_ alert: NSAlert) { self.alert = alert }
+    let text: String
+    init(text: String) { self.text = text }
     @objc func copy(_ sender: NSButton) {
-        guard let a = alert else { return }
-        let text = [a.messageText, a.informativeText].filter { !$0.isEmpty }.joined(separator: "\n\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         sender.title = "Copied"

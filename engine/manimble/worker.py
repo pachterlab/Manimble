@@ -168,8 +168,10 @@ def _track_project_reads(event, args):
         return
     if path == DECK or path.startswith(DECK + os.sep):
         return
+    # Manimble's own caches: rendered media, the shared Text/Tex SVG pool, and compiled deck modules.
     if any(path == media_root or path.startswith(media_root + os.sep)
-           for media_root in {MEDIA_DIR, MEDIA_DIR_REAL}):
+           for media_root in {MEDIA_DIR, MEDIA_DIR_REAL, _POOL, os.path.realpath(_POOL),
+                              sys.pycache_prefix, os.path.realpath(sys.pycache_prefix)}):
         return
     trusted_roots = (sys.prefix, sys.base_prefix, "/System", "/Library", "/usr", "/opt/homebrew", "/Applications")
     if any(path == root or path.startswith(root.rstrip(os.sep) + os.sep) for root in trusted_roots):
