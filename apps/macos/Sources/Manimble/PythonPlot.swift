@@ -402,8 +402,11 @@ extension MainController {
             submit { [weak self] in
                 guard let self = self else { return }
                 self.busy += 1
-                let r = try? await self.engine.call("insert_many", ["scene": name, "stop": self.stopIndex, "items": [[String: Any]](),
-                                                                     "replace_image": ["oid": oid, "file": file]], as: EditResult.self)
+                let ctx = self.submitContext
+                var req: [String: Any] = ["scene": name, "stop": ctx?.scene == name ? ctx!.stop : 0, "items": [[String: Any]](),
+                                          "replace_image": ["oid": oid, "file": file]]
+                if ctx?.scene == name, let seen = ctx?.seen { req["seen"] = seen }
+                let r = try? await self.engine.call("insert_many", req, as: EditResult.self)
                 self.busy -= 1
                 guard let res = r, res.ok == true else { self.toast(r?.error ?? "could not update the plot", error: true); return }
                 self.lastChanged = res.changed

@@ -222,7 +222,7 @@ def apply(m, req: dict) -> dict:
         m.refresh_scenes()
         if m._cancel.is_set():
             if dark:
-                m._restore(dark["files"], 0)
+                m._rollback(dark["files"])
                 m.refresh_scenes()
                 m.enqueue_all()
             return {"ok": False, "error": "cancelled"}
@@ -231,7 +231,7 @@ def apply(m, req: dict) -> dict:
             written = m.project.apply(edits) if edits else {}
         except Exception as exc:                     # noqa: BLE001
             if dark:
-                m._restore(dark["files"], 0)
+                m._rollback(dark["files"])
             return {"ok": False, "error": f"could not apply the theme: {exc}"}
         m._sig_at = 0
         if "manim.cfg" in written:
@@ -240,9 +240,9 @@ def apply(m, req: dict) -> dict:
         if current:
             rec = m.render_now(current, interactive=True)
             if "error" in rec:
-                m._restore(written, 0)
+                m._rollback(written)
                 if dark:
-                    m._restore(dark["files"], 0)
+                    m._rollback(dark["files"])
                 m.refresh_scenes()
                 m.enqueue_all()
                 if rec.get("cancelled"):
@@ -282,7 +282,7 @@ def _apply_slide(m, values: dict, current: str | None) -> dict:
         m.refresh_scenes()
         rec = m.render_now(current, interactive=True)
         if "error" in rec:
-            m._restore(written, 0)
+            m._rollback(written)
             m.refresh_scenes()
             m.render_now(current, interactive=True)
             return {"ok": False, "error": "the slide stops rendering with this theme: " + rec["error"][-300:]}

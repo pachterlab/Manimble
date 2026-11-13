@@ -169,6 +169,10 @@ final class TerminalPanel: NSView {
     }
 
     var hasStarted: Bool { !tabs.isEmpty }
+    /// What runs in the terminals besides their shells (an agent, a build): closing the deck would stop it.
+    var runningCommands: [String] { allSessions.compactMap(\.foregroundCommand) }
+    /// End every shell (the deck closes; its working copy goes).
+    func terminateAll() { allSessions.forEach { $0.terminate() } }
     var count: Int { allSessions.count }
     var tabCount: Int { tabs.count }
     func type(_ text: String) { active?.type(text) }
@@ -358,6 +362,14 @@ final class TerminalSession: NSView, LocalProcessTerminalViewDelegate {
     }
 
     func terminate() { if started { term.terminate() } }
+    /// The program in the foreground of this shell (an agent, a build), nil while the shell waits at its prompt.
+    var foregroundCommand: String? {
+        guard started, let p = term.process, p.running, p.childfd >= 0 else { return nil }
+        let group = tcgetpgrp(p.childfd)
+        guard group > 0, group != p.shellPid else { return nil }
+        var name = [CChar](repeating: 0, count: 256)
+        return proc_name(group, &name, UInt32(name.count)) > 0 ? String(cString: name) : "a command"
+    }
     func type(_ text: String) { term.send(txt: text) }
     func contents() -> String { String(data: term.getTerminal().getBufferAsData(), encoding: .utf8) ?? "" }
     func focus() { window?.makeFirstResponder(term) }

@@ -88,6 +88,7 @@ extension MainController {
     /// Closing the window closes the deck; the app keeps running so another can be made or opened.
     func closeDeck() {
         closeAnimationPreview()
+        terminal.terminateAll()          // its shells ran in the working copy, which goes now
         workspace?.discard(); workspace = nil
         state = nil; sceneName = nil; scene = nil; selection = nil
         sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil; sourceFocused = false

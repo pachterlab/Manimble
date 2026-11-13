@@ -11,7 +11,7 @@ final class Workspace {
     let root: URL            // workspace root, deleted on discard
     let projectName: String
     let deckRelativePath: String
-    private var baseline: [String: Data] = [:]     // original contents when the copy was made
+    private var baseline: [String: Data] = [:]     // original contents when the copy was made, by path in the deck folder
     private(set) var ownFiles: Set<String> = []          // written here for coding agents; never saved to the original
 
     static var base: URL {
@@ -57,33 +57,71 @@ final class Workspace {
             if isDir.boolValue && e == "slides" {
                 // manim-slides output: copy it, so building from edited code never touches the original's builds
                 try? fm.copyItem(at: src, to: work.appendingPathComponent(e))
+            } else if isDir.boolValue && !Workspace.generated.contains(e) && Workspace.holdsPython(src) {
+                // a package of the deck's code: a real copy, saved, reverted and undone like the deck's own files
+                try fm.copyItem(at: src, to: work.appendingPathComponent(e))
             } else if isDir.boolValue {
                 try? fm.createSymbolicLink(at: work.appendingPathComponent(e), withDestinationURL: src)
             } else {
                 try fm.copyItem(at: src, to: work.appendingPathComponent(e))
-                baseline[e] = try? Data(contentsOf: src)
             }
         }
+        for rel in deckFiles() { baseline[rel] = try? Data(contentsOf: original.appendingPathComponent(rel)) }
         // what a coding agent started in the terminal reads first (Claude Code, Codex, Gemini CLI); a deck's own wins
         for e in AgentInstructions.files where !fm.fileExists(atPath: work.appendingPathComponent(e).path) {
             if (try? Data(AgentInstructions.text.utf8).write(to: work.appendingPathComponent(e))) != nil { ownFiles.insert(e) }
         }
     }
 
-    private func regularFiles(_ dir: URL) -> [String] {
-        let fm = FileManager.default
-        return ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { e in
-            if e.hasPrefix(".") || ownFiles.contains(e) { return false }
-            var isDir: ObjCBool = false
-            let u = dir.appendingPathComponent(e)
-            if (try? u.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true { return false }
-            return fm.fileExists(atPath: u.path, isDirectory: &isDir) && !isDir.boolValue
+    /// Folders of the deck that hold what Manimble or Manim Slides make, never saved: output, caches.
+    private static let generated: Set<String> = ["slides", "media", "__pycache__", ".manimble"]
+
+    /// Whether a folder of the deck holds Python code (a package its slides import).
+    private static func holdsPython(_ dir: URL) -> Bool {
+        guard let it = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return false }
+        for case let u as URL in it {
+            if generated.contains(u.lastPathComponent) { it.skipDescendants(); continue }
+            if u.pathExtension == "py" { return true }
         }
+        return false
     }
 
-    /// Files whose working copy differs from the baseline.
+    /// Every file Save writes back, by path in the deck folder: files in it and in its real folders (not the links
+    /// to the original's other folders, nor generated output), but not the agent instructions Manimble wrote.
+    private func deckFiles() -> [String] {
+        let fm = FileManager.default
+        guard let it = fm.enumerator(at: work, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey],
+                                     options: [.skipsHiddenFiles]) else { return [] }
+        let base = work.standardizedFileURL.path + "/"
+        var out: [String] = []
+        for case let u as URL in it {
+            let rel = String(u.standardizedFileURL.path.dropFirst(base.count))
+            let v = try? u.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey])
+            if v?.isSymbolicLink == true { continue }
+            if Workspace.generated.contains(u.lastPathComponent) { it.skipDescendants(); continue }
+            if v?.isRegularFile == true, !ownFiles.contains(rel), !rel.hasSuffix(".manimble.tmp") { out.append(rel) }
+        }
+        return out.sorted()
+    }
+
+    /// Files whose working copy differs from the baseline: changed, new, or deleted.
     var changedFiles: [String] {
-        regularFiles(work).filter { e in (try? Data(contentsOf: work.appendingPathComponent(e))) != baseline[e] }
+        let present = deckFiles()
+        return present.filter(differs) + Set(baseline.keys).subtracting(present).sorted()
+    }
+
+    /// The outcome of the last comparison of each file with its baseline, and the size and time it had then: the
+    /// window asks every two seconds, and a deck folder can hold large pictures and videos.
+    private var compared: [String: (size: Int, modified: Date, same: Bool)] = [:]
+
+    private func differs(_ rel: String) -> Bool {
+        let u = work.appendingPathComponent(rel)
+        guard let a = try? FileManager.default.attributesOfItem(atPath: u.path),
+              let size = (a[.size] as? NSNumber)?.intValue, let modified = a[.modificationDate] as? Date else { return true }
+        if let c = compared[rel], c.size == size, c.modified == modified { return !c.same }
+        let same = baseline[rel].map { $0.count == size && (try? Data(contentsOf: u)) == $0 } ?? false
+        compared[rel] = (size, modified, same)
+        return !same
     }
 
     var isModified: Bool { !changedFiles.isEmpty }
@@ -97,16 +135,32 @@ final class Workspace {
     }
 
     func save() throws {
+        let fm = FileManager.default
         for e in changedFiles {
-            let data = try Data(contentsOf: work.appendingPathComponent(e))
-            try data.write(to: original.appendingPathComponent(e), options: .atomic)
-            baseline[e] = data
+            let src = work.appendingPathComponent(e), dest = original.appendingPathComponent(e)
+            if fm.fileExists(atPath: src.path) {
+                let data = try Data(contentsOf: src)
+                try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try data.write(to: dest, options: .atomic)
+                baseline[e] = data; compared[e] = nil
+            } else {                                     // deleted in the working copy
+                if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+                baseline[e] = nil; compared[e] = nil
+            }
         }
     }
 
+    /// Back to the last saved deck: changed and deleted files as they were, new ones gone.
     func revert() throws {
+        let fm = FileManager.default
         for e in changedFiles {
-            if let d = baseline[e] { try d.write(to: work.appendingPathComponent(e), options: .atomic) }
+            let u = work.appendingPathComponent(e)
+            if let d = baseline[e] {
+                try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try d.write(to: u, options: .atomic)
+            } else {
+                try? fm.removeItem(at: u)
+            }
         }
     }
 

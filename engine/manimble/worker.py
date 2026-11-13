@@ -155,7 +155,7 @@ _pool_seed()
 
 
 def _track_project_reads(event, args):
-    """Record files opened by deck code outside the selected deck directory."""
+    """Record files opened by deck code, but the deck's own modules and what Manim and Manimble read or make."""
     if event != "open" or not args or isinstance(args[0], int):
         return
     mode = args[1] if len(args) > 1 else None
@@ -166,7 +166,8 @@ def _track_project_reads(event, args):
         path = os.path.abspath(os.fsdecode(os.fspath(args[0])))
     except (TypeError, ValueError):
         return
-    if path == DECK or path.startswith(DECK + os.sep):
+    # the deck's own modules are hashed into the slide's key; files in its folders (a package, data) are not
+    if path == DECK or (os.path.dirname(path) == DECK and path.endswith(".py")):
         return
     # Manimble's own caches: rendered media, the shared Text/Tex SVG pool, and compiled deck modules.
     if any(path == media_root or path.startswith(media_root + os.sep)

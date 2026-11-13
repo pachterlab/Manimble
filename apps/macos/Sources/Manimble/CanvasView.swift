@@ -212,6 +212,15 @@ final class CanvasView: MTKView {
     private var keepOthers = false
     /// Every selected object, the primary one (inspector, handles) first.
     var selectedIDs: [Int] { (selection.map { [$0] } ?? []) + others.filter { $0 != selection }.sorted() }
+    /// The slide was rendered again and objects came or went above others, so their ids changed: everything held
+    /// by id follows its object. `to` gives the new id, nil for an object that is gone.
+    func renumber(selection sel: Int?, _ to: (Int) -> Int?) {
+        if var e = inline, e.placeholder == nil, let n = to(e.oid) { e.oid = n; inline = e }
+        others = Set(others.compactMap(to))
+        overrides = Dictionary(overrides.compactMap { k, v in to(k).map { ($0, v) } }, uniquingKeysWith: { a, _ in a })
+        lineOverrides = Dictionary(lineOverrides.compactMap { k, v in to(k).map { ($0, v) } }, uniquingKeysWith: { a, _ in a })
+        keepOthers = true; selection = sel; keepOthers = false
+    }
     /// Select several objects at once: the first is the primary, the rest become `others`.
     func selectGroup(_ ids: [Int]) {
         guard let first = ids.first else { others = []; if selection != nil { selection = nil; onSelect?(nil) }; return }

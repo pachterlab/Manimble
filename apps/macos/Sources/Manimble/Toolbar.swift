@@ -286,9 +286,10 @@ extension MainController: NSToolbarDelegate {
         }
         // 2. patch the source and re-render in the background
         submit { [weak self] in
-            guard let self = self, let name = self.sceneName else { return }
+            guard let self = self, let ctx = self.submitContext, ctx.scene == scene else { return }
             self.busy += 1
-            var r2 = req; r2["scene"] = name; r2["stop"] = self.stopIndex
+            var r2 = req; r2["stop"] = ctx.stop
+            if let seen = ctx.seen { r2["seen"] = seen }          // a line drawn from an object names it by id
             let res = try? await self.engine.call("insert", r2, as: InsertResult.self)
             self.busy -= 1
             await sprite?.value          // a preview arriving after the insert ended would stay on screen for good
@@ -299,11 +300,11 @@ extension MainController: NSToolbarDelegate {
                 self.toast(res?.error ?? "insert failed", error: true); return
             }
             self.lastChanged = ChangedLines(file: r.file, ranges: [[r.line ?? 1, r.line ?? 1]])
-            await self.loadScene(name, keepStop: true)
+            await self.loadScene(scene, keepStop: true)
             self.canvas.ghost = nil
             if kind == "pen", !self.canvas.pendingStrokes.isEmpty { self.canvas.pendingStrokes.removeFirst() }
             let target = "\(r.file ?? ""):\(r.line ?? 0)"
-            if kind != "pen", let oid = self.scene?.objects?.first(where: { $0.value.loc == target })?.key, let id = Int(oid) {
+            if kind != "pen", self.sceneName == scene, let oid = self.scene?.objects?.first(where: { $0.value.loc == target })?.key, let id = Int(oid) {
                 self.selection = id
                 if kind == "text" && req["value"] == nil { self.beginEdit(id) }      // a new box to type in (not pasted text)
             }

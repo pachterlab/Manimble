@@ -69,13 +69,16 @@ When you open a deck, Manimble copies it into a private **working copy** under
 - your edits on the canvas, in the inspector and in the source pane;
 - edits made in Manimble's terminal, by you or by an AI agent (with the default settings).
 
-Your original files stay as they were until you choose **File ▸ Save to Original** (<kbd>⌘</kbd><kbd>S</kbd>).
-**File ▸ Revert to Original…** discards every change since the last save. When you close a deck with unsaved
-changes, Manimble asks what to do with them. The working copy is deleted when the deck is closed.
+Your original files stay as they were until you choose **File ▸ Save to Original** (<kbd>⌘</kbd><kbd>S</kbd>). Saving
+writes back every changed file of the deck folder, including new files and folders, and removes files deleted in the
+working copy. **File ▸ Revert to Original…** discards every change since the last save, removes new files, and clears
+the undo history. When you close a deck with unsaved changes, Manimble asks what to do with them. The working copy is
+deleted when the deck is closed.
 
 !!! note
-    Subfolders of the deck and the project's `assets` folder are not copied; the working copy links to the originals.
-    A file written into one of them changes the original at once.
+    Subfolders of the deck that hold Python code are copied into the working copy like the deck's own files. Other
+    subfolders (data, media) and the project's `assets` folder are not copied; the working copy links to the
+    originals, so a file written into one of them changes the original at once.
 
 ## Rendering and the canvas
 

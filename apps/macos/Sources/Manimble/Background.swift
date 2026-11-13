@@ -246,7 +246,7 @@ extension MainController {
 
     func runBackground(_ req: [String: Any]) {
         submit { [weak self] in
-            guard let self = self, let name = self.sceneName else { return }
+            guard let self = self, let name = self.submitContext?.scene else { return }
             self.busy += 1
             var r = req; r["scene"] = name
             var result: EditResult?

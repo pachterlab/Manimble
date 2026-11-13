@@ -46,7 +46,11 @@ extension MainController {
             window.contentView?.addSubview(term)
             term.startProcess(executable: "/bin/zsh", args: ["-f"], environment: ["TERM=xterm-256color", "PS1=$ "], execName: "zsh")
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            window.makeFirstResponder(term)
+            for _ in 0..<30 where !(NSApp.keyWindow === window && window.firstResponder === term) {
+                NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(term)
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            log("terminal has focus: \(NSApp.keyWindow === window && window.firstResponder === term)")
             term.send(txt: "echo ab")
             try? await Task.sleep(nanoseconds: 500_000_000)
             log("terminal undo enabled: \(menuUndo())")

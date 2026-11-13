@@ -102,11 +102,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard controllers.contains(where: { $0.editsInFlight }) else { return confirmQuit() ? .terminateNow : .terminateCancel }
+        // edits still on their way to the files: let them land, then ask about saving
+        Task { @MainActor in
+            for c in controllers { await c.finishEdits() }
+            NSApp.reply(toApplicationShouldTerminate: confirmQuit())
+        }
+        return .terminateLater
+    }
+    @MainActor private func confirmQuit() -> Bool {
         for c in controllers {
             if c.workspace != nil || c.sourceDraft != nil { c.window.makeKeyAndOrderFront(nil) }
-            if !c.confirmClose(for: "quitting") { return .terminateCancel }
+            if !c.confirmClose(for: "quitting") { return false }
         }
-        return .terminateNow
+        return true
     }
     func applicationWillTerminate(_ n: Notification) { controllers.forEach { $0.finish() } }
 

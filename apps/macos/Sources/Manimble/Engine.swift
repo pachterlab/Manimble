@@ -15,6 +15,16 @@ final class Engine {
     private let lock = NSLock()
     private var buffer = Data()
     var onEvent: (([String: Any]) -> Void)?
+    /// The engine process ended without `stop` (it crashed, or could not start): its exit status, on the main queue.
+    var onExit: ((Int32) -> Void)?
+    private var stopping = false
+    static let logURL = URL(fileURLWithPath: NSString(string: "~/Library/Logs/manimble.log").expandingTildeInPath)
+    /// The end of what the engine wrote to its log, to show when it stopped.
+    static func logTail(_ lines: Int = 12) -> String {
+        let text = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+        return text.split(separator: "\n", omittingEmptySubsequences: false).suffix(lines).joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Prefer an explicit or saved choice, then the environment the setup window (or
     /// install_manimble.sh) installed, then a checkout-local environment and login PATH.
@@ -95,9 +105,10 @@ final class Engine {
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe
         p.standardOutput = outPipe
-        let logURL = URL(fileURLWithPath: NSString(string: "~/Library/Logs/manimble.log").expandingTildeInPath)
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        p.standardError = try? FileHandle(forWritingTo: logURL)
+        FileManager.default.createFile(atPath: Engine.logURL.path, contents: nil)
+        p.standardError = try? FileHandle(forWritingTo: Engine.logURL)
+        p.terminationHandler = { [weak self] proc in self?.ended(proc) }
+        stopping = false
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
             if d.isEmpty { h.readabilityHandler = nil; return }
@@ -109,10 +120,23 @@ final class Engine {
     }
 
     var isRunning: Bool { proc?.isRunning ?? false }
+    var pid: Int32? { proc?.processIdentifier }
 
     func stop() {
+        stopping = true
         stdin?.closeFile()
         proc?.terminate()
+    }
+
+    /// The process is gone: every call still waiting for its answer fails now rather than never returning.
+    private func ended(_ p: Process) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, p === self.proc else { return }       // an engine replaced since (Choose Python…)
+            self.lock.lock(); let waiting = self.pending; self.pending = [:]; self.lock.unlock()
+            for c in waiting.values { c.resume(throwing: EngineError.message("The Manimble engine stopped")) }
+            self.stdin = nil
+            if !self.stopping { self.onExit?(p.terminationStatus) }
+        }
     }
 
     private func feed(_ d: Data) {
@@ -153,7 +177,11 @@ final class Engine {
                 return
             }
             var line = data; line.append(10)
-            stdin.write(line)
+            do { try stdin.write(contentsOf: line) }          // a closed pipe (the engine gone) throws, not traps
+            catch {
+                lock.lock(); let c = pending.removeValue(forKey: id); lock.unlock()
+                c?.resume(throwing: EngineError.message("The Manimble engine stopped"))
+            }
         }
     }
 

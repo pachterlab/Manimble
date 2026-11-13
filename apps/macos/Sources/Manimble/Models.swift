@@ -182,6 +182,10 @@ struct SpriteResult: Decodable {
 }
 
 struct UndoMark: Decodable { var mark: Int }
+struct OkResult: Decodable { var ok: Bool? }
+
+/// Where objects of one render are in another (`resolve_oids`): new id by old, nil for one that is gone.
+struct OidMap: Decodable { var dir: String?; var map: [String: String?] }
 
 struct UndoResult: Decodable {
     var ok: Bool?

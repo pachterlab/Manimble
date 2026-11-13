@@ -7,6 +7,7 @@ import concurrent.futures
 import copy
 import difflib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -147,6 +148,42 @@ def _color_runs(runs) -> list:
     return out
 
 
+class UndoConflict(Exception):
+    """Undo or redo would overwrite lines changed since (by an agent, another editor): the files it names."""
+
+
+def _merge3(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+    """`ours` (the file as it is now) with the changes that take `base` to `theirs` (what undo or redo wants)
+    applied line by line; None when a change meets lines that changed since `base`."""
+    b, o, t = (x.decode("utf-8").splitlines(keepends=True) for x in (base, ours, theirs))
+    mine = [op for op in difflib.SequenceMatcher(None, b, o, autojunk=False).get_opcodes() if op[0] != "equal"]
+    equal = [op for op in difflib.SequenceMatcher(None, b, o, autojunk=False).get_opcodes() if op[0] == "equal"]
+
+    def where(i: int) -> int | None:
+        """Where line `i` of `base` (or the end, i == len) is in `ours`, when it is unchanged there."""
+        for _, i1, i2, j1, _ in equal:
+            if i1 <= i < i2:
+                return j1 + i - i1
+        return len(o) if i == len(b) and not any(i1 == len(b) for _, i1, _, _, _ in mine) else None
+
+    out, at = [], 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, b, t, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        # lines this change replaces, and the line it goes in front of, must be as they were
+        if any(m1 < max(i2, i1 + 1) and i1 < max(m2, m1 + 1) for _, m1, m2, _, _ in mine):
+            return None
+        start = where(i1)
+        if start is None or start < at:
+            return None
+        if any(where(i) != start + i - i1 for i in range(i1, i2)):
+            return None
+        out += o[at:start] + t[j1:j2]
+        at = start + (i2 - i1)
+    out += o[at:]
+    return "".join(out).encode("utf-8")
+
+
 def _insert_where(stops: list, i: int) -> dict:
     """What plan_insert needs to put an element in build `i`'s clip: where the build's last play()/wait() is, and the
     next_slide() that ended the build before it."""
@@ -187,6 +224,8 @@ class Manimble:
         self.redo: list[dict] = []
         self._undo_seq = 0          # numbers each undo step, so `undo_merge` can tell which came after a mark
         self.last_changed: dict = {}
+        self._render_seq = itertools.count(int(time.time()) % 100000 * 1000)
+        self._idents: dict[str, dict] = {}      # scene -> {record dir: each object's identity} (see `_remember`)
         self.cv = threading.Condition()
         self.refresh_scenes()
         # keys of the untouched deck: slides already built from it count as up to date
@@ -356,6 +395,38 @@ class Manimble:
                     h.update(f"{p.relative_to(assets)}:{st.st_size}:{int(st.st_mtime)}".encode())
         return h.hexdigest()
 
+    # ------------------------------------------------ files a render read
+    # The key covers the deck's own modules, manim.cfg and assets/. A slide can also read other files: a module in
+    # a folder of the deck, a data file beside it. Each render keeps the size and time of every file it read, and
+    # it is up to date only while those are unchanged.
+    def _read_files(self, deps) -> list:
+        own = {os.path.join(self.deck, rel) for rel in self.project.py_files()}
+        return sorted(p for p in set(deps) if p not in own)
+
+    @staticmethod
+    def _stats(paths) -> list:
+        out = []
+        for p in paths:
+            try:
+                st = os.stat(p)
+                out.append([p, st.st_size, st.st_mtime_ns])
+            except OSError:
+                out.append([p, -1, 0])
+        return out
+
+    def _reads_fresh(self, rec: dict) -> bool:
+        """Whether every file the render read is as it was then (records from before this was kept: yes)."""
+        seen = rec.get("read_stats")
+        return seen is None or self._stats([p for p, _, _ in seen]) == seen
+
+    def _reads_digest(self, name: str) -> str:
+        """The files the slide's last render read, as they are now: part of an animation build's stamp."""
+        with self.lock:
+            seen = (self.results.get(name) or {}).get("read_stats") or []
+        if not seen:
+            return ""
+        return "+" + hashlib.sha1(json.dumps(self._stats([p for p, _, _ in seen])).encode()).hexdigest()[:12]
+
     # ------------------------------------------------------- disk cache
     def _load_disk(self, name: str):
         f = self.cache_dir / name / "data.json"
@@ -367,6 +438,7 @@ class Manimble:
                 # the next deck open instead of preserving a dead-end error.
                 if "error" not in res:
                     self.results[name] = res
+                    self._remember(name, res)
             except Exception:
                 pass
 
@@ -381,9 +453,10 @@ class Manimble:
             key = self.scene_key(self.scene(name))
         except KeyError:                    # renamed or deleted since the caller listed it
             return "missing"
-        if "error" in r and r.get("key") == key:
+        fresh = self._reads_fresh(r)
+        if "error" in r and r.get("key") == key and fresh:
             return "error"
-        if r.get("key") != key:
+        if r.get("key") != key or not fresh:
             return "queued" if name in self.queue else "stale"
         return "ready"
 
@@ -429,11 +502,14 @@ class Manimble:
             s = self.scene(name)
             key = self.scene_key(s)
             cur = self.results.get(name)
-            if cur and cur.get("key") == key and "error" not in cur and not cur.get("stale_meta") and not force:
+            if cur and cur.get("key") == key and "error" not in cur and not cur.get("stale_meta") and not force \
+                    and self._reads_fresh(cur):
                 return cur
             self.rendering.add(name)
             try:
-                sub = key[:12]
+                # each render its own folder: one forced again on the same code (stale positions, an agent's write
+                # inside the fingerprint's 0.4 s) can make other objects, and the app tells renders apart by folder
+                sub = f"{key[:12]}-{next(self._render_seq):x}"
                 out = self.cache_dir / name / sub
                 out.mkdir(parents=True, exist_ok=True)
                 anchors = self._anchors()
@@ -459,11 +535,12 @@ class Manimble:
                 dependencies = sorted(set(res.get("dependencies", [])))
                 if res.get("error") == CANCELLED:
                     return {"key": key, "error": CANCELLED, "dir": sub, "cancelled": True}
+                read_stats = self._stats(self._read_files(dependencies))
                 if "error" in res:
-                    rec = {"key": key, "error": res["error"], "dir": sub,
+                    rec = {"key": key, "error": res["error"], "dir": sub, "read_stats": read_stats,
                            "dependencies": dependencies, "dependencies_scanned": True}
                 else:
-                    rec = {"key": key, "dir": sub, "data": res}
+                    rec = {"key": key, "dir": sub, "data": res, "read_stats": read_stats}
                     rec["dependencies"] = dependencies
                     rec["dependencies_scanned"] = True
                     for old in (self.cache_dir / name).iterdir():
@@ -471,6 +548,8 @@ class Manimble:
                             shutil.rmtree(old, ignore_errors=True)
                 with self.lock:
                     self.results[name] = rec
+                if "data" in rec:
+                    self._remember(name, rec)
                 (self.cache_dir / name).mkdir(exist_ok=True)
                 (self.cache_dir / name / "data.json").write_text(json.dumps(rec))
                 if "data" in rec and b" sub=1" in self.project.read(s["file"]):
@@ -642,7 +721,122 @@ class Manimble:
                 rec["stale_meta"] = True
                 rec = self.render_now(name, interactive=True)
                 rec.pop("stale_meta", None)
+        if "data" in rec:
+            self._touch(name, rec)
         return rec
+
+    # ------------------------------------------------- object identity
+    # An object's id is its place in the order the slide's code makes objects, so an object added or removed above
+    # it (an agent's edit, a delete, a paste) gives it another id. The app sends `seen`, the record dir its ids come
+    # from; ids from an older record are mapped to the objects they named before the edit goes ahead.
+    IDENT_KEEP = 8
+
+    def _remember(self, name: str, rec: dict):
+        """Keep what identifies each object of a record: its kind, its text and the line of code that makes it."""
+        data, d = rec.get("data"), rec.get("dir")
+        if not data or not d:
+            return
+        lines: dict = {}
+
+        def line_of(o):
+            fr = (o.get("frames") or [None])[-1]
+            if not fr:
+                return None
+            f = fr["file"]
+            if f not in lines:
+                try:
+                    raw = self.project.read(f)
+                    ok = hashlib.sha1(raw).hexdigest() == (data.get("files") or {}).get(f)
+                    lines[f] = raw.decode("utf-8", "replace").split("\n") if ok else None
+                except OSError:
+                    lines[f] = None
+            ls, n = lines[f], fr["pos"][0]
+            return ls[n - 1].strip() if ls and 0 < n <= len(ls) else None
+
+        ident = {k: (o.get("kind"), o.get("value"), line_of(o)) for k, o in data["objects"].items()}
+        with self.lock:
+            table = self._idents.setdefault(name, {})
+            table.pop(d, None)
+            table[d] = ident
+            while len(table) > self.IDENT_KEEP:
+                table.pop(next(iter(table)))
+
+    def _touch(self, name: str, rec: dict):
+        """A record shown or edited again (one rendered earlier, its code back as it was) stays among those kept."""
+        d = rec.get("dir")
+        with self.lock:
+            table = self._idents.get(name, {})
+            if d in table:
+                table[d] = table.pop(d)
+                return
+        self._remember(name, rec)
+
+    def _map_oid(self, name: str, seen: str, oid, cur: str):
+        """The id in record `cur` of the object that was `oid` in record `seen`; None when it is gone or can't be
+        told apart. Unknown records leave the id as it is."""
+        oid = str(oid)
+        if not seen or seen == cur:
+            return oid
+        with self.lock:
+            table = self._idents.get(name, {})
+            old, new = table.get(seen), table.get(cur)
+        if old is None or new is None:
+            return oid
+        order = lambda t: sorted(t, key=int)                                            # noqa: E731
+        if [old[k][0] for k in order(old)] == [new[k][0] for k in order(new)]:
+            # the same kinds of object in the same order, and at most one of them both retyped and rewritten (an
+            # edit of its text): the ids still name the same objects
+            redone = [k for k in old if old[k][1] != new[k][1] and old[k][2] != new[k][2]]
+            if len(redone) <= 1:
+                return oid
+        mine = old.get(oid)
+        if mine is None:
+            return None
+        for key in (lambda t: t, lambda t: (t[0], t[1]), lambda t: (t[0], t[2])):
+            if key(mine)[-1] is None:
+                continue
+            was = [k for k in order(old) if key(old[k]) == key(mine)]
+            now = [k for k in order(new) if key(new[k]) == key(mine)]
+            if now and len(was) == len(now):
+                return now[was.index(oid)]
+        return None
+
+    def _resolve_ids(self, name: str, rec: dict, req: dict):
+        """`req` with its object ids (`oid`, `oids`, line anchors, `replace_image`) mapped from the record the app
+        saw (`seen`) to `rec`; (None, error) when one of them no longer names an object."""
+        seen, cur = req.get("seen"), rec.get("dir")
+        if not seen or seen == cur:
+            return req, None
+        gone = "The slide changed (edited outside this view) and the object is no longer there. Select it again."
+        req = copy.deepcopy(req)
+
+        def m(v):
+            n = self._map_oid(name, seen, v, cur)
+            if n is None:
+                raise LookupError
+            return int(n) if isinstance(v, int) else n
+        try:
+            if req.get("oid") is not None and int(req["oid"]) >= 0:
+                req["oid"] = m(req["oid"])
+            if req.get("oids"):
+                req["oids"] = [m(v) for v in req["oids"]]
+            for k in ("startAnchor", "endAnchor", "replace_image"):
+                if isinstance(req.get(k), dict) and req[k].get("oid") is not None:
+                    req[k]["oid"] = m(req[k]["oid"])
+        except LookupError:
+            return None, gone
+        return req, None
+
+    def resolve_oids(self, req: dict) -> dict:
+        """{dir, map}: the record `to` of `scene` (its current one by default) and where each of `oids` (ids in record
+        `from`) is in it, null for one that is gone. The app keeps its selection on the same objects when a slide is re-rendered."""
+        name = req["scene"]
+        with self.lock:
+            rec = self.results.get(name) or {}
+        cur = req.get("to") or (rec.get("dir") if "data" in rec else None)
+        if not cur:
+            return {"dir": req.get("from"), "map": {str(o): str(o) for o in req.get("oids", [])}}
+        return {"dir": cur, "map": {str(o): self._map_oid(name, req.get("from"), o, cur) for o in req.get("oids", [])}}
 
     # ------------------------------------------------------ API: reads
     def api_state(self, current: str | None = None) -> dict:
@@ -713,6 +907,7 @@ class Manimble:
             rec = self.fresh_record(name)        # cached before renders kept anchors: re-render if lines moved
             if "error" in rec:
                 return {"name": name, "status": "error", "error": rec["error"], "source": self.api_source(name)}
+        self._touch(name, rec)                   # the ids the app is about to show
         data = self._rebased(rec["data"])
         fw, fh = data["frame"]
         pw, ph = data["size"]
@@ -873,12 +1068,53 @@ class Manimble:
             return {"file": rel, "ranges": changed}
         return {}
 
-    def _restore(self, written: dict, which: int):
+    def _restore(self, written: dict, which: int) -> dict:
+        """Put each file of an edit back to its state before (`which` 0) or after (1). A file changed since (by an
+        agent or another editor) gets only the edit's own lines changed back; when those lines changed too, nothing
+        is written and UndoConflict names the files. Returns {rel: (as written now, as it was)}."""
+        plan, clash = {}, []
         for rel, pair in written.items():
-            self.project.write(rel, pair[which])
+            target, expected = pair[which], pair[1 - which]
+            try:
+                current = self.project.read(rel)
+            except FileNotFoundError:
+                current = None
+            if current == expected or current == target:
+                plan[rel] = (target, current)
+                continue
+            merged = None
+            if None not in (target, expected, current):
+                try:
+                    merged = _merge3(expected, current, target)
+                    if merged is not None and rel.endswith(".py"):
+                        ast.parse(merged)
+                except (UnicodeDecodeError, SyntaxError, ValueError):
+                    merged = None
+            if merged is None:
+                clash.append(rel)
+            else:
+                plan[rel] = (merged, current)
+        if clash:
+            raise UndoConflict(clash)
+        for rel, (data, _) in plan.items():
+            self.project.write(rel, data)
         self._sig_at = 0          # file changed: drop the cached fingerprint
         if "manim.cfg" in written:
             self._restart_workers()
+        return plan
+
+    def _rollback(self, written: dict):
+        """Take back an edit that did not hold. Lines an agent changed again in the meantime keep its version."""
+        try:
+            self._restore(written, 0)
+        except UndoConflict:
+            pass
+
+    @staticmethod
+    def _conflict_error(exc: UndoConflict, what: str, again: str) -> dict:
+        files = ", ".join(exc.args[0])
+        return {"ok": False, "error": f"Can't {what}: {files} changed since on the same lines (an agent or another "
+                                      f"editor), so it was left as it is and this step dropped. {again}"}
 
     def _restart_workers(self):
         """manim reads manim.cfg once, when a worker imports it."""
@@ -892,6 +1128,9 @@ class Manimble:
             rec = self.fresh_record(name)
             if "error" in rec:
                 return {"ok": False, "error": rec["error"]}
+            req, gone = self._resolve_ids(name, rec, req)
+            if gone:
+                return {"ok": False, "error": gone}
             data = rec["data"]
             oid = str(req["oid"])
             obj = data["objects"][oid]
@@ -1153,7 +1392,7 @@ class Manimble:
             def undo_this(written=written, entry=entry):
                 if entry is not None and self.history and self.history[-1] is entry:
                     self.history.pop()
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
 
@@ -1456,7 +1695,7 @@ class Manimble:
             return written, new
         moved = self.render_now(name, interactive=True)
         if "error" in moved:
-            self._restore(extra, 0)
+            self._rollback(extra)
             self.results.pop(name, None)
             return written, self.render_now(name, interactive=True)
         merged = dict(written)
@@ -1489,7 +1728,7 @@ class Manimble:
             return written, new
         moved = self.render_now(name, interactive=True)
         if "error" in moved:
-            self._restore(extra, 0)
+            self._rollback(extra)
             self.results.pop(name, None)
             return written, self.render_now(name, interactive=True)
         merged = dict(written)
@@ -1562,7 +1801,7 @@ class Manimble:
             return written, [], sorted(moved, key=int)
 
         def undo():
-            self._restore(extra, 0)
+            self._rollback(extra)
             self.results.pop(name, None)
             self.render_now(name, interactive=True)
             return written, [], sorted(moved, key=int)
@@ -1999,7 +2238,7 @@ class Manimble:
                 return {"ok": False, "error": f"could not patch source: {exc}"}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"][-300:]}
@@ -2295,7 +2534,7 @@ class Manimble:
             if current:
                 new = self.render_now(current, interactive=True)
                 if "error" in new:
-                    self._restore(written, 0)
+                    self._rollback(written)
                     self.results.pop(current, None)
                     self.render_now(current, interactive=True)
                     return {"ok": False, "error": "The slide no longer renders with slide numbers, so they were undone: "
@@ -2476,7 +2715,7 @@ class Manimble:
                 return {"ok": False, "error": f"could not patch source: {exc}"}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": "The slide no longer renders with these notes (its class needs manim_slides' "
@@ -2685,7 +2924,7 @@ class Manimble:
                 return {"ok": False, "error": f"could not patch source: {exc}"}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": "The slide no longer renders with these notes, so they were undone: "
@@ -2899,6 +3138,9 @@ class Manimble:
             rec = self.fresh_record(name)
             if "error" in rec:
                 return {"ok": False, "error": rec["error"]}
+            req, gone = self._resolve_ids(name, rec, req)
+            if gone:
+                return {"ok": False, "error": gone}
             nstops = len(rec["data"]["stops"])
             code = self._insert_code(kind, req)
             if code is None:
@@ -2928,7 +3170,7 @@ class Manimble:
                 return {"ok": False, "error": str(exc)}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
@@ -2972,7 +3214,7 @@ class Manimble:
         again = self.project.apply([Edit(rel, start, end, f".move_to(({fmt(x)}, {fmt(y)}, 0))")])
         placed = self.render_now(name, interactive=True)
         if "error" in placed:
-            self._restore(again, 0)
+            self._rollback(again)
             self.results.pop(name, None)
             return written, self.render_now(name, interactive=True)
         for f, (before, after) in again.items():
@@ -3010,6 +3252,9 @@ class Manimble:
             rec = self.fresh_record(name)
             if "error" in rec:
                 return {"ok": False, "error": rec["error"]}
+            req, gone = self._resolve_ids(name, rec, req)
+            if gone:
+                return {"ok": False, "error": gone}
             stops = rec["data"]["stops"]
             nstops = len(stops)
             si = min(int(req.get("stop", 0)), nstops - 1)
@@ -3036,7 +3281,7 @@ class Manimble:
                 return {"ok": False, "error": str(exc)}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
@@ -3072,7 +3317,7 @@ class Manimble:
                 return {"ok": False, "error": str(exc)}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
@@ -3116,7 +3361,7 @@ class Manimble:
                 return {"ok": False, "error": f"could not patch source: {exc}"}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
@@ -3239,7 +3484,7 @@ class Manimble:
                 return {"ok": False, "error": str(exc)}
             new = self.render_now(name, interactive=True)
             if "error" in new:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": "The slide no longer renders with this background, so it was undone: "
@@ -3305,7 +3550,7 @@ class Manimble:
                 return {"ok": False, "error": f"could not patch source: {exc}"}
 
             def undo_all(why: str) -> dict:
-                self._restore(written, 0)
+                self._rollback(written)
                 self.refresh_scenes()
                 self.enqueue_all()
                 return {"ok": False, "error": why}
@@ -3371,12 +3616,12 @@ class Manimble:
                     for n in sorted({n for _, n in inserts.values()}):
                         rec = self.render_now(n, interactive=True)
                         if rec.get("cancelled") or self._cancel.is_set():
-                            self._restore(w2, 0)
+                            self._rollback(w2)
                             return undo_all(CANCELLED)
                         if "error" in rec:
                             failed.append(n)
                     if failed:
-                        self._restore(w2, 0)
+                        self._rollback(w2)
                         self._sig_at = 0
                         skipped += len(inserts)
                     else:
@@ -3417,8 +3662,15 @@ class Manimble:
             self._settle()
             if not self.history:
                 return {"ok": False, "error": "nothing to undo"}
-            e = self.history.pop()
-            self._restore(e["files"], 0)
+            e = self.history[-1]
+            try:
+                plan = self._restore(e["files"], 0)
+            except UndoConflict as exc:
+                self.history.pop()
+                return self._conflict_error(exc, f"undo {e['label']}", "Undo again goes on with the step before it.")
+            self.history.pop()
+            # redo takes the files from what undo left to what they were, other changes included
+            e["files"] = {rel: (now, was) for rel, (now, was) in plan.items()}
             self.redo.append(e)
             self.last_changed = {}
             self._requeue_stale()
@@ -3429,12 +3681,27 @@ class Manimble:
             self._settle()
             if not self.redo:
                 return {"ok": False, "error": "nothing to redo"}
-            e = self.redo.pop()
-            self._restore(e["files"], 1)
+            e = self.redo[-1]
+            try:
+                plan = self._restore(e["files"], 1)
+            except UndoConflict as exc:
+                self.redo.clear()
+                return self._conflict_error(exc, f"redo {e['label']}", "Nothing is left to redo.")
+            self.redo.pop()
+            e["files"] = {rel: (was, now) for rel, (now, was) in plan.items()}
             self.history.append(e)
             self.last_changed = self._diff_lines(e["files"])
             self._requeue_stale()
             return {"ok": True, "label": e["label"]}
+
+    def clear_history(self) -> dict:
+        """Forget every undo and redo step: the deck went back to its saved files (Revert), which no step leads from."""
+        with self.edit_lock:
+            self._settle()
+            self.history.clear()
+            self.redo.clear()
+            self.last_changed = {}
+            return {"ok": True}
 
     def undo_mark(self) -> dict:
         """Where the undo history stands now: pass it to `undo_merge` after a series of edits on several objects."""
@@ -3477,6 +3744,9 @@ class Manimble:
         rec = self.fresh_record(name)
         if "error" in rec:
             return {"ok": False, "error": rec["error"]}
+        req, gone = self._resolve_ids(name, rec, req)
+        if gone:
+            return {"ok": False, "error": gone}
         data = rec["data"]
         st = data["stops"][min(int(req.get("stop", 0)), len(data["stops"]) - 1)]
         vis = {str(v[0]): v for v in st["visible"]}
@@ -3681,7 +3951,7 @@ class Manimble:
         except Exception:
             built = {}
         def key_of(s):
-            return self.scene_key(s) + ("" if height == 720 else f"@{height}p")
+            return self.scene_key(s) + self._reads_digest(s["name"]) + ("" if height == 720 else f"@{height}p")
         def is_stale(s):
             if not (slides_dir / f"{s['name']}.json").exists():
                 return True

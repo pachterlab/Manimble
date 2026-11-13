@@ -112,13 +112,16 @@ A few habits keep this smooth:
 - **Let the agent see what you see.** If something looks wrong, describe it, or take a screenshot and give it to the
   agent if it accepts images.
 
-!!! warning "Undo and the agent's changes"
-    **Edit ▸ Undo** (<kbd>⌘</kbd><kbd>Z</kbd>) steps back through changes made in Manimble. It doesn't know about
-    changes the agent made. Undo restores a whole file as it was before your change, so if the agent has edited the
-    same file since then, undoing your change can also remove the agent's later work. After the agent has changed a
-    file, don't use <kbd>⌘</kbd><kbd>Z</kbd> to undo your own earlier changes to it; make the correction by hand or ask
-    the agent. To undo the agent's changes, ask the agent, or use **File ▸ Revert to Original…** to discard
-    everything since your last save.
+!!! note "Undo and the agent's changes"
+    **Edit ▸ Undo** (<kbd>⌘</kbd><kbd>Z</kbd>) steps back through changes made in Manimble, not the agent's. Undoing
+    one of your changes puts back only the lines it changed, so the agent's later edits to the same file stay. If the
+    agent has since changed those same lines, Manimble leaves the file as it is, says so, and drops that step; the next
+    <kbd>⌘</kbd><kbd>Z</kbd> goes on with the one before it. To undo the agent's changes, ask the agent, or use
+    **File ▸ Revert to Original…** to discard everything since your last save.
+
+When the agent adds or removes objects on the slide you're working on, your selection stays on the same objects,
+and an edit you make lands on the object you picked. Closing the deck or quitting while the agent is still running
+asks first, and stops the agent before asking whether to save.
 
 ## Example requests
 

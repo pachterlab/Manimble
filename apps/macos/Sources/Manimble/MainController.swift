@@ -517,6 +517,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func launch(python: String) {
+        enginePython = python
+        engine.onExit = { [weak self] status in self?.engineStopped(status) }
         do { try engine.start(python: python) }
         catch {
             pendingDeck = nil
@@ -539,6 +541,35 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         // nothing given at launch: the window opens empty, like other apps (File ▸ Open Recent has the last decks)
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in if self?.busy == 0 { await self?.reloadState() } }
+        }
+    }
+
+    /// The Python the engine runs in, to start it again after it stopped.
+    private var enginePython: String?
+    private(set) var engineStops = 0
+
+    /// The engine ended on its own: say so with what it last logged, rather than leave every edit waiting. With a
+    /// deck open, Restart brings it back on the same working copy, so unsaved edits stay (their undo steps don't).
+    func engineStopped(_ status: Int32) {
+        pendingDeck = nil
+        verifying = false
+        let a = NSAlert(); a.alertStyle = .critical
+        a.messageText = workspace == nil ? "The Manimble engine could not start" : "The Manimble engine stopped"
+        let tail = Engine.logTail()
+        a.informativeText = "It exited with status \(status)." + (tail.isEmpty ? "" : "\n\n" + tail)
+            + (workspace == nil ? "" : "\n\nYour unsaved edits are still in the working copy. Restarting keeps them, but not their undo steps.")
+        a.addButton(withTitle: workspace == nil ? "OK" : "Restart Engine"); a.addCopyButton()
+        engineStops += 1
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ENGINESTOP"] == nil { a.runModal() }
+        guard let ws = workspace, let py = enginePython else { return }
+        do { try engine.start(python: py) } catch { alert("Could not start the engine", "\(error)"); return }
+        Task { @MainActor in
+            busy += 1
+            _ = try? await engine.raw("open", ["deck": ws.work.path, "cache": Workspace.cacheDir(for: ws.original)])
+            busy -= 1
+            await reloadState()
+            if let n = sceneName { await loadScene(n, keepStop: true) }
+            toast("Engine restarted")
         }
     }
 
@@ -658,6 +689,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             busyPill.show("Waiting for Manimble engine…", symbol: nil, tint: nil, spinning: true, cancellable: false)
             return
         }
+        if !confirmed && editsInFlight {                 // the open deck's last edits land first, then the question
+            Task { @MainActor in await finishEdits(); open(deck: deck) }
+            return
+        }
         guard confirmed || confirmClose(for: "opening another deck") else { return }
         if !window.isVisible { window.makeKeyAndOrderFront(nil) }
         closeAnimationPreview()
@@ -699,6 +734,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     @objc func saveToOriginal() {
+        guard workspace != nil else { return }
+        Task { @MainActor in
+            await finishEdits()
+            saveFinished()
+        }
+    }
+
+    private func saveFinished() {
         guard let ws = workspace else { return }
         if sourceDraft != nil {
             window.makeFirstResponder(canvas)
@@ -723,7 +766,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             window.makeFirstResponder(sourceView)
             return
         }
-        saveToOriginal()
+        saveFinished()
     }
 
     @objc func revertToOriginal() {
@@ -733,11 +776,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         a.informativeText = "The working copy goes back to the last saved version of the deck."
         a.addButton(withTitle: "Revert"); a.addButton(withTitle: "Cancel")
         guard a.runModal() == .alertFirstButtonReturn else { return }
+        revertWorkingCopy()
+    }
+
+    /// The working copy back to the saved deck, with no undo steps left: Revert once confirmed.
+    func revertWorkingCopy() {
         sourceDraft = nil; sourceEditBase = nil; sourceEditSceneName = nil
         window.makeFirstResponder(canvas)
         submit { [weak self] in
             guard let self = self, let ws = self.workspace else { return }
+            _ = try? await self.engine.call("settle", as: OkResult.self)    // queued edits ran first; a move's check too
             try? ws.revert()
+            _ = try? await self.engine.call("clear_history", as: OkResult.self)    // no step leads from the saved deck
             self.lastChanged = nil
             if let n = self.sceneName { await self.loadScene(n, keepStop: true) }
             await self.reloadState()
@@ -748,6 +798,17 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     /// Ask what to do with unsaved edits. Returns false if the user cancelled.
     func confirmClose(for what: String) -> Bool {
+        // an agent still at work: stopped first, so what it wrote before is in the working copy Save asks about
+        let running = terminal.runningCommands
+        if !running.isEmpty {
+            let names = Array(Set(running)).sorted().joined(separator: ", ")
+            let a = NSAlert(); a.alertStyle = .warning
+            a.messageText = "\(names) is still running in the terminal"
+            a.informativeText = "It stops before \(what). What it changed until then stays in the working copy, so you can still save it; anything it would do after that doesn't happen."
+            a.addButton(withTitle: "Stop and Continue"); a.addButton(withTitle: "Cancel")
+            guard a.runModal() == .alertFirstButtonReturn else { return false }
+            terminal.terminateAll()
+        }
         if sourceDraft != nil {
             let draftAlert = NSAlert(); draftAlert.alertStyle = .warning
             draftAlert.messageText = "Python code has not been applied"
@@ -778,7 +839,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     func finish() {
         refreshTimer?.invalidate(); refreshTimer = nil
-        closeAnimationPreview(); engine.stop(); workspace?.discard(); workspace = nil
+        closeAnimationPreview(); terminal.terminateAll(); engine.stop(); workspace?.discard(); workspace = nil
         hideFeedbackPane(); feedbackPane?.removeFromSuperview(); feedbackPane = nil
         feedback = nil; canvas.feedbackLayer?.store = nil
     }
@@ -1047,12 +1108,51 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         await loadScene(name, keepStop: false)
     }
 
+    /// The ids of the last re-render that moved them (see `renumberObjects`): an edit's own oid after it landed.
+    var renumbered: ((Int) -> Int?)?
+
+    /// A new render of the slide on screen whose objects are numbered differently (an object added or removed above
+    /// others, by an agent, a paste or a delete): the selection, the text being typed, pending previews and texts
+    /// follow their objects, so what the user picked is what the next edit changes.
+    func renumberObjects(_ name: String, to sc: SceneData) async {
+        renumbered = nil
+        guard scene?.name == name, let from = shownDir.map({ URL(fileURLWithPath: $0).lastPathComponent }),
+              let png = sc.stops?.first?.png else { return }
+        let to = URL(fileURLWithPath: png).deletingLastPathComponent().lastPathComponent
+        guard from != to else { return }
+        let prefix = name + ":"
+        var ids = Set(canvas.selectedIDs).union(canvas.overrides.keys).union(canvas.lineOverrides.keys)
+        if let e = canvas.editingText { ids.insert(e) }
+        if let m = lastBuildMove, m.scene == name { ids.insert(m.oid) }
+        ids.formUnion(pendingTexts.keys.filter { $0.hasPrefix(prefix) }.compactMap { Int($0.dropFirst(prefix.count)) })
+        guard !ids.isEmpty,
+              let r = try? await engine.call("resolve_oids", ["scene": name, "from": from, "to": to, "oids": ids.sorted()], as: OidMap.self)
+        else { return }
+        let map = r.map
+        let new: (Int) -> Int? = { id in
+            guard let m = map[String(id)] else { return id }
+            return m.flatMap { Int($0) }
+        }
+        guard ids.contains(where: { new($0) != $0 }) else { return }
+        renumbered = new
+        canvas.renumber(selection: selection.flatMap(new), new)
+        let sel = selection.flatMap(new)
+        if sel != selection { selection = sel }
+        pendingTexts = Dictionary(pendingTexts.compactMap { k, v in
+            guard k.hasPrefix(prefix), let id = Int(k.dropFirst(prefix.count)) else { return (k, v) }
+            return new(id).map { (prefix + String($0), v) }
+        }, uniquingKeysWith: { a, _ in a })
+        if let m = lastBuildMove, m.scene == name { lastBuildMove = new(m.oid).map { (m.scene, $0, m.stop) } }
+    }
+
     /// `keepOverrides`: an edit's own render landing; previews of other objects (a drag in progress, moves still
     /// queued) stay, and the caller settles the edited object's.
     func loadScene(_ name: String, keepStop: Bool, keepOverrides: Bool = false) async {
         busy += 1
         defer { busy -= 1 }
         guard let sc = try? await engine.call("scene", ["name": name], as: SceneData.self), name == sceneName else { return }
+        await renumberObjects(name, to: sc)
+        guard name == sceneName else { return }
         if let old = scene, old.name == name, old.stops?.first?.png != sc.stops?.first?.png { canvas.dropTextures() }
         if sc.status == "cancelled" {                    // the busy pill's X: keep the last frame, no error shown
             if scene?.name != name { canvas.stop = nil; scene = sc; selection = nil; rebuildSteps(); rebuildInspector() }
@@ -1102,6 +1202,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_EDITING"] != nil, !testRan { testRan = true; editingTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_UNDO"] != nil, !testRan { testRan = true; undoTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_CLIPBOARD"] != nil, !testRan { testRan = true; clipboardTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_IDS"] != nil, !testRan { testRan = true; identityTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_WORKSPACE"] != nil, !testRan { testRan = true; workspaceTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ENGINESTOP"] != nil, !testRan { testRan = true; engineStopTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FEEDBACK"] != nil, !testRan { testRan = true; feedbackTest() }
@@ -2114,10 +2217,41 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     var objInfo: ObjInfo? { selection.flatMap { scene?.objects?[String($0)] } }
 
-    /// Run edit operations strictly one after another.
+    /// Where an edit was asked for: the slide, the build and the render its object ids come from, as they were
+    /// when the user clicked. Edits wait their turn, and by then another slide or build may be on screen.
+    struct EditContext { let scene: String?; let stop: Int; let seen: String? }
+    /// The context of the queued work running now (see `submit`).
+    private(set) var submitContext: EditContext?
+    var editContext: EditContext {
+        EditContext(scene: sceneName, stop: stopIndex, seen: shownDir.map { URL(fileURLWithPath: $0).lastPathComponent })
+    }
+
+    /// Run edit operations strictly one after another, each with the context it was asked for in.
     func submit(_ work: @escaping @MainActor () async -> Void) {
-        let prev = queueTail
-        queueTail = Task { @MainActor in await prev?.value; await work() }
+        let prev = queueTail, ctx = editContext
+        queuedWork += 1
+        queueTail = Task { @MainActor [weak self] in
+            await prev?.value
+            self?.submitContext = ctx
+            await work()
+            self?.submitContext = nil
+            self?.queuedWork -= 1
+        }
+    }
+    /// Work submitted and not finished yet.
+    private(set) var queuedWork = 0
+    /// Edits on their way to the deck's files: queued, or a move shown before the render that verifies it.
+    var editsInFlight: Bool { queuedWork > 0 || verifying }
+
+    /// Wait until every edit asked for is in the deck's files and verified (a failed one rolled back), so Save,
+    /// Close and Quit act on the deck as the user last saw it.
+    func finishEdits() async {
+        guard workspace != nil else { return }
+        let shown = editsInFlight
+        if shown { busyText = "Finishing edits…"; busy += 1 }
+        while queuedWork > 0 { await queueTail?.value }
+        _ = try? await engine.call("settle", as: OkResult.self)
+        if shown { busy -= 1; busyText = "Rendering…" }
     }
 
     /// The edits `body` submits (one per object of a multi-object selection) become one undo step, `label`.
@@ -2134,11 +2268,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func runEdit(_ req: [String: Any]) async {
-        guard let name = (req["scene"] as? String) ?? sceneName else { return }
+        let ctx = submitContext ?? editContext
+        guard let name = (req["scene"] as? String) ?? ctx.scene else { return }
         let oid = req["oid"] as? Int
         let before = sceneName == name ? canvas.stop : nil
         busy += 1
-        var r = req; r["scene"] = name; r["stop"] = stopIndex
+        var r = req; r["scene"] = name
+        if r["stop"] == nil { r["stop"] = ctx.scene == name ? ctx.stop : 0 }
+        if r["seen"] == nil, ctx.scene == name, let seen = ctx.seen { r["seen"] = seen }
         if ProcessInfo.processInfo.environment["MANIMBLE_SYNC_EDITS"] != nil { r["optimistic"] = false }
         var result: EditResult?
         var failure: String?
@@ -2160,7 +2297,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         // the render lands under whatever the user is doing now: only the edited object's preview is settled
         await loadScene(name, keepStop: true, keepOverrides: true)
-        if let oid = oid, sceneName == name { settlePreview(name, oid, ok: ok, before: before) }
+        if let oid = oid, sceneName == name { settlePreview(name, oid, now: renumbered?(oid) ?? oid, ok: ok, before: before) }
         await reloadState()
         // a restyled or moved slide number: offer it to the other slides once the series of edits is done
         if ok, result?.pageNumber == true, let oid = oid, pendingMoves["\(name):\(oid)"] == nil, !canvas.isDragging(oid) {
@@ -2200,15 +2337,16 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
 
     /// After an edit the fresh render is the truth for that object, so its preview goes away. While more of its
     /// moves are queued or it is being dragged, it keeps previewing only what the slide does not show yet.
-    func settlePreview(_ scene: String, _ oid: Int, ok: Bool, before: StopInfo?) {
-        canvas.lineOverrides[oid] = nil
-        let live = pendingMoves["\(scene):\(oid)"] != nil || canvas.isDragging(oid)
-        guard ok, live, let a = before?.box(of: oid), let b = canvas.stop?.box(of: oid) else {
-            canvas.overrides[oid] = nil
+    /// `oid` as the edit was sent; `now`, the same object's id in the render that just landed.
+    func settlePreview(_ scene: String, _ oid: Int, now: Int, ok: Bool, before: StopInfo?) {
+        canvas.lineOverrides[now] = nil
+        let live = pendingMoves["\(scene):\(oid)"] != nil || canvas.isDragging(now)
+        guard ok, live, let a = before?.box(of: oid), let b = canvas.stop?.box(of: now) else {
+            canvas.overrides[now] = nil
             if !ok { pendingMoves["\(scene):\(oid)"] = nil }
             return
         }
-        canvas.settle(oid, shownDx: b.cx - a.cx, shownDy: b.cy - a.cy)
+        canvas.settle(now, shownDx: b.cx - a.cx, shownDy: b.cy - a.cy)
     }
     func commitEndpoints(_ oid: Int, _ e: [Double], anchors: [String: Any] = [:]) {
         let req = anchors.merging(["op": "endpoints", "oid": oid, "sx": e[0], "sy": e[1], "ex": e[2], "ey": e[3]]) { $1 }
@@ -2260,10 +2398,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// `styles`: the formatting kinds set on part of the text while typing, and the characters that have each.
     /// `slide`: the slide the text was typed on (the one on screen when not given); the edit goes there even when
     /// another slide is shown by the time it is sent.
+    /// `seen`: the render `oid` comes from, when the edit began on an earlier one (typing on the slide while it was
+    /// rendered again); the engine finds the object in the current one.
     func commitText(_ oid: Int, _ value: String, shared: Bool, styles: [String: [CharRun]]? = nil, slide: String? = nil,
-                    previewed: (() -> Void)? = nil) {
+                    seen: String? = nil, previewed: (() -> Void)? = nil) {
         guard let name = slide ?? sceneName else { previewed?(); return }
-        let o = name == sceneName ? scene?.objects?[String(oid)] : nil
+        let current = seen == nil || (name == sceneName && seen == editContext.seen)
+        let o = name == sceneName && current ? scene?.objects?[String(oid)] : nil
         if let o = o {
             let changed = styles?.filter { kind, runs in runs != (o.charStyles[kind] ?? []) }
             guard value != o.value || changed?.isEmpty == false else { previewed?(); return }
@@ -2278,6 +2419,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
             previewed?()
             var req: [String: Any] = ["op": "text", "oid": oid, "value": value, "shared": shared, "scene": name]
+            if let seen = seen { req["seen"] = seen }
             if let st = styles, !st.isEmpty { req["styles"] = st.mapValues { $0.map(\.json) } }
             await self.runEdit(req)
             if self.pendingTexts[key] == value { self.pendingTexts[key] = nil }
@@ -2381,7 +2523,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     /// Type into a Text object right on the slide; the inspector's box follows along.
     func beginInlineText(_ oid: Int, _ o: ObjInfo, at: CGPoint?) -> Bool {
-        let slide = sceneName
+        let slide = sceneName, seen = editContext.seen
         let current = pendingTexts["\(slide ?? ""):\(oid)"] ?? o.value      // an edit of it still rendering, else the slide's
         return canvas.beginTextEdit(oid, text: current, family: o.font, bold: o.weight == "BOLD", italic: o.slant == "ITALIC",
                                     styles: current == o.value ? o.charStyles : nil,
@@ -2391,7 +2533,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                                     done: { [weak self] v, release in
                                         guard let self = self, let v = v else { self?.textField?.setText(current); release(); return }
                                         self.commitText(oid, v, shared: self.sharedChoice, styles: self.canvas.committedStyles,
-                                                        slide: slide, previewed: release)
+                                                        slide: slide, seen: seen, previewed: release)
                                     })
     }
     /// Type into an empty layout box; the text lands left-aligned at the box's left edge, as in PowerPoint.
@@ -3269,7 +3411,19 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let a = NSAlert(); a.messageText = title; a.informativeText = text; a.addCopyButton(); a.runModal()
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool { confirmClose(for: "closing") }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if editsInFlight && !closingAfterEdits {          // the last edits land first, then the question
+            closingAfterEdits = true
+            Task { @MainActor in
+                await finishEdits()
+                window.performClose(nil)
+                closingAfterEdits = false
+            }
+            return false
+        }
+        return confirmClose(for: "closing")
+    }
+    private var closingAfterEdits = false
     func windowDidChangeScreen(_ n: Notification) { fitWindowToScreen() }
 
     /// Shrink pane widths an NSSplitView saved on a wider display so they fit `width`: restored frames that add up

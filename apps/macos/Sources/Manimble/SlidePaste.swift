@@ -169,7 +169,10 @@ extension MainController {
         guard let ws = workspace, let name = sceneName, !oids.isEmpty else { return }
         submit { [weak self] in
             guard let self = self else { return }
-            guard let r = try? await self.engine.call("copy", ["scene": name, "stop": self.stopIndex, "oids": oids], as: CopyResult.self),
+            let ctx = self.submitContext
+            var req: [String: Any] = ["scene": name, "stop": ctx?.stop ?? self.stopIndex, "oids": oids]
+            if let seen = ctx?.seen { req["seen"] = seen }
+            guard let r = try? await self.engine.call("copy", req, as: CopyResult.self),
                   let items = r.items, !items.isEmpty else {
                 self.toast("Could not copy: these elements are not on this build", error: true); return
             }
