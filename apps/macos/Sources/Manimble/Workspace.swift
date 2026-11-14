@@ -1,6 +1,18 @@
 import Foundation
 import CryptoKit
 
+enum WorkspaceError: LocalizedError {
+    case originalMissing(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .originalMissing(let path):
+            return "The deck folder is no longer at \(path): it was moved, renamed or deleted since it was opened. "
+                + "Your edits are still in the working copy. Use File ▸ Save Project Copy… to save them in a new folder."
+        }
+    }
+}
+
 /// A private working copy of a deck. Edits go to the copy; Save writes them back to the original.
 ///
 /// The copy mirrors the deck's surroundings with symlinks (assets, media, data …) so the
@@ -134,8 +146,16 @@ final class Workspace {
         }
     }
 
+    /// The deck folder is no longer where it was opened from (moved, renamed or deleted in the Finder).
+    var originalMissing: Bool {
+        var isDir: ObjCBool = false
+        return !FileManager.default.fileExists(atPath: original.path, isDirectory: &isDir) || !isDir.boolValue
+    }
+
     func save() throws {
         let fm = FileManager.default
+        // writing into a deck folder that went away would make a new one holding only the changed files
+        guard !originalMissing else { throw WorkspaceError.originalMissing(original.path) }
         for e in changedFiles {
             let src = work.appendingPathComponent(e), dest = original.appendingPathComponent(e)
             if fm.fileExists(atPath: src.path) {

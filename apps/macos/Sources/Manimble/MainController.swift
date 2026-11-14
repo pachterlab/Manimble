@@ -602,7 +602,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         do {
             let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             if u.pathExtension.lowercased() == "manimble" && !isDir {
-                openInWindow(deck: try PortableProject.unpackArchive(u).path)
+                guard let target = unpackTarget(for: u) else { return }
+                openInWindow(deck: try PortableProject.unpackArchive(u, to: target).path)
             } else if isDir, let deck = try PortableProject.deckURL(in: u) {
                 openInWindow(deck: deck.path)
             } else if isDir {
@@ -613,6 +614,24 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 alert("Could not open project", "Choose a deck folder or a .manimble package.")
             }
         } catch { alert("Could not open project", "\(error.localizedDescription)") }
+    }
+
+    /// Where a .manimble package is unpacked: a project folder the user picks, beside the package by default.
+    /// MANIMBLE_TEST_UNPACK names it without asking.
+    func unpackTarget(for package: URL) -> URL? {
+        if let t = ProcessInfo.processInfo.environment["MANIMBLE_TEST_UNPACK"] { return URL(fileURLWithPath: t) }
+        let stem = package.deletingPathExtension().lastPathComponent, dir = package.deletingLastPathComponent()
+        var name = stem, n = 2
+        while FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path) { name = "\(stem) \(n)"; n += 1 }
+        let panel = NSSavePanel()
+        panel.title = "Unpack Package"
+        panel.message = "Manimble unpacks \(package.lastPathComponent) into a project folder. You edit and save that folder; the package stays as it is."
+        panel.prompt = "Unpack"
+        panel.nameFieldStringValue = name
+        panel.directoryURL = dir
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     /// Open `deck` here when this window is empty, otherwise in its own window (or the window already showing it).
@@ -628,6 +647,12 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         panel.prompt = "Save Project Here"
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let parent = panel.url else { return }
+        saveProjectCopy(in: parent)
+    }
+
+    /// Save Project Copy… once its folder is chosen: a new project folder in `parent`, named after the project.
+    func saveProjectCopy(in parent: URL) {
+        guard let ws = workspace else { return }
         var name = ws.projectName
         var destination = parent.appendingPathComponent(name)
         var suffix = 2
@@ -652,8 +677,15 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         savePortableProject(workspace: ws, destination: destination, archive: true)
     }
 
-    private func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool) {
+    func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool) {
         Task { @MainActor in
+            if sourceDraft != nil { window.makeFirstResponder(canvas) }     // applies the code being typed
+            await finishEdits()                      // the copy holds the last edits, as Save does
+            if sourceDraft != nil {
+                toast("Fix the Python code before saving a copy", error: true)
+                window.makeFirstResponder(sourceView)
+                return
+            }
             busyText = "Checking slide dependencies…"
             busy += 1
             defer { busy -= 1; busyText = "Rendering…" }
@@ -749,7 +781,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         if !ws.isModified { toast("Nothing to save"); return }
-        if !ws.conflictFiles.isEmpty {
+        if !ws.originalMissing, !ws.conflictFiles.isEmpty {
             let a = NSAlert(); a.alertStyle = .warning
             a.messageText = "The original changed on disk"
             a.informativeText = "\(ws.conflictFiles.joined(separator: ", ")) was modified outside Manimble since this copy was made. Overwrite it with your edits?"
@@ -757,7 +789,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             if a.runModal() != .alertFirstButtonReturn { return }
         }
         do { try ws.save(); toast("Saved to \(ws.original.path)"); updateDocumentState() }
-        catch { alert("Could not save", "\(error)") }
+        catch { alert("Could not save", error.localizedDescription) }
     }
 
     func saveToOriginalAfterSourceEdit() {
@@ -824,14 +856,14 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         a.addButton(withTitle: "Save"); a.addButton(withTitle: "Discard Changes"); a.addButton(withTitle: "Cancel")
         switch a.runModal() {
         case .alertFirstButtonReturn:
-            if !ws.conflictFiles.isEmpty {
+            if !ws.originalMissing, !ws.conflictFiles.isEmpty {
                 let c = NSAlert(); c.alertStyle = .warning
                 c.messageText = "The original changed on disk"
                 c.informativeText = "\(ws.conflictFiles.joined(separator: ", ")) was modified outside Manimble. Overwrite it?"
                 c.addButton(withTitle: "Overwrite"); c.addButton(withTitle: "Cancel"); c.addCopyButton()
                 if c.runModal() != .alertFirstButtonReturn { return false }
             }
-            do { try ws.save(); return true } catch { alert("Could not save", "\(error)"); return false }
+            do { try ws.save(); return true } catch { alert("Could not save", error.localizedDescription); return false }
         case .alertSecondButtonReturn: return true
         default: return false
         }
@@ -1071,6 +1103,21 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             else { table.deselectAll(nil) }
         }
         updateDocumentState()
+        // the slide on screen is gone from outside (an agent replaced or renamed it; the app's own deletes pick the
+        // next slide themselves, and a file that doesn't parse keeps its slides):
+        // show the one now in its place, not the last picture of a slide that no longer exists
+        if let n = sceneName, busy == 0, !editsInFlight, sourceDraft == nil,
+           !st.scenes.contains(where: { $0.name == n }), !st.unusedScenes.contains(where: { $0.name == n }) {
+            if newRows.isEmpty {
+                sceneName = nil; scene = nil; selection = nil; shownDir = nil
+                canvas.stop = nil; sourceView.string = ""
+                rebuildSteps(); rebuildInspector()
+            } else {
+                let i = oldRows.firstIndex(where: { $0.name == n }) ?? 0
+                await selectScene(newRows[min(i, newRows.count - 1)].name)
+            }
+            return
+        }
         // the slide on screen was re-rendered (an edit from outside, e.g. Claude in the terminal): show it
         if let n = sceneName, busy == 0, let cur = newRows.first(where: { $0.name == n }), cur.status == "ready",
            let t = cur.thumb, let shown = shownDir, URL(fileURLWithPath: t).deletingLastPathComponent().path != shown {
@@ -1205,6 +1252,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_IDS"] != nil, !testRan { testRan = true; identityTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_WORKSPACE"] != nil, !testRan { testRan = true; workspaceTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ENGINESTOP"] != nil, !testRan { testRan = true; engineStopTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_NEWDECK"] != nil, !testRan { testRan = true; newDeckTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_SAVECOPY"] != nil, !testRan { testRan = true; saveCopyTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FEEDBACK"] != nil, !testRan { testRan = true; feedbackTest() }

@@ -192,9 +192,15 @@ enum PortableProject {
         return deck
     }
 
-    static func unpackArchive(_ archive: URL) throws -> URL {
+    /// Unpack `archive` into the new project folder `target` and return its deck. The folder is an ordinary project:
+    /// what Save writes, Revert goes back to and Open Recent opens again (the package itself is never written).
+    static func unpackArchive(_ archive: URL, to target: URL) throws -> URL {
         let fm = FileManager.default
+        guard !fm.fileExists(atPath: target.path) else {
+            throw PortableProjectError.invalidManifest("A file or folder already exists at \(target.path). Choose another name.")
+        }
         let destination = Workspace.base.appendingPathComponent("projects/\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: destination) }
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
         let listing = Pipe()
         let list = Process(); list.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
@@ -223,9 +229,11 @@ enum PortableProject {
         }
         let enumerator = fm.enumerator(at: destination, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
         while let url = enumerator?.nextObject() as? URL {
-            if let deck = try deckURL(in: url) { return deck }
+            guard try deckURL(in: url) != nil else { continue }
+            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: url, to: target)
+            if let deck = try deckURL(in: target) { return deck }
         }
-        try? fm.removeItem(at: destination)
         throw PortableProjectError.invalidManifest("This archive does not contain a valid Manimble project.")
     }
 }

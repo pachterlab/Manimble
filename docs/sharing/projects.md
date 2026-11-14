@@ -10,7 +10,12 @@
 | **File ▸ Package for Sharing…** | | Writes the project as a single `.manimble` file. |
 
 If the original deck was changed by someone else since you opened it (for example by a sync service or another
-editor), Manimble warns you before saving over those changes.
+editor), Manimble warns you before saving over those changes. If the deck folder was moved, renamed or deleted while
+it was open, Save refuses rather than make a new folder at the old place; use **File ▸ Save Project Copy…** to keep
+your edits.
+
+**File ▸ Save Project Copy…** saves a copy, not a "Save As": the window goes on editing the original, whose unsaved
+edits stay unsaved. Open the copy with **File ▸ Open Deck or Project…** to work on it instead.
 
 ## Share a deck with another Manimble user
 
@@ -37,7 +42,9 @@ Both commands:
 
 - a deck folder, or any file inside it;
 - a project folder that contains a deck;
-- a `.manimble` package.
+- a `.manimble` package. Manimble asks where to unpack it (beside the package by default) and opens the project
+  folder it makes. That folder is what you edit and save, and what **Open Recent** opens again; the package itself
+  never changes. Package the deck again to send the edited version.
 
 **File ▸ Open Recent** lists the decks you opened lately. Each deck opens in its own window; opening a deck that is
 already open brings its window to the front.
