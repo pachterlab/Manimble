@@ -1,5 +1,7 @@
 # Manimble
 
+[![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fpachterlab%2FManimble%2Fmain%2F.github%2Fbadges%2Fdownloads.json)](https://github.com/pachterlab/Manimble/releases)
+
 A slide editor for presentations made with [Manim](https://www.manim.community) and
 [Manim Slides](https://github.com/jeertmans/manim-slides). Every slide is Python code: edit it on the canvas like
 in PowerPoint or Keynote, in the built-in code editor, or with an AI coding agent such as Claude Code, Codex or
