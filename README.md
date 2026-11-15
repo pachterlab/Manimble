@@ -1,6 +1,6 @@
 # Manimble
 
-[![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fpachterlab%2FManimble%2Fmain%2F.github%2Fbadges%2Fdownloads.json)](https://github.com/pachterlab/Manimble/releases)
+[![Downloads](https://img.shields.io/github/downloads/pachterlab/Manimble/total?label=Downloads)](https://github.com/pachterlab/Manimble/releases)
 
 A slide editor for presentations made with [Manim](https://www.manim.community) and
 [Manim Slides](https://github.com/jeertmans/manim-slides). Every slide is Python code: edit it on the canvas like
