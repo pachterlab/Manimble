@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Metal
 
 enum EngineError: Error, LocalizedError {
     case message(String)
@@ -19,6 +20,32 @@ final class Engine {
     var onExit: ((Int32) -> Void)?
     private var stopping = false
     static let logURL = URL(fileURLWithPath: NSString(string: "~/Library/Logs/manimble.log").expandingTildeInPath)
+    /// A line from the app in the log, for problems only the app sees (the log is what a bug report attaches).
+    static func note(_ s: String) {
+        let fd = open(logURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard fd >= 0 else { return }
+        let line = Data(("[app] " + s + "\n").utf8)
+        _ = line.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        close(fd)
+    }
+
+    /// The app's version, the Mac's and its graphics, written at the top of the log.
+    static var systemSummary: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        var translated: Int32 = 0, size = MemoryLayout<Int32>.size
+        sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0)
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = translated == 1 ? "x86_64 under Rosetta" : "x86_64"
+        #endif
+        var model = [CChar](repeating: 0, count: 256), n = 256
+        sysctlbyname("hw.model", &model, &n, nil, 0)
+        let gpu = MTLCreateSystemDefaultDevice()
+        return "Manimble \(version) (\(arch)) on \(String(cString: model)), macOS \(ProcessInfo.processInfo.operatingSystemVersionString); "
+            + "GPU \(gpu?.name ?? "none")\(gpu.map { $0.hasUnifiedMemory ? "" : " (separate memory)" } ?? "")"
+    }
+
     /// The end of what the engine wrote to its log, to show when it stopped.
     static func logTail(_ lines: Int = 12) -> String {
         let text = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
@@ -106,7 +133,10 @@ final class Engine {
         p.standardInput = inPipe
         p.standardOutput = outPipe
         FileManager.default.createFile(atPath: Engine.logURL.path, contents: nil)
-        p.standardError = try? FileHandle(forWritingTo: Engine.logURL)
+        // appending, so the app's own lines (`note`) and the engine's never overwrite each other
+        let fd = open(Engine.logURL.path, O_WRONLY | O_APPEND)
+        p.standardError = fd >= 0 ? FileHandle(fileDescriptor: fd, closeOnDealloc: true) : nil
+        Engine.note(Engine.systemSummary)
         p.terminationHandler = { [weak self] proc in self?.ended(proc) }
         stopping = false
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in

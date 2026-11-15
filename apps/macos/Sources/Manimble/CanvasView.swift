@@ -598,17 +598,24 @@ final class CanvasView: MTKView {
         let key = CanvasView.textureKey(path)
         if let t = cache[key] { return t }
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return textureFailed(path, "the image could not be read") }
         let w = img.width, h = img.height
-        var bytes = [UInt8](repeating: 0, count: w * h * 4)
-        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
         d.usage = .shaderRead
-        guard let t = device!.makeTexture(descriptor: d) else { return nil }
-        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: bytes, bytesPerRow: w * 4)
+        // written by the CPU: shared memory on Apple silicon, managed (a copy on each side) on a separate graphics card
+        d.storageMode = device!.hasUnifiedMemory ? .shared : .managed
+        guard let t = device!.makeTexture(descriptor: d) else { return textureFailed(path, "no texture of \(w)×\(h)") }
+        // the context draws into the buffer only while it is pinned (a pointer from `&bytes` lasts for one call)
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        let drawn = bytes.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+            t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: buf.baseAddress!, bytesPerRow: w * 4)
+            return true
+        }
+        guard drawn else { return textureFailed(path, "the image could not be decoded") }
         cache[key] = t
         cacheOrder.append(key)
         if cacheOrder.count > 160 {            // bound memory: drop oldest
@@ -616,6 +623,31 @@ final class CanvasView: MTKView {
             cacheOrder.removeFirst(40)
         }
         return t
+    }
+
+    /// Pictures that could not become textures, each logged once: the canvas shows nothing for them.
+    private var failedTextures = Set<String>()
+    private func textureFailed(_ path: String, _ why: String) -> MTLTexture? {
+        if failedTextures.insert(path).inserted { Engine.note("canvas: no texture for \(path): \(why) (GPU \(device?.name ?? "none"))") }
+        return nil
+    }
+
+    /// The pixels of an offscreen render once `cb` has drawn it: a managed texture (a separate graphics card) is
+    /// copied back to the CPU first, or its bytes would be stale.
+    private func readBack(_ tex: MTLTexture, _ cb: MTLCommandBuffer) -> CGImage? {
+        if tex.storageMode == .managed, let blit = cb.makeBlitCommandEncoder() {
+            blit.synchronize(resource: tex)
+            blit.endEncoding()
+        }
+        cb.commit(); cb.waitUntilCompleted()
+        let w = tex.width, h = tex.height
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        return bytes.withUnsafeMutableBytes { buf -> CGImage? in
+            tex.getBytes(buf.baseAddress!, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+            return CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                             space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info)?.makeImage()
+        }
     }
 
     /// A new render of the slide: its frames change; content-hashed sprites that come back are reused.
@@ -821,13 +853,8 @@ final class CanvasView: MTKView {
         pass.colorAttachments[0].storeAction = .store
         let enc = cb.makeRenderCommandEncoder(descriptor: pass)!
         encodeFrame(enc, scale: scale)
-        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-        var bytes = [UInt8](repeating: 0, count: w * h * 4)
-        tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-        let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
-        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info) else { return nil }
-        return ctx.makeImage()
+        enc.endEncoding()
+        return readBack(tex, cb)
     }
 
     private func encodeFrame(_ enc: MTLRenderCommandEncoder, scale: CGFloat) {
@@ -921,13 +948,7 @@ final class CanvasView: MTKView {
         enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(w), height: Double(h), znear: 0, zfar: 1))
         encodeContent(enc)
         enc.endEncoding()
-        cb.commit(); cb.waitUntilCompleted()
-        var bytes = [UInt8](repeating: 0, count: w * h * 4)
-        tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-        let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
-        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info) else { return nil }
-        return ctx.makeImage()
+        return readBack(tex, cb)
     }
 
     /// What one encodeContent call draws: the slide itself (backdrop + objects), only the objects (for the
