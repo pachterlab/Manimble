@@ -64,6 +64,17 @@ install them. Nothing is downloaded without asking. If you import without them, 
 placeholders, and a banner under the Home bar offers **Install**, **Not Now** and **Don't Ask Again**. Once the
 packages are installed, the placeholders are typeset in place, keeping any edits you have made to the slides.
 
+## Open a Manim Slides project
+
+A [Manim Slides](https://github.com/jeertmans/manim-slides) project is already a Manimble deck, so nothing is
+converted. Choose **File ▸ Import ▸ Manim Slides Project…** (or **File ▸ Open Deck or Project…**) and pick the project's
+folder, or the `.py` file that holds its `Slide` classes. Every slide class in the folder's Python files is found and
+rendered, and the objects Manimble can trace to a line of code are editable on the canvas.
+
+Manimble edits the working copy, not your files, until you save. The slides are shown in the order their classes appear
+in the files, because Manim Slides takes the order from the `manim-slides render` command line. Once you reorder,
+add or hide a slide, Manimble writes the show's order to an `order.txt` beside the code, which Manim Slides ignores.
+
 ## After importing
 
 An imported deck is an ordinary Manimble deck. Choose a [theme](../guide/design.md), add builds and animations,

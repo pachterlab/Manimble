@@ -76,7 +76,8 @@ it with `manim-slides present`, edit it in any editor, and keep it in git.
 
 ### Can I open a deck I wrote by hand?
 
-Yes. Open its folder with **File ▸ Open Deck or Project…**. Manimble finds every slide class, and everything it can
+Yes. Open its folder, or its `.py` file, with **File ▸ Open Deck or Project…** (a Manim Slides project also with
+**File ▸ Import ▸ Manim Slides Project…**). Manimble finds every slide class, and everything it can
 trace to a line of code becomes editable on the canvas. See [Limitations](limitations.md) for code it edits only
 partly.
 

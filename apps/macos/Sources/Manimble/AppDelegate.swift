@@ -164,6 +164,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         importMenu.addItem(item("PowerPoint (.pptx)…", #selector(MainController.importPowerPoint), "", []))
         importMenu.addItem(item("Keynote (.key)…", #selector(MainController.importKeynote), "", []))
         importMenu.addItem(item("Beamer (.tex)…", #selector(MainController.importBeamer), "", []))
+        importMenu.addItem(.separator())
+        importMenu.addItem(item("Manim Slides Project…", #selector(MainController.importManimSlides), "", []))
         let importItem = NSMenuItem(title: "Import", action: nil, keyEquivalent: ""); importItem.submenu = importMenu
         let exportMenu = NSMenu(title: "Export To")
         exportMenu.addItem(item("PowerPoint (.pptx)…", #selector(MainController.exportPowerPoint), "", []))

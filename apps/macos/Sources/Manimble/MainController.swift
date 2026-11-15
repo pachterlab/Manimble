@@ -588,9 +588,22 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let p = NSOpenPanel()
         p.message = "Choose a deck folder, a Manimble project folder, or a .manimble package"
         p.canChooseDirectories = true; p.canChooseFiles = true
-        // Only .manimble packages and plain folders are enabled; other files are grayed out.
-        p.allowedContentTypes = [UTType(filenameExtension: "manimble"), .folder].compactMap { $0 }
+        // .manimble packages, folders and Python files (a Manim Slides project's slides) are enabled; others are grayed out.
+        p.allowedContentTypes = [UTType(filenameExtension: "manimble"), .folder, .pythonScript].compactMap { $0 }
         if let last = UserDefaults.standard.string(forKey: "lastDeck") { p.directoryURL = URL(fileURLWithPath: last).deletingLastPathComponent() }
+        guard p.runModal() == .OK, let u = p.url else { return }
+        openProject(at: u)
+    }
+
+    /// File ▸ Import ▸ Manim Slides Project…: a Manim Slides project already is a deck, so this opens it, from its
+    /// folder or the .py file that holds its slides. Nothing is converted; Manimble adds an order.txt once the show's
+    /// order changes.
+    @objc func importManimSlides() {
+        let p = NSOpenPanel()
+        p.message = "Choose a Manim Slides project: its folder, or the .py file with its Slide classes"
+        p.prompt = "Open"
+        p.canChooseDirectories = true; p.canChooseFiles = true
+        p.allowedContentTypes = [.folder, .pythonScript]
         guard p.runModal() == .OK, let u = p.url else { return }
         openProject(at: u)
     }
@@ -608,8 +621,9 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 openInWindow(deck: deck.path)
             } else if isDir {
                 openInWindow(deck: u.path)
-            } else if FileManager.default.fileExists(atPath: u.deletingLastPathComponent().appendingPathComponent("order.txt").path) {
-                openInWindow(deck: u.deletingLastPathComponent().path)
+            } else if u.pathExtension.lowercased() == "py"
+                        || FileManager.default.fileExists(atPath: u.deletingLastPathComponent().appendingPathComponent("order.txt").path) {
+                openInWindow(deck: u.deletingLastPathComponent().path)       // a file of a deck, or a Manim Slides project's .py
             } else {
                 alert("Could not open project", "Choose a deck folder or a .manimble package.")
             }
@@ -1253,6 +1267,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_WORKSPACE"] != nil, !testRan { testRan = true; workspaceTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ENGINESTOP"] != nil, !testRan { testRan = true; engineStopTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_NEWDECK"] != nil, !testRan { testRan = true; newDeckTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OPENED"] != nil, !testRan { testRan = true; openedTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_SAVECOPY"] != nil, !testRan { testRan = true; saveCopyTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }

@@ -41,6 +41,7 @@ Both commands:
 **File ▸ Open Deck or Project…** (<kbd>⌘</kbd><kbd>O</kbd>) opens any of these:
 
 - a deck folder, or any file inside it;
+- a Manim Slides project: its folder, or the `.py` file with its slides;
 - a project folder that contains a deck;
 - a `.manimble` package. Manimble asks where to unpack it (beside the package by default) and opens the project
   folder it makes. That folder is what you edit and save, and what **Open Recent** opens again; the package itself

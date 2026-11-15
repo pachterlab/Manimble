@@ -107,3 +107,20 @@ extension MainController {
         }
     }
 }
+
+/// MANIMBLE_TEST_OPENED: what the deck given at launch opened as (for a Manim Slides project's .py file, its
+/// folder); opened.log in MANIMBLE_TEST_OUT.
+extension MainController {
+    func openedTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        Task { @MainActor in
+            for _ in 0..<120 where state?.scenes.contains(where: { $0.status != "ready" && $0.status != "error" }) ?? true {
+                try? await Task.sleep(nanoseconds: 500_000_000); await reloadState()
+            }
+            let s = "deck: \(workspace?.original.path ?? "-")\nslides: \(state?.scenes.map { "\($0.name):\($0.status)" } ?? [])\n"
+                + "on screen: \(sceneName ?? "-") objects: \(scene?.objects?.values.map(\.kind).sorted() ?? [])\n"
+            try? s.write(toFile: dir + "opened.log", atomically: true, encoding: .utf8)
+            exit(0)
+        }
+    }
+}
