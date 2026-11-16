@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 
 /// MANIMBLE_TEST_NEWDECK: headless check that a new deck's slides follow their code. Closes the launch deck, makes
 /// a deck the way File ▸ New Deck does (twice at the same place, as when a deck is deleted and made again), then
@@ -120,6 +121,34 @@ extension MainController {
             let s = "deck: \(workspace?.original.path ?? "-")\nslides: \(state?.scenes.map { "\($0.name):\($0.status)" } ?? [])\n"
                 + "on screen: \(sceneName ?? "-") objects: \(scene?.objects?.values.map(\.kind).sorted() ?? [])\n"
             try? s.write(toFile: dir + "opened.log", atomically: true, encoding: .utf8)
+            exit(0)
+        }
+    }
+}
+
+/// MANIMBLE_TEST_PDF: the PDF export of the deck given at launch, with and without every build: pages written and
+/// how many each slide's builds call for; pdf.log in MANIMBLE_TEST_OUT.
+extension MainController {
+    func pdfTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        Task { @MainActor in
+            for _ in 0..<240 where state?.scenes.contains(where: { $0.status != "ready" && $0.status != "error" }) ?? true {
+                try? await Task.sleep(nanoseconds: 500_000_000); await reloadState()
+            }
+            var s = ""
+            for builds in [true, false] {
+                let u = await makePDF(builds: builds)
+                let pages = u.flatMap { PDFDocument(url: $0) }?.pageCount ?? -1
+                if let u { try? FileManager.default.copyItem(at: u, to: URL(fileURLWithPath: dir + (builds ? "builds.pdf" : "final.pdf"))) }
+                s += "\(builds ? "every build" : "final build"): \(pages) pages\n"
+            }
+            var expected = 0
+            for sc in state?.scenes ?? [] where sc.hidden != true {
+                let n = (try? await engine.call("scene", ["name": sc.name], as: SceneData.self))?.stops?.count ?? 0
+                s += "  \(sc.name): \(n) builds\n"; expected += n
+            }
+            s += "builds expected: \(expected)\n"
+            try? s.write(toFile: dir + "pdf.log", atomically: true, encoding: .utf8)
             exit(0)
         }
     }

@@ -38,11 +38,12 @@ Pictures go in a `<name>-figures` folder next to the `.tex` file. Keep the two t
 
 ## PDF
 
-- **File ▸ Export To ▸ PDF…** saves a PDF with one page per slide, showing each slide's final build.
-- **Share ▸ Share PDF (every build)…** makes a PDF with one page per build, for handouts that follow the talk step by
-  step. **Share ▸ Share PDF (one page per slide)…** makes the shorter version. Both open the macOS share menu, so you
-  can send the PDF by Mail, Messages or AirDrop.
-- **Share ▸ Save PDF…** saves the one-page-per-slide PDF to a file, like **File ▸ Export To ▸ PDF…**.
+- **File ▸ Export To ▸ PDF…** saves a PDF. With **Every build as its own page** checked (the default), each build gets
+  a page, for handouts that follow the talk step by step; unchecked, each slide gets one page showing its final build.
+  Manimble remembers the choice.
+- **Share ▸ Share PDF (every build)…** and **Share ▸ Share PDF (one page per slide)…** make the same two versions and
+  open the macOS share menu, so you can send the PDF by Mail, Messages or AirDrop.
+- **Share ▸ Save PDF…** is the same as **File ▸ Export To ▸ PDF…**.
 
 ## Movie
 

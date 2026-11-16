@@ -193,7 +193,7 @@ extension MainController: NSToolbarDelegate {
             add("Export Beamer (.tex)…", #selector(exportBeamer))
             add("Export Movie (.mp4)…", #selector(exportMovie))
             m.addItem(.separator())
-            add("Save PDF…", #selector(shareChosen(_:)), 3)
+            add("Save PDF…", #selector(exportPDFPressed))
             i.menu = m
             return i
         default: return nil
@@ -484,8 +484,26 @@ extension MainController: NSToolbarDelegate {
 
     // MARK: PowerPoint / Keynote export
 
+    /// File ▸ Export To ▸ PDF: the Save panel asks whether every build gets its own page (as the slide exports do).
     @objc func exportPDFPressed() {
-        Task { @MainActor in if let u = await makePDF(builds: false) { saveCopy(of: u) } }
+        guard let ws = workspace else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = ws.original.deletingLastPathComponent().lastPathComponent == "slides"
+            ? "presentation.pdf" : ws.original.lastPathComponent + ".pdf"
+        panel.message = "Export to PDF"
+        let builds = NSButton(checkboxWithTitle: "Every build as its own page", target: nil, action: nil)
+        builds.state = UserDefaults.standard.object(forKey: "pdfExportBuilds") as? Bool ?? true ? .on : .off
+        let box = NSStackView(views: [builds]); box.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        panel.accessoryView = box
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        UserDefaults.standard.set(builds.state == .on, forKey: "pdfExportBuilds")
+        Task { @MainActor in
+            guard let u = await makePDF(builds: builds.state == .on) else { return }
+            try? FileManager.default.removeItem(at: dest)
+            do { try FileManager.default.copyItem(at: u, to: dest); toast("Saved \(dest.lastPathComponent)") }
+            catch { alert("Could not save", "\(error)") }
+        }
     }
     @objc func exportPowerPoint() { runExport(kind: "pptx") }
     @objc func exportKeynote() { runExport(kind: "key") }
@@ -626,12 +644,12 @@ extension MainController: NSToolbarDelegate {
         Task { @MainActor in
             let url: URL?
             switch m.tag {
-            case 0, 3: url = await makePDF(builds: false)
+            case 0: url = await makePDF(builds: false)
             case 1: url = await makePDF(builds: true)
             default: return
             }
             guard let u = url else { return }
-            if m.tag == 3 { saveCopy(of: u) } else { showSharePicker(u) }
+            showSharePicker(u)
         }
     }
 
@@ -639,15 +657,6 @@ extension MainController: NSToolbarDelegate {
         let picker = NSSharingServicePicker(items: [u])
         guard let v = window.contentView else { return }
         picker.show(relativeTo: NSRect(x: v.bounds.maxX - 60, y: v.bounds.maxY - 2, width: 40, height: 2), of: v, preferredEdge: .minY)
-    }
-
-    func saveCopy(of u: URL) {
-        let p = NSSavePanel(); p.nameFieldStringValue = u.lastPathComponent
-        if p.runModal() == .OK, let dest = p.url {
-            try? FileManager.default.removeItem(at: dest)
-            do { try FileManager.default.copyItem(at: u, to: dest); toast("Saved \(dest.lastPathComponent)") }
-            catch { alert("Could not save", "\(error)") }
-        }
     }
 
     func exportDir() -> URL {

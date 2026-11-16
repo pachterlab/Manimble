@@ -1268,6 +1268,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ENGINESTOP"] != nil, !testRan { testRan = true; engineStopTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_NEWDECK"] != nil, !testRan { testRan = true; newDeckTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OPENED"] != nil, !testRan { testRan = true; openedTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PDF"] != nil, !testRan { testRan = true; pdfTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_SAVECOPY"] != nil, !testRan { testRan = true; saveCopyTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_LAYOUTS"] != nil, !testRan { testRan = true; layoutsTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FRAME"] != nil, !testRan { testRan = true; frameTest() }
