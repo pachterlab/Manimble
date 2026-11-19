@@ -19,3 +19,7 @@ manimble.iconset/
 
 # local release zips
 /out/
+
+# Windows app build products
+apps/windows/**/bin/
+apps/windows/**/obj/
