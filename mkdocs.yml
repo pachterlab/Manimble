@@ -116,6 +116,7 @@ nav:
       - Deck file format: reference/deck-format.md
       - Limitations: reference/limitations.md
       - Troubleshooting and FAQ: reference/faq.md
+      - Privacy and network use: reference/privacy.md
   - Developers:
       - How Manimble works: developers/architecture.md
       - Engine protocol: developers/protocol.md
