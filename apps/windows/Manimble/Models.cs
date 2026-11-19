@@ -202,3 +202,15 @@ public sealed class OidMap
     public string? Dir { get; set; }
     public Dictionary<string, string?> Map { get; set; } = new();
 }
+
+/// A transparent PNG of one element (`sprite`, `insert_sprite`): `cx`/`cy` are its centre's offset from the frame centre.
+public sealed class SpriteResult
+{
+    public string? File { get; set; }
+    public string? Path { get; set; }
+    public double? W { get; set; }
+    public double? H { get; set; }
+    public double? Cx { get; set; }
+    public double? Cy { get; set; }
+    public string? Error { get; set; }
+}

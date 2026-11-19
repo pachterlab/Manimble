@@ -83,6 +83,20 @@ public partial class MainWindow : Window
         canvas.TextCommitted += (oid, text) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "text", ["value"] = text }));
         canvas.PlaceholderCommitted += OnPlaceholderCommitted;
         canvas.SelectionChanged += RebuildInspector;
+        canvas.ResizeCommitted += (oid, ratio) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "resize", ["ratio"] = ratio }));
+        canvas.EndpointsCommitted += (oid, e) => Submit(() => RunEdit(new JsonObject
+            { ["oid"] = oid, ["op"] = "endpoints", ["sx"] = e[0], ["sy"] = e[1], ["ex"] = e[2], ["ey"] = e[3] }));
+        canvas.DrawCommitted += (tool, a, b) => Insert(tool, new JsonObject { ["sx"] = a.X, ["sy"] = a.Y, ["ex"] = b.X, ["ey"] = b.Y });
+        canvas.PenCommitted += pts => Insert("pen", new JsonObject
+        {
+            ["points"] = new JsonArray(pts.Select(p => (JsonNode)new JsonArray(Math.Round(p.X, 1), Math.Round(p.Y, 1))).ToArray()),
+            ["color"] = penColor, ["width"] = 6,
+        });
+        canvas.DrawToolChanged += () => DrawButtonText.Text = canvas.DrawTool switch
+        {
+            null => "Draw ▾", "pen" => "Pen (Esc ends)", "darrow" => "Drawing: double arrow", var t => "Drawing: " + t,
+        };
+        BuildPenColorMenu();
         engine.EventReceived += OnEngineEvent;
         engine.Exited += code =>
         {
@@ -918,6 +932,211 @@ public partial class MainWindow : Window
         SourceColumn.Width = show ? new GridLength(420) : new GridLength(0);
     }
 
+    // ================================================================ inserting
+
+    static readonly (string name, string hex)[] PenSwatches =
+    {
+        ("Red", "#FF3B30"), ("Orange", "#FF9A2E"), ("Yellow", "#FFD400"), ("Green", "#34C759"), ("Blue", "#4D7CFF"),
+        ("Purple", "#7C5CFF"), ("White", "#FFFFFF"), ("Black", "#000000"),
+    };
+    string penColor = "#FF3B30";
+
+    void BuildPenColorMenu()
+    {
+        PenColorMenu.Items.Clear();
+        foreach (var (name, hex) in PenSwatches)
+        {
+            var swatch = new System.Windows.Shapes.Rectangle
+            {
+                Width = 12, Height = 12, Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)),
+                Stroke = Brushes.Gray, StrokeThickness = 0.5,
+            };
+            var mi = new MenuItem { Header = name, Tag = hex, Icon = swatch, IsCheckable = true, IsChecked = hex == penColor };
+            mi.Click += (_, _) =>
+            {
+                penColor = hex;
+                canvas.PenColor = (Color)ColorConverter.ConvertFromString(hex);
+                foreach (var o in PenColorMenu.Items.OfType<MenuItem>()) o.IsChecked = (string)o.Tag == hex;
+            };
+            PenColorMenu.Items.Add(mi);
+        }
+        canvas.PenColor = (Color)ColorConverter.ConvertFromString(penColor);
+    }
+
+    /// Inserts an element: a preview shows at once, the source is patched and the slide re-rendered in the background,
+    /// and the new element is selected (a new text box opens for typing).
+    void Insert(string kind, JsonObject? extra = null, bool typeAfter = false)
+    {
+        var name = sceneName;
+        if (name == null || workspace == null) { Toast("Open a deck and pick a slide first", error: true); return; }
+        var req = extra ?? new JsonObject();
+        req["kind"] = kind;
+        req["scene"] = name;
+        Task? preview = kind == "pen" ? null : ShowGhost((JsonObject)req.DeepClone());
+        Submit(async () =>
+        {
+            req["stop"] = stopIndex;
+            if (Seen is { } seen) req["seen"] = seen;
+            Busy(+1, "Inserting…");
+            EditResult? r = null; string? failure = null;
+            try { r = await engine.Call<EditResult>("insert", req); }
+            catch (Exception e) { failure = e.Message; }
+            Busy(-1);
+            if (preview != null) await preview;       // a preview landing after the insert would stay for good
+            if (r?.Ok != true)
+            {
+                canvas.ClearGhost();
+                if (kind == "pen") canvas.DropPendingStroke();
+                Toast(failure ?? r?.Error ?? "The insert did not work", error: true);
+                return;
+            }
+            Toast("Saved · " + (r.Message ?? "inserted"));
+            await LoadScene(name, keepStop: true);
+            canvas.ClearGhost();
+            if (kind == "pen") canvas.DropPendingStroke();
+            if (kind != "pen" && sceneName == name && scene?.Objects != null && r.Line is int line)
+            {
+                var hit = scene.Objects.FirstOrDefault(kv => LocMatches(kv.Value.Loc, r.File, line));
+                if (hit.Key != null && int.TryParse(hit.Key, out var oid))
+                {
+                    canvas.Select(new[] { oid });
+                    if (typeAfter) canvas.BeginTextEdit(oid);
+                }
+            }
+            await ReloadState();
+        });
+    }
+
+    static bool LocMatches(string loc, string? file, int line)
+    {
+        var i = loc.LastIndexOf(':');
+        if (i < 0 || !int.TryParse(loc[(i + 1)..], out var l) || l != line) return false;
+        return file == null || string.Equals(Path.GetFileName(loc[..i]), Path.GetFileName(file), StringComparison.OrdinalIgnoreCase);
+    }
+
+    async Task ShowGhost(JsonObject req)
+    {
+        try
+        {
+            var sp = await engine.Call<SpriteResult>("insert_sprite", req);
+            if (sp?.Path == null || sp.W is not double w || sp.H is not double h || sceneName != (string?)req["scene"]) return;
+            if (Images.Load(sp.Path) is { } img) canvas.SetGhost(img, sp.Cx ?? 0, sp.Cy ?? 0, w, h);
+        }
+        catch { }
+    }
+
+    void InsertText_Click(object sender, RoutedEventArgs e) => Insert("text", typeAfter: true);
+
+    void InsertFormula_Click(object sender, RoutedEventArgs e)
+    {
+        if (sceneName == null) return;
+        var tex = Dialogs.Formula(this, engine);
+        if (tex != null) Insert("formula", new JsonObject { ["tex"] = tex });
+    }
+
+    void InsertShape_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is string kind) Insert(kind);
+    }
+
+    void DrawTool_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not string tool || sceneName == null) return;
+        canvas.DrawTool = tool;
+        canvas.Focus();
+        Toast(tool == "pen" ? "Draw on the slide with the pen; Esc puts it down" : "Drag on the slide to draw; Shift keeps lines straight");
+    }
+
+    void InsertTable_Click(object sender, RoutedEventArgs e)
+    {
+        var style = (sender as FrameworkElement)?.Tag as string ?? "word";
+        if (sceneName == null) return;
+        if (Dialogs.Table(this, style) is { } t)
+            Insert("table", new JsonObject { ["rows"] = t.rows, ["cols"] = t.cols, ["style"] = style });
+    }
+
+    void InsertImage_Click(object sender, RoutedEventArgs e)
+    {
+        if (workspace == null || sceneName == null) return;
+        var dlg = new OpenFileDialog { Title = "Choose an image to insert", Filter = "Images|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.webp|All files|*.*" };
+        if (dlg.ShowDialog(this) != true) return;
+        // a copy in the deck folder, under a name not taken yet
+        var baseName = Path.GetFileNameWithoutExtension(dlg.FileName);
+        var ext = Path.GetExtension(dlg.FileName);
+        var fileName = baseName + ext;
+        for (int n = 1; File.Exists(Path.Combine(workspace.Work, fileName)); n++) fileName = $"{baseName}_{n}{ext}";
+        try { File.Copy(dlg.FileName, Path.Combine(workspace.Work, fileName)); }
+        catch (Exception ex) { Toast("Could not copy the image: " + ex.Message, error: true); return; }
+        Insert("image", new JsonObject { ["file"] = fileName });
+    }
+
+    /// A toolbar button's drop-down: a copy of the menu items it stands for.
+    void DropDown(Button b, params (string header, string? tag, RoutedEventHandler handler)[] items)
+    {
+        var m = new ContextMenu { PlacementTarget = b, Placement = PlacementMode.Bottom };
+        foreach (var (header, tag, handler) in items)
+        {
+            if (header == "-") { m.Items.Add(new Separator()); continue; }
+            var mi = new MenuItem { Header = header, Tag = tag };
+            mi.Click += handler;
+            m.Items.Add(mi);
+        }
+        m.IsOpen = true;
+    }
+
+    void ShapeButton_Click(object sender, RoutedEventArgs e) => DropDown(ShapeButton,
+        ("Rectangle", "rectangle", InsertShape_Click), ("Rounded Rectangle", "rounded", InsertShape_Click), ("Circle", "circle", InsertShape_Click),
+        ("Ellipse", "ellipse", InsertShape_Click), ("Triangle", "triangle", InsertShape_Click), ("-", null, InsertShape_Click),
+        ("Line", "line", InsertShape_Click), ("Arrow", "arrow", InsertShape_Click), ("Double Arrow", "darrow", InsertShape_Click));
+
+    void DrawButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (canvas.DrawTool != null) { canvas.DrawTool = null; return; }        // a second click puts the tool down
+        DropDown(DrawButton, ("Line", "line", DrawTool_Click), ("Arrow", "arrow", DrawTool_Click), ("Double Arrow", "darrow", DrawTool_Click),
+            ("Rectangle", "rectangle", DrawTool_Click), ("Ellipse", "ellipse", DrawTool_Click), ("-", null, DrawTool_Click),
+            ("Pen (freehand)", "pen", DrawTool_Click));
+    }
+
+    void InsertTableButton_Click(object sender, RoutedEventArgs e) => DropDown((Button)sender,
+        ("Word Table…", "word", InsertTable_Click), ("Math Table…", "math", InsertTable_Click));
+
+    void NewSlideButton_Click(object sender, RoutedEventArgs e) => DropDown(NewSlideButton,
+        ("Title Slide", "title", NewSlideLayout_Click), ("Title and Content", "title_content", NewSlideLayout_Click),
+        ("Two Content", "two_content", NewSlideLayout_Click), ("Title Only", "title_only", NewSlideLayout_Click), ("Blank", "blank", NewSlideLayout_Click));
+
+    void NewSlideLayout_Click(object sender, RoutedEventArgs e)
+    {
+        if (sceneName != null && (sender as FrameworkElement)?.Tag is string layout) SlideOp(new JsonObject { ["op"] = "new", ["layout"] = layout });
+    }
+
+    // ================================================================ builds
+
+    void NewBuild_Click(object sender, RoutedEventArgs e) => BuildOp("new_build", "could not add a build");
+
+    void DeleteBuild_Click(object sender, RoutedEventArgs e)
+    {
+        if (scene?.Stops is not { Count: > 1 }) { Toast("This slide has only one build"); return; }
+        BuildOp("delete_build", "could not delete the build");
+    }
+
+    void BuildOp(string cmd, string failure)
+    {
+        var name = sceneName;
+        if (name == null || scene?.Stops == null) return;
+        var stop = stopIndex;
+        Submit(async () =>
+        {
+            Busy(+1, "Rendering…");
+            var r = await engine.TryCall<EditResult>(cmd, new JsonObject { ["scene"] = name, ["stop"] = stop });
+            Busy(-1);
+            if (r?.Ok != true) { Toast(r?.Error ?? failure, error: true); return; }
+            Toast("Saved · " + (r.Message ?? cmd.Replace('_', ' ')));
+            if (r.Stop is int s) stopIndex = s;
+            await LoadScene(name, keepStop: true);
+            await ReloadState();
+        });
+    }
+
     // ================================================================ playing
 
     async void PlayBeginning_Click(object sender, RoutedEventArgs e) => await Play(null);
@@ -988,6 +1207,12 @@ public partial class MainWindow : Window
         if (ctrl && key == Key.Z) { _ = UndoRedo(shift ? "redo" : "undo"); e.Handled = true; return; }
         if (ctrl && key == Key.Y) { _ = UndoRedo("redo"); e.Handled = true; return; }
         if (ctrl && shift && key == Key.N) { NewSlide_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.T) { InsertText_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.E) { InsertFormula_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.I) { InsertImage_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.P) { canvas.DrawTool = canvas.DrawTool == "pen" ? null : "pen"; e.Handled = true; return; }
+        if (ctrl && shift && key == Key.B) { NewBuild_Click(sender, e); e.Handled = true; return; }
+        if (key == Key.Escape && canvas.DrawTool != null) { canvas.DrawTool = null; e.Handled = true; return; }
         if (ctrl && key == Key.D) { DuplicateSlide_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.A) { canvas.SelectAll(); e.Handled = true; return; }
         if (ctrl && shift && key == Key.Up) { MoveSlideUp_Click(sender, e); e.Handled = true; return; }

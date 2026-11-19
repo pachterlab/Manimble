@@ -2,12 +2,22 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 
 namespace Manimble;
 
+/// How an object is shown until the render of its edit lands: shifted and scaled about its centre (frame px).
+public struct Preview
+{
+    public Vector Offset;
+    public double Scale;
+    public Preview(Vector offset, double scale = 1) { Offset = offset; Scale = scale; }
+    public bool IsIdentity => Offset.Length < 0.01 && Math.Abs(Scale - 1) < 0.0005;
+}
+
 /// The slide canvas (the Mac's Metal CanvasView). It shows the exact frame of a build when idle; while an object is
-/// dragged, or while an optimistic edit waits for its verifying render, it composites the backdrop and the
+/// dragged or resized, or while an optimistic edit waits for its verifying render, it composites the backdrop and the
 /// per-object sprites the engine wrote, so edits show at once. Coordinates are frame pixels throughout: the frame
 /// sits in a Viewbox, so a mouse position read against `frame` is already in the engine's coordinates.
 public sealed class SlideCanvas : Border
@@ -28,26 +38,57 @@ public sealed class SlideCanvas : Border
     public int StopIndex { get; private set; }
     public StopInfo? Stop => Scene?.Stops is { Count: > 0 } s ? s[Math.Clamp(StopIndex, 0, s.Count - 1)] : null;
     public List<int> Selected { get; } = new();
-    /// Objects shown shifted by hand (a drag, or a move waiting for its render), frame px.
-    public Dictionary<int, Vector> Overrides { get; } = new();
+    /// Objects shown moved or scaled by hand (a drag, or an edit waiting for its render).
+    public Dictionary<int, Preview> Overrides { get; } = new();
+    /// Lines shown with new ends (an endpoint drag waiting for its render): [sx, sy, ex, ey].
+    public Dictionary<int, double[]> LineOverrides { get; } = new();
 
     public event Action? SelectionChanged;
     /// Objects dragged by (dx, dy) frame px.
     public event Action<List<int>, double, double>? MoveCommitted;
+    /// An object scaled about its centre by a corner handle.
+    public event Action<int, double>? ResizeCommitted;
+    /// A line's ends dragged: [sx, sy, ex, ey].
+    public event Action<int, double[]>? EndpointsCommitted;
+    /// A shape or line drawn with a draw tool: tool, start and end (frame px).
+    public event Action<string, Point, Point>? DrawCommitted;
+    /// A freehand pen stroke.
+    public event Action<List<Point>>? PenCommitted;
+    /// The draw tool was put down (drawn once, or Esc).
+    public event Action? DrawToolChanged;
     /// Text or formula retyped.
     public event Action<int, string>? TextCommitted;
     /// Text typed into an empty layout placeholder.
     public event Action<Placeholder, string>? PlaceholderCommitted;
 
+    enum Mode { None, Press, Move, Resize, Endpoint, Marquee, Draw, Pen }
+    Mode mode;
     int? hover;
-    Point? downAt;
-    bool dragging;
-    Vector dragDelta;
+    Point downAt;
+    Vector dragDelta;              // a move in progress
+    int dragOid;                   // the object of a resize or endpoint drag
+    int dragEnd;                   // 0 = start, 1 = end of a line
+    double dragScale = 1;          // a resize in progress
+    Rect dragBox;                  // the box a resize started from
+    Rect? band;                    // marquee or the shape being drawn
+    readonly List<Point> penPoints = new();
+    readonly List<List<Point>> pendingStrokes = new();
+    (BitmapSource img, Rect r)? ghost;
     TextBox? editor;
     int? editingOid;
     Placeholder? editingPlaceholder;
 
+    string? drawTool;
+    /// The draw tool in hand: line, arrow, darrow, rectangle, ellipse or pen (null: select and move).
+    public string? DrawTool
+    {
+        get => drawTool;
+        set { drawTool = value; Cursor = value != null ? Cursors.Cross : Cursors.Arrow; DrawToolChanged?.Invoke(); DrawOverlay(); }
+    }
+    public Color PenColor { get; set; } = Colors.White;
+
     public bool IsEditingText => editor != null;
+    public bool IsDragging => mode is Mode.Move or Mode.Resize or Mode.Endpoint;
 
     public SlideCanvas()
     {
@@ -66,16 +107,16 @@ public sealed class SlideCanvas : Border
         Child = host;
         frame.Width = 1280; frame.Height = 720;
         viewbox.Visibility = Visibility.Collapsed;
-        emptyText.Text = "";
         overlay.MouseLeftButtonDown += OnDown;
         overlay.MouseMove += OnMove;
         overlay.MouseLeftButtonUp += OnUp;
         overlay.MouseLeave += (_, _) => { if (hover != null) { hover = null; DrawOverlay(); } };
-        overlay.LostMouseCapture += (_, _) => { if (downAt != null && Mouse.LeftButton != MouseButtonState.Pressed) EndPress(commit: dragging); };
+        overlay.LostMouseCapture += (_, _) => { if (mode != Mode.None && Mouse.LeftButton != MouseButtonState.Pressed) EndPress(commit: true); };
         SizeChanged += (_, _) => DrawOverlay();
     }
 
     double Scale => viewbox.ActualWidth > 0 && frame.Width > 0 ? viewbox.ActualWidth / frame.Width : 1;
+    public Size FrameSize => new(frame.Width, frame.Height);
 
     public void ShowMessage(string text)
     {
@@ -91,8 +132,8 @@ public sealed class SlideCanvas : Border
         var sameSlide = Scene?.Name == sc?.Name;
         Scene = sc;
         StopIndex = stop;
-        if (!keepOverrides) Overrides.Clear();
-        if (!sameSlide) Selected.Clear();
+        if (!keepOverrides) { Overrides.Clear(); LineOverrides.Clear(); }
+        if (!sameSlide) { Selected.Clear(); pendingStrokes.Clear(); ghost = null; }
         if (sc?.Objects != null) Selected.RemoveAll(o => !sc.Objects.ContainsKey(o.ToString()));
         if (sc?.Stops is not { Count: > 0 })
         {
@@ -122,34 +163,68 @@ public sealed class SlideCanvas : Border
 
     HashSet<int> VisibleIds() => Stop?.Visible.Select(v => (int)v[0]).ToHashSet() ?? new();
 
+    bool IsLine(int oid) => Stop?.Lines?.ContainsKey(oid.ToString()) == true;
+
+    double[]? LineEnds(int oid)
+    {
+        if (LineOverrides.TryGetValue(oid, out var e)) return e;
+        if (Stop?.Lines != null && Stop.Lines.TryGetValue(oid.ToString(), out var l) && l.Length >= 4)
+        {
+            var p = PreviewOf(oid);
+            return new[] { l[0] + p.Offset.X, l[1] + p.Offset.Y, l[2] + p.Offset.X, l[3] + p.Offset.Y };
+        }
+        return null;
+    }
+
+    /// What the object is shown as now: its pending preview with the drag in progress on top.
+    Preview PreviewOf(int oid)
+    {
+        var p = Overrides.TryGetValue(oid, out var o) ? o : new Preview(new Vector());
+        if (p.Scale == 0) p.Scale = 1;
+        if (mode == Mode.Move && Selected.Contains(oid)) p.Offset += dragDelta;
+        if (mode == Mode.Resize && oid == dragOid) p.Scale *= dragScale;
+        return p;
+    }
+
+    bool Compositing => mode is Mode.Move or Mode.Resize or Mode.Endpoint || Overrides.Count > 0 || LineOverrides.Count > 0
+                        || Scene?.Optimistic == true;
+
     public void Redraw()
     {
         var st = Stop;
         if (st == null) return;
-        bool compositing = dragging || Overrides.Count > 0 || Scene?.Optimistic == true;
+        bool compositing = Compositing;
         exact.Source = Images.Load(st.Png);
         exact.Visibility = compositing ? Visibility.Hidden : Visibility.Visible;
         composite.Children.Clear();
         if (compositing)
         {
-            var bg = new Image { Source = Images.Load(st.Bg), Width = frame.Width, Height = frame.Height, Stretch = Stretch.Fill };
-            composite.Children.Add(bg);
+            composite.Children.Add(new Image { Source = Images.Load(st.Bg), Width = frame.Width, Height = frame.Height, Stretch = Stretch.Fill });
             foreach (var sp in st.Sprites.OrderBy(s => s.Z))
             {
+                if (LineOverrides.ContainsKey(sp.Oid) || (mode == Mode.Endpoint && sp.Oid == dragOid))
+                {
+                    AddLinePreview(sp.Oid);
+                    continue;
+                }
                 var img = new Image { Source = Images.Load(sp.File), Width = sp.W, Height = sp.H, Stretch = Stretch.Fill };
-                var off = Offset(sp.Oid);
+                var pv = PreviewOf(sp.Oid);
                 if (Scene?.Optimistic == true && st.Xforms != null && st.Xforms.TryGetValue(sp.Oid.ToString(), out var x) && x.Length == 6)
                 {
                     // a line attached to a moved object: its sprite mapped onto its new ends
                     Canvas.SetLeft(img, 0); Canvas.SetTop(img, 0);
                     var m = new Matrix(1, 0, 0, 1, sp.X, sp.Y) * new Matrix(x[0], x[1], x[2], x[3], x[4], x[5]);
-                    m.Translate(off.X, off.Y);
+                    m.Translate(pv.Offset.X, pv.Offset.Y);
                     img.RenderTransform = new MatrixTransform(m);
                 }
                 else
                 {
-                    Canvas.SetLeft(img, sp.X + off.X);
-                    Canvas.SetTop(img, sp.Y + off.Y);
+                    // scaled about the centre of the object's box (a group's sprites scale together about it)
+                    var c = st.Box(sp.Oid) is Rect b ? new Point(b.X + b.Width / 2, b.Y + b.Height / 2) : new Point(sp.X + sp.W / 2, sp.Y + sp.H / 2);
+                    var s = pv.Scale;
+                    img.Width = sp.W * s; img.Height = sp.H * s;
+                    Canvas.SetLeft(img, c.X + (sp.X - c.X) * s + pv.Offset.X);
+                    Canvas.SetTop(img, c.Y + (sp.Y - c.Y) * s + pv.Offset.Y);
                 }
                 composite.Children.Add(img);
             }
@@ -157,24 +232,43 @@ public sealed class SlideCanvas : Border
         DrawOverlay();
     }
 
-    Vector Offset(int oid)
+    void AddLinePreview(int oid)
     {
-        var v = Overrides.TryGetValue(oid, out var o) ? o : new Vector();
-        if (dragging && Selected.Contains(oid)) v += dragDelta;
-        return v;
+        if (LineEnds(oid) is not { } e) return;
+        var o = Scene?.Obj(oid);
+        var stroke = Stop?.Lines?.TryGetValue(oid.ToString(), out var l) == true && l.Length >= 5 ? Math.Max(1, l[4]) : 3;
+        composite.Children.Add(new Line
+        {
+            X1 = e[0], Y1 = e[1], X2 = e[2], Y2 = e[3], StrokeThickness = stroke, Stroke = BrushOf(o?.Color, Colors.White),
+            StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
+        });
     }
 
-    /// Where an object is drawn: its text frame if it has one, else its ink box; shifted with a drag.
+    static Brush BrushOf(string? hex, Color fallback)
+    {
+        try { if (hex != null && hex.StartsWith('#')) return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex)); } catch { }
+        return new SolidColorBrush(fallback);
+    }
+
+    /// Where an object is drawn: its text frame if it has one, else its ink box; moved and scaled with its preview.
     public Rect? BoxOf(int oid)
     {
         var st = Stop;
         if (st == null) return null;
+        if (LineOverrides.ContainsKey(oid) || (mode == Mode.Endpoint && oid == dragOid))
+        {
+            if (LineEnds(oid) is { } e) return new Rect(new Point(e[0], e[1]), new Point(e[2], e[3]));
+        }
         var b = Scene?.Obj(oid)?.FrameBox ?? st.Box(oid);
         if (b is not Rect r) return null;
-        var off = Offset(oid);
-        r.Offset(off);
-        return r;
+        var pv = PreviewOf(oid);
+        var c = new Point(r.X + r.Width / 2, r.Y + r.Height / 2) + pv.Offset;
+        return new Rect(c.X - r.Width * pv.Scale / 2, c.Y - r.Height * pv.Scale / 2, r.Width * pv.Scale, r.Height * pv.Scale);
     }
+
+    // ---------------------------------------------------------------- overlay
+
+    Brush Accent => (Brush)Application.Current.Resources["SelectionBrush"];
 
     void DrawOverlay()
     {
@@ -184,8 +278,6 @@ public sealed class SlideCanvas : Border
         var st = Stop;
         if (st == null || Scene == null) return;
         double t = 1.5 / Scale;
-        var accent = (Brush)Application.Current.Resources["SelectionBrush"];
-        // empty layout boxes: "Click to add title"
         if (Scene.Placeholders != null)
             foreach (var ph in Scene.Placeholders)
             {
@@ -207,20 +299,74 @@ public sealed class SlideCanvas : Border
                 Canvas.SetLeft(label, r.X); Canvas.SetTop(label, r.Y + r.Height / 2 - label.FontSize * 0.7);
                 overlay.Children.Add(label);
             }
-        if (hover is int h && !Selected.Contains(h) && BoxOf(h) is Rect hb)
+        // pen strokes waiting for their render
+        foreach (var s in pendingStrokes) overlay.Children.Add(Stroke(s));
+        if (mode == Mode.Pen && penPoints.Count > 1) overlay.Children.Add(Stroke(penPoints));
+        if (ghost is { } g)
+        {
+            var gi = new Image { Source = g.img, Width = g.r.Width, Height = g.r.Height, Opacity = 0.85, IsHitTestVisible = false };
+            Canvas.SetLeft(gi, g.r.X); Canvas.SetTop(gi, g.r.Y);
+            overlay.Children.Add(gi);
+        }
+        if (hover is int h && !Selected.Contains(h) && drawTool == null && BoxOf(h) is Rect hb)
             overlay.Children.Add(Outline(hb, new SolidColorBrush(Color.FromArgb(0xa0, 0x4c, 0x8d, 0xff)), t));
         foreach (var oid in Selected)
-            if (BoxOf(oid) is Rect sb)
+        {
+            if (Selected.Count == 1 && IsLine(oid) && LineEnds(oid) is { } e)
             {
-                overlay.Children.Add(Outline(sb, accent, t * 1.4));
-                foreach (var (hx, hy) in new[] { (sb.Left, sb.Top), (sb.Right, sb.Top), (sb.Left, sb.Bottom), (sb.Right, sb.Bottom) })
-                {
-                    double s = 7 / Scale;
-                    var k = new Rectangle { Width = s, Height = s, Fill = Brushes.White, Stroke = accent, StrokeThickness = t, IsHitTestVisible = false };
-                    Canvas.SetLeft(k, hx - s / 2); Canvas.SetTop(k, hy - s / 2);
-                    overlay.Children.Add(k);
-                }
+                overlay.Children.Add(new Line { X1 = e[0], Y1 = e[1], X2 = e[2], Y2 = e[3], Stroke = Accent, StrokeThickness = t, Opacity = 0.6, IsHitTestVisible = false });
+                overlay.Children.Add(Handle(e[0], e[1], t, round: true));
+                overlay.Children.Add(Handle(e[2], e[3], t, round: true));
+                continue;
             }
+            if (BoxOf(oid) is not Rect sb) continue;
+            overlay.Children.Add(Outline(sb, Accent, t * 1.4));
+            if (Selected.Count == 1)
+                foreach (var c in Corners(sb)) overlay.Children.Add(Handle(c.X, c.Y, t, round: false));
+        }
+        if (band is Rect bd)
+        {
+            if (mode == Mode.Marquee)
+                overlay.Children.Add(Placed(new Rectangle
+                {
+                    Width = bd.Width, Height = bd.Height, Stroke = Accent, StrokeThickness = t,
+                    Fill = new SolidColorBrush(Color.FromArgb(0x28, 0x4c, 0x8d, 0xff)), IsHitTestVisible = false,
+                }, bd.X, bd.Y));
+            else if (mode == Mode.Draw && drawTool != null)
+                overlay.Children.Add(DrawPreview(drawTool, downAt, bandEnd, t));
+        }
+    }
+
+    Point bandEnd;
+
+    UIElement DrawPreview(string tool, Point a, Point b, double t)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(0xff, 0xff, 0xff));
+        if (tool is "line" or "arrow" or "darrow")
+            return new Line { X1 = a.X, Y1 = a.Y, X2 = b.X, Y2 = b.Y, Stroke = brush, StrokeThickness = 4, IsHitTestVisible = false };
+        var r = new Rect(a, b);
+        Shape s = tool == "ellipse" ? new Ellipse() : new Rectangle();
+        s.Width = r.Width; s.Height = r.Height; s.Stroke = brush; s.StrokeThickness = 4; s.IsHitTestVisible = false;
+        return Placed(s, r.X, r.Y);
+    }
+
+    Polyline Stroke(List<Point> pts) => new()
+    {
+        Points = new PointCollection(pts), Stroke = new SolidColorBrush(PenColor), StrokeThickness = 4,
+        StrokeLineJoin = PenLineJoin.Round, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
+        IsHitTestVisible = false,
+    };
+
+    static UIElement Placed(FrameworkElement e, double x, double y) { Canvas.SetLeft(e, x); Canvas.SetTop(e, y); return e; }
+
+    static Point[] Corners(Rect r) => new[] { r.TopLeft, r.TopRight, r.BottomLeft, r.BottomRight };
+
+    UIElement Handle(double x, double y, double t, bool round)
+    {
+        double s = 8 / Scale;
+        Shape k = round ? new Ellipse() : new Rectangle();
+        k.Width = s; k.Height = s; k.Fill = Brushes.White; k.Stroke = Accent; k.StrokeThickness = t; k.IsHitTestVisible = false;
+        return Placed(k, x - s / 2, y - s / 2);
     }
 
     static Rectangle Outline(Rect r, Brush b, double t)
@@ -231,12 +377,27 @@ public sealed class SlideCanvas : Border
         return rect;
     }
 
+    // ---------------------------------------------------------------- insert previews
+
+    /// Shows a new element where it will appear while its insert renders (centre offset from the frame centre).
+    public void SetGhost(BitmapSource img, double cx, double cy, double w, double h)
+    {
+        ghost = (img, new Rect(frame.Width / 2 + cx - w / 2, frame.Height / 2 + cy - h / 2, w, h));
+        DrawOverlay();
+    }
+
+    public void ClearGhost() { ghost = null; DrawOverlay(); }
+
+    public void DropPendingStroke() { if (pendingStrokes.Count > 0) { pendingStrokes.RemoveAt(0); DrawOverlay(); } }
+
+    // ---------------------------------------------------------------- hit testing and selection
+
     /// The object under a frame-pixel point: the smallest box containing it, the topmost on a tie.
     public int? HitTest(Point p)
     {
         var st = Stop;
         if (st == null) return null;
-        var z = st.Sprites.ToDictionary(s => s.Oid, s => s.Z);
+        var z = st.Sprites.GroupBy(s => s.Oid).ToDictionary(g => g.Key, g => g.Max(s => s.Z));
         int? best = null;
         double bestArea = double.MaxValue, bestZ = double.MinValue;
         double slop = 4 / Scale;
@@ -250,6 +411,24 @@ public sealed class SlideCanvas : Border
             if (area < bestArea - 1 || (Math.Abs(area - bestArea) <= 1 && zz > bestZ)) { best = oid; bestArea = area; bestZ = zz; }
         }
         return best;
+    }
+
+    /// A handle of the single selected object under `p`: (oid, corner index 0-3) for a box, (oid, 10 + end) for a line.
+    (int oid, int which)? HandleAt(Point p)
+    {
+        if (Selected.Count != 1) return null;
+        var oid = Selected[0];
+        double r = 7 / Scale;
+        if (IsLine(oid) && LineEnds(oid) is { } e)
+        {
+            if ((p - new Point(e[0], e[1])).Length <= r) return (oid, 10);
+            if ((p - new Point(e[2], e[3])).Length <= r) return (oid, 11);
+            return null;
+        }
+        if (BoxOf(oid) is not Rect b) return null;
+        var cs = Corners(b);
+        for (int i = 0; i < 4; i++) if ((p - cs[i]).Length <= r) return (oid, i);
+        return null;
     }
 
     /// The members of `oid`'s group (an object outside a group alone).
@@ -272,17 +451,43 @@ public sealed class SlideCanvas : Border
 
     public void SelectAll() => Select(VisibleIds());
 
+    // ---------------------------------------------------------------- mouse
+
     void OnDown(object sender, MouseButtonEventArgs e)
     {
         Focus();
-        if (editor != null) { CommitEdit(); }
+        if (editor != null) CommitEdit();
         var p = e.GetPosition(frame);
+        downAt = p;
+        e.Handled = true;
+        if (drawTool == "pen")
+        {
+            mode = Mode.Pen;
+            penPoints.Clear(); penPoints.Add(p);
+            overlay.CaptureMouse();
+            return;
+        }
+        if (drawTool != null)
+        {
+            mode = Mode.Draw;
+            bandEnd = p; band = new Rect(p, p);
+            overlay.CaptureMouse();
+            return;
+        }
+        if (HandleAt(p) is { } hd)
+        {
+            dragOid = hd.oid;
+            if (hd.which >= 10) { mode = Mode.Endpoint; dragEnd = hd.which - 10; LineOverrides[hd.oid] = LineEnds(hd.oid)!.ToArray(); }
+            else { mode = Mode.Resize; dragScale = 1; dragBox = BoxOf(hd.oid)!.Value; }
+            overlay.CaptureMouse();
+            return;
+        }
         var hit = HitTest(p);
         if (e.ClickCount == 2)
         {
             // a double-click retypes text and formulas; on anything else it is an ordinary press (a quick drag)
-            if (hit is int h && Scene?.Obj(h) is { } o && (o.IsText || o.Kind == "table")) { BeginTextEdit(h); e.Handled = true; return; }
-            if (hit == null && PlaceholderAt(p) is { } ph) { BeginPlaceholderEdit(ph); e.Handled = true; return; }
+            if (hit is int h && Scene?.Obj(h) is { } o && (o.IsText || o.Kind == "table")) { BeginTextEdit(h); return; }
+            if (hit == null && PlaceholderAt(p) is { } ph) { BeginPlaceholderEdit(ph); return; }
         }
         if (hit is int oid)
         {
@@ -294,7 +499,7 @@ public sealed class SlideCanvas : Border
                 SelectionChanged?.Invoke();
             }
             else if (!Selected.Contains(oid)) Select(members);
-            downAt = p;
+            mode = Mode.Press;
             dragDelta = new Vector();
             overlay.CaptureMouse();
         }
@@ -303,8 +508,14 @@ public sealed class SlideCanvas : Border
             Select(Array.Empty<int>());
             BeginPlaceholderEdit(ph);
         }
-        else Select(Array.Empty<int>());
-        e.Handled = true;
+        else
+        {
+            // empty space: drag a marquee to select what it encloses
+            if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) Select(Array.Empty<int>());
+            mode = Mode.Marquee;
+            band = new Rect(p, p);
+            overlay.CaptureMouse();
+        }
     }
 
     Placeholder? PlaceholderAt(Point p) => Scene?.Placeholders?.FirstOrDefault(ph => ph.Rect.Contains(p));
@@ -313,16 +524,52 @@ public sealed class SlideCanvas : Border
     {
         var p = e.GetPosition(frame);
         // the button went up somewhere else (another window took the release): end the press here
-        if (downAt != null && e.LeftButton != MouseButtonState.Pressed) { EndPress(commit: dragging); return; }
-        if (downAt is Point d && e.LeftButton == MouseButtonState.Pressed && Selected.Count > 0)
+        if (mode != Mode.None && e.LeftButton != MouseButtonState.Pressed) { EndPress(commit: true); return; }
+        switch (mode)
         {
-            var delta = p - d;
-            if (!dragging && delta.Length * Scale < 3) return;
-            dragging = true;
-            dragDelta = delta;
-            if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))     // Shift constrains to horizontal or vertical
-                dragDelta = Math.Abs(delta.X) > Math.Abs(delta.Y) ? new Vector(delta.X, 0) : new Vector(0, delta.Y);
-            Redraw();
+            case Mode.Press or Mode.Move when Selected.Count > 0:
+            {
+                var delta = p - downAt;
+                if (mode == Mode.Press && delta.Length * Scale < 3) return;
+                mode = Mode.Move;
+                dragDelta = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)     // Shift: horizontal or vertical only
+                    ? (Math.Abs(delta.X) > Math.Abs(delta.Y) ? new Vector(delta.X, 0) : new Vector(0, delta.Y))
+                    : delta;
+                Redraw();
+                return;
+            }
+            case Mode.Resize:
+            {
+                var c = new Point(dragBox.X + dragBox.Width / 2, dragBox.Y + dragBox.Height / 2);
+                var d0 = Math.Max(1, Math.Sqrt(dragBox.Width * dragBox.Width + dragBox.Height * dragBox.Height) / 2);
+                dragScale = Math.Max(0.05, (p - c).Length / d0);
+                Redraw();
+                return;
+            }
+            case Mode.Endpoint:
+            {
+                var ends = LineOverrides[dragOid];
+                if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))    // Shift: horizontal, vertical or 45°
+                    p = Snap45(new Point(ends[dragEnd == 0 ? 2 : 0], ends[dragEnd == 0 ? 3 : 1]), p);
+                ends[dragEnd * 2] = p.X; ends[dragEnd * 2 + 1] = p.Y;
+                Redraw();
+                return;
+            }
+            case Mode.Marquee or Mode.Draw:
+                if (mode == Mode.Draw && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && drawTool is "line" or "arrow" or "darrow")
+                    p = Snap45(downAt, p);
+                bandEnd = p;
+                band = new Rect(downAt, p);
+                DrawOverlay();
+                return;
+            case Mode.Pen:
+                if ((p - penPoints[^1]).Length * Scale >= 1.5) { penPoints.Add(p); DrawOverlay(); }
+                return;
+        }
+        if (drawTool != null) return;
+        if (HandleAt(p) is { } hd)
+        {
+            Cursor = hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
             return;
         }
         var h = HitTest(p);
@@ -330,34 +577,126 @@ public sealed class SlideCanvas : Border
         if (h != hover) { hover = h; DrawOverlay(); }
     }
 
+    static Point Snap45(Point a, Point b)
+    {
+        var v = b - a;
+        var ang = Math.Round(Math.Atan2(v.Y, v.X) / (Math.PI / 4)) * (Math.PI / 4);
+        var len = v.Length;
+        return new Point(a.X + Math.Cos(ang) * len, a.Y + Math.Sin(ang) * len);
+    }
+
     void OnUp(object sender, MouseButtonEventArgs e) => EndPress(commit: true);
 
     void EndPress(bool commit)
     {
+        var m = mode;
+        mode = Mode.None;
         if (overlay.IsMouseCaptured) overlay.ReleaseMouseCapture();
-        if (dragging && !commit) { dragging = false; dragDelta = new Vector(); Redraw(); }
-        if (dragging)
+        switch (m)
         {
-            var delta = dragDelta;
-            foreach (var oid in Selected)
-                Overrides[oid] = (Overrides.TryGetValue(oid, out var o) ? o : new Vector()) + delta;
-            dragging = false;
-            dragDelta = new Vector();
-            Redraw();
-            if (Math.Abs(delta.X) > 0.01 || Math.Abs(delta.Y) > 0.01) MoveCommitted?.Invoke(Selected.ToList(), delta.X, delta.Y);
+            case Mode.Move:
+            {
+                var delta = dragDelta;
+                dragDelta = new Vector();
+                if (commit && delta.Length > 0.01)
+                {
+                    foreach (var oid in Selected)
+                    {
+                        var p = Overrides.TryGetValue(oid, out var o) ? o : new Preview(new Vector());
+                        if (p.Scale == 0) p.Scale = 1;
+                        p.Offset += delta;
+                        Overrides[oid] = p;
+                    }
+                    Redraw();
+                    MoveCommitted?.Invoke(Selected.ToList(), delta.X, delta.Y);
+                }
+                else Redraw();
+                break;
+            }
+            case Mode.Resize:
+            {
+                var s = dragScale;
+                dragScale = 1;
+                if (commit && Math.Abs(s - 1) > 0.002)
+                {
+                    var p = Overrides.TryGetValue(dragOid, out var o) ? o : new Preview(new Vector());
+                    p.Scale = (p.Scale == 0 ? 1 : p.Scale) * s;
+                    Overrides[dragOid] = p;
+                    Redraw();
+                    ResizeCommitted?.Invoke(dragOid, s);
+                }
+                else Redraw();
+                break;
+            }
+            case Mode.Endpoint:
+            {
+                var ends = LineOverrides[dragOid];
+                var orig = Stop?.Lines?.GetValueOrDefault(dragOid.ToString());
+                bool moved = orig == null || Math.Abs(ends[0] - orig[0]) + Math.Abs(ends[1] - orig[1]) + Math.Abs(ends[2] - orig[2]) + Math.Abs(ends[3] - orig[3]) > 1;
+                if (commit && moved) { Redraw(); EndpointsCommitted?.Invoke(dragOid, ends.ToArray()); }
+                else { LineOverrides.Remove(dragOid); Redraw(); }
+                break;
+            }
+            case Mode.Marquee:
+            {
+                var r = band;
+                band = null;
+                if (r is Rect b && b.Width * Scale >= 3 && b.Height * Scale >= 3)
+                {
+                    var inside = Stop?.Visible.Select(v => (int)v[0]).Where(o => BoxOf(o) is Rect ob && b.Contains(ob)).SelectMany(WithGroup).ToList() ?? new();
+                    Select(Selected.Concat(inside));
+                }
+                else DrawOverlay();
+                break;
+            }
+            case Mode.Draw:
+            {
+                var tool = drawTool;
+                var a = downAt; var b = bandEnd;
+                band = null;
+                drawTool = null;
+                Cursor = Cursors.Arrow;
+                DrawToolChanged?.Invoke();
+                DrawOverlay();
+                if (commit && tool != null && (b - a).Length * Scale >= 6) DrawCommitted?.Invoke(tool, a, b);
+                break;
+            }
+            case Mode.Pen:
+            {
+                var pts = penPoints.ToList();
+                penPoints.Clear();
+                double length = 0;
+                for (int i = 1; i < pts.Count; i++) length += (pts[i] - pts[i - 1]).Length;
+                if (commit && pts.Count >= 2 && length * Scale >= 4)
+                {
+                    pendingStrokes.Add(pts);
+                    PenCommitted?.Invoke(pts);
+                }
+                DrawOverlay();                // the pen stays in hand for the next stroke (Esc puts it down)
+                break;
+            }
         }
-        downAt = null;
     }
 
     /// Shifts the selection by hand (arrow-key nudges) until its render lands.
     public void Nudge(double dx, double dy)
     {
         foreach (var oid in Selected)
-            Overrides[oid] = (Overrides.TryGetValue(oid, out var o) ? o : new Vector()) + new Vector(dx, dy);
+        {
+            var p = Overrides.TryGetValue(oid, out var o) ? o : new Preview(new Vector());
+            if (p.Scale == 0) p.Scale = 1;
+            p.Offset += new Vector(dx, dy);
+            Overrides[oid] = p;
+        }
         Redraw();
     }
 
-    public void ClearOverride(int oid) { if (Overrides.Remove(oid)) Redraw(); }
+    public void ClearOverride(int oid)
+    {
+        var a = Overrides.Remove(oid);
+        var b = LineOverrides.Remove(oid);
+        if (a || b) Redraw();
+    }
 
     // ---------------------------------------------------------------- text editing in place
 
@@ -378,8 +717,7 @@ public sealed class SlideCanvas : Border
     {
         CancelEdit();
         editingPlaceholder = ph;
-        var r = ph.Rect;
-        OpenEditor(r, "", Math.Clamp(ph.Size * 0.9, 14, 90), ph.Prompt + " · Enter applies · Esc cancels", false);
+        OpenEditor(ph.Rect, "", Math.Clamp(ph.Size * 0.9, 14, 90), ph.Prompt + " · Enter applies · Esc cancels", false);
         DrawOverlay();
     }
 
@@ -389,7 +727,7 @@ public sealed class SlideCanvas : Border
         {
             Text = text, FontSize = fontPx, AcceptsReturn = true, AcceptsTab = false, TextWrapping = TextWrapping.Wrap,
             Background = new SolidColorBrush(Color.FromArgb(0xee, 0x1e, 0x1f, 0x24)), Foreground = Brushes.White,
-            CaretBrush = Brushes.White, BorderBrush = (Brush)Application.Current.Resources["SelectionBrush"],
+            CaretBrush = Brushes.White, BorderBrush = Accent,
             BorderThickness = new Thickness(2 / Scale), Width = r.Width, MinHeight = r.Height, Padding = new Thickness(4),
             ToolTip = tip, FontFamily = mono ? new FontFamily("Cascadia Mono, Consolas") : new FontFamily("Segoe UI"),
         };
