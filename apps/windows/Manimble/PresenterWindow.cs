@@ -38,6 +38,15 @@ public sealed class PresenterWindow : Window
         Background = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x16));
         WindowState = WindowState.Maximized;
         live.Child = new Rectangle16x9(new VisualBrush(show.Stage) { Stretch = Stretch.Uniform });
+        // the current slide: a click opens the hyperlink under it, else advances
+        live.Cursor = Cursors.Arrow;
+        live.MouseLeftButtonDown += (_, e) =>
+        {
+            if (LiveLink(e) is { } url) Tools.OpenUrl(url);
+            else show.Next();
+            e.Handled = true;
+        };
+        live.MouseMove += (_, e) => live.Cursor = LiveLink(e) != null ? Cursors.Hand : Cursors.Arrow;
 
         var grid = new Grid { Margin = new Thickness(20) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(3, GridUnitType.Star) });
@@ -153,6 +162,19 @@ public sealed class PresenterWindow : Window
         }
         state.Text = show.IsBlackedOut ? "The audience sees a black screen (B)" : show.IsFinished ? "Build done" : "Playing";
     }
+
+    /// The hyperlink under the pointer in the mirror of the show: the mirror shows the whole show window (its stage)
+    /// fitted into a 16:9 area, so the point is first taken back to the show's own coordinates.
+    string? LiveLink(MouseEventArgs e)
+    {
+        if (live.Child is not Rectangle16x9 r || show.Stage is not UIElement stage) return null;
+        Size area = r.Area.RenderSize, size = stage.RenderSize;
+        if (size.Width <= 0 || size.Height <= 0 || area.Width <= 0 || area.Height <= 0) return null;
+        var k = Math.Min(area.Width / size.Width, area.Height / size.Height);
+        var p = e.GetPosition(r.Area);
+        var q = new Point((p.X - (area.Width - size.Width * k) / 2) / k, (p.Y - (area.Height - size.Height * k) / 2) / k);
+        return show.LinkAt(q, size);
+    }
 }
 
 /// A 16:9 area filled with a brush: the presenter's mirror of the show keeps the slide's proportions.
@@ -160,6 +182,8 @@ sealed class Rectangle16x9 : Decorator
 {
     readonly System.Windows.Shapes.Rectangle rect = new();
     public Rectangle16x9(Brush b) { rect.Fill = b; Child = rect; }
+    /// The filled area (placed at the top left of the decorator).
+    public FrameworkElement Area => rect;
     protected override Size MeasureOverride(Size s) => Fit(s);
     protected override Size ArrangeOverride(Size s) { rect.Arrange(new Rect(Fit(s))); return s; }
     static Size Fit(Size s)

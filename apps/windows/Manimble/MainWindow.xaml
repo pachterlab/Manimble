@@ -93,6 +93,8 @@
         <MenuItem Header="Slide _Numbers…" Click="SlideNumbers_Click"/>
       </MenuItem>
       <MenuItem Header="F_ormat">
+        <MenuItem Header="_Hyperlink…" InputGestureText="Ctrl+K" Click="Hyperlink_Click"/>
+        <Separator/>
         <MenuItem Header="_Theme" x:Name="ThemeMenu"/>
         <MenuItem Header="_Background…" Click="Background_Click"/>
         <Separator/>
@@ -322,6 +324,10 @@
           <TabItem Header="Speaker Notes" x:Name="NotesTab">
             <TextBox x:Name="NotesBox" AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0" Margin="2,2,2,4"
                      VerticalScrollBarVisibility="Auto" LostKeyboardFocus="NotesBox_LostFocus"/>
+          </TabItem>
+          <TabItem Header="Alt Text" x:Name="AltTextTab" ToolTip="A description of this slide for people who cannot see it">
+            <TextBox x:Name="AltTextBox" AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0" Margin="2,2,2,4"
+                     VerticalScrollBarVisibility="Auto" LostKeyboardFocus="AltTextBox_LostFocus"/>
           </TabItem>
           <TabItem Header="Terminal" x:Name="TerminalTab" ToolTip="A shell in the deck's working copy, for coding agents such as Claude Code (Ctrl+`)">
             <ContentControl x:Name="TerminalHost" Focusable="False"/>

@@ -190,6 +190,7 @@ public sealed class DeckSlide
     public string? Error { get; set; }
     public string? Notes { get; set; }
     public List<string>? BuildNotes { get; set; }
+    public List<List<LinkRegion>>? Links { get; set; }     // each page's clickable hyperlinks
 }
 
 public sealed class DeckPages
@@ -228,4 +229,46 @@ public sealed class DependencyReport
     public int ScannedScenes { get; set; }
     public int TotalScenes { get; set; }
     public List<DependencyFailure> Failures { get; set; } = new();
+}
+
+/// A hyperlink's clickable area on a rendered page: fractions of the slide, y from the top (the engine sends
+/// [x0, x1, y0, y1, url]). Text with a link opens it when clicked in a show or Presenter View.
+[System.Text.Json.Serialization.JsonConverter(typeof(LinkRegionConverter))]
+public sealed class LinkRegion
+{
+    public double X0, X1, Y0, Y1;
+    public string Url = "";
+
+    /// The link under a point given as fractions of the slide; the last one drawn wins where linked texts overlap.
+    public static string? At(IEnumerable<LinkRegion>? regions, Point f) =>
+        regions?.LastOrDefault(r => r.X0 <= f.X && f.X <= r.X1 && r.Y0 <= f.Y && f.Y <= r.Y1)?.Url;
+
+    /// A point of an area showing the slide letterboxed (Stretch.Uniform) as fractions of the slide, or null off it.
+    public static Point? Fraction(Point p, Size area, double aspect)
+    {
+        if (area.Width <= 0 || area.Height <= 0 || aspect <= 0) return null;
+        double w = area.Width, h = w / aspect;
+        if (h > area.Height) { h = area.Height; w = h * aspect; }
+        double x = (p.X - (area.Width - w) / 2) / w, y = (p.Y - (area.Height - h) / 2) / h;
+        return x is >= 0 and <= 1 && y is >= 0 and <= 1 ? new Point(x, y) : null;
+    }
+}
+
+public sealed class LinkRegionConverter : System.Text.Json.Serialization.JsonConverter<LinkRegion>
+{
+    public override LinkRegion Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o)
+    {
+        var a = JsonSerializer.Deserialize<JsonElement>(ref r, o);
+        return new LinkRegion
+        {
+            X0 = a[0].GetDouble(), X1 = a[1].GetDouble(), Y0 = a[2].GetDouble(), Y1 = a[3].GetDouble(), Url = a[4].GetString() ?? "",
+        };
+    }
+
+    public override void Write(Utf8JsonWriter w, LinkRegion v, JsonSerializerOptions o)
+    {
+        w.WriteStartArray();
+        w.WriteNumberValue(v.X0); w.WriteNumberValue(v.X1); w.WriteNumberValue(v.Y0); w.WriteNumberValue(v.Y1); w.WriteStringValue(v.Url);
+        w.WriteEndArray();
+    }
 }

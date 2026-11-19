@@ -32,6 +32,7 @@ public sealed class PresentDeck
 {
     public List<PresentSlide> Slides { get; set; } = new();
     public List<int> Sections { get; set; } = new();
+    public Dictionary<string, List<LinkRegion>>? Links { get; set; }   // by scene index: the slide's hyperlinks
 }
 
 /// The animated show (the Mac's AnimatedPlayer, the native replacement for `manim-slides present`): plays the clips
@@ -114,9 +115,18 @@ public sealed class AnimatedShowWindow : Window
             Show(i < 0 ? 0 : i, Mode.Play);
         };
         KeyDown += OnKey;
-        MouseLeftButtonDown += (_, _) => Next();
+        // a click opens the hyperlink under it, else advances
+        MouseLeftButtonDown += (_, e) =>
+        {
+            if (LinkAt(e.GetPosition(media), media.RenderSize) is { } url) Tools.OpenUrl(url);
+            else Next();
+        };
         MouseRightButtonDown += (_, _) => Previous();
-        MouseMove += (_, _) => { Cursor = Cursors.Arrow; hideCursor.Stop(); hideCursor.Start(); };
+        MouseMove += (_, e) =>
+        {
+            Cursor = LinkAt(e.GetPosition(media), media.RenderSize) != null ? Cursors.Hand : Cursors.Arrow;
+            hideCursor.Stop(); hideCursor.Start();
+        };
         hideCursor.Tick += (_, _) => { hideCursor.Stop(); Cursor = Cursors.None; };
         Cursor = Cursors.None;
         SizeChanged += (_, _) => UpdateChrome();
@@ -236,6 +246,25 @@ public sealed class AnimatedShowWindow : Window
         else Show(index + 1, Mode.Play);
     }
     public void Previous() { if (index > 0) Show(index - 1, Mode.End); }
+
+    /// The width/height of the slide on screen (the clip's, else the still's, else 16:9).
+    double Aspect
+    {
+        get
+        {
+            if (front >= 0 && players[front].NaturalVideoWidth > 0) return (double)players[front].NaturalVideoWidth / players[front].NaturalVideoHeight;
+            if (still.Source is System.Windows.Media.Imaging.BitmapSource b && b.PixelHeight > 0) return (double)b.PixelWidth / b.PixelHeight;
+            return 16.0 / 9;
+        }
+    }
+
+    /// The hyperlink at point `p` of an area of size `area` showing the slide (this window, or Presenter View's mirror).
+    public string? LinkAt(Point p, Size area)
+    {
+        if (Current is not { } s || IsBlackedOut || deck.Links == null) return null;
+        if (!deck.Links.TryGetValue(s.SceneIndex.ToString(), out var regions) || regions.Count == 0) return null;
+        return LinkRegion.Fraction(p, area, Aspect) is { } f ? LinkRegion.At(regions, f) : null;
+    }
     public void Go(int i) => Show(i, Mode.Play);
     void Replay() => Show(index, Mode.Play);
     void Reverse() => Show(index, Mode.Reverse);

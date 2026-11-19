@@ -76,6 +76,46 @@ public static class Dialogs
         return w.ShowDialog() == true && result?.Trim().Length > 0 ? result : null;
     }
 
+    /// Format ▸ Hyperlink…: the URL a text opens when it is clicked in a show. Null when cancelled, "" to remove.
+    public static string? Hyperlink(Window owner, string? current)
+    {
+        var w = Make(owner, current == null ? "Add Hyperlink" : "Edit Hyperlink", 440);
+        string? result = null;
+        var box = new TextBox { Text = current ?? "", Padding = new Thickness(4, 3, 4, 3) };
+        var buttons = Buttons(w, "OK", () => { result = NormalizedLink(box.Text); w.DialogResult = true; });
+        if (current != null)
+        {
+            var remove = new Button { Content = "Remove Link", MinWidth = 90, Margin = new Thickness(0, 0, 0, 0), Padding = new Thickness(10, 4, 10, 4) };
+            remove.Click += (_, _) => { result = ""; w.DialogResult = true; };
+            buttons.Children.Insert(0, remove);
+        }
+        w.Content = new StackPanel
+        {
+            Margin = new Thickness(18),
+            Children =
+            {
+                new TextBlock { Text = "Clicking this text in a slideshow or Presenter View opens the link.", Margin = new Thickness(0, 0, 0, 8), Opacity = 0.8, TextWrapping = TextWrapping.Wrap },
+                box, buttons,
+            },
+        };
+        w.Loaded += (_, _) => { box.Focus(); box.SelectAll(); };
+        return w.ShowDialog() == true ? result : null;
+    }
+
+    /// What was typed, as a URL to open: a bare "example.com" gets https://, a typed scheme (mailto:, file:, …)
+    /// stays, and a Windows path becomes a file: URL.
+    public static string NormalizedLink(string s)
+    {
+        var t = s.Trim();
+        if (t.Length == 0) return "";
+        if (System.Text.RegularExpressions.Regex.IsMatch(t, @"^[A-Za-z]:[\\/]") || t.StartsWith(@"\\"))
+        {
+            try { return new Uri(t).AbsoluteUri; } catch { return t; }
+        }
+        if (System.Text.RegularExpressions.Regex.IsMatch(t, "^[A-Za-z][A-Za-z0-9+.-]*:")) return t;
+        return "https://" + t;
+    }
+
     static string LastLine(string s) => s.Split('\n').Where(l => l.Trim().Length > 0).LastOrDefault()?.Trim() ?? s;
 
     /// Rows and columns of a new table. Null when cancelled.

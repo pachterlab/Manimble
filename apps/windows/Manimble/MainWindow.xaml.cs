@@ -291,6 +291,7 @@ public partial class MainWindow : Window
         suppressSource = true; SourceEditor.Text = ""; suppressSource = false;
         sourceBase = null; SourceLoc.Text = ""; SourceError.Visibility = Visibility.Collapsed;
         NotesBox.Text = "";
+        AltTextBox.Text = "";
         canvas.SetScene(null, 0);
         WelcomePanel.Visibility = Visibility.Collapsed;
         canvas.ShowMessage("Rendering…");
@@ -617,6 +618,7 @@ public partial class MainWindow : Window
         stopIndex = keepStop ? Math.Min(stopIndex, sc.Stops.Count - 1) : 0;
         canvas.SetScene(sc, stopIndex, keepOverrides);
         if (!NotesBox.IsKeyboardFocusWithin) NotesBox.Text = sc.Notes ?? "";
+        if (!AltTextBox.IsKeyboardFocusWithin) AltTextBox.Text = sc.AltText ?? "";
         ShowSource(sc, null);
         RebuildBuilds();
         RebuildInspector();
@@ -947,6 +949,36 @@ public partial class MainWindow : Window
             if (r?.Ok == true) Toast("Saved the speaker notes"); else Toast(r?.Error ?? "Could not save the notes", error: true);
             await ReloadState();
         });
+    }
+
+    /// The Alt Text tab: `alt_text = "..."` on the slide's class, a description for people who cannot see it.
+    void AltTextBox_LostFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (scene == null || sceneName == null || AltTextBox.Text.Trim() == (scene.AltText ?? "").Trim()) return;
+        var name = sceneName; var text = AltTextBox.Text.Trim();
+        scene.AltText = text;
+        Submit(async () =>
+        {
+            var r = await engine.TryCall<EditResult>("alt_text", new JsonObject { ["op"] = "set", ["scene"] = name, ["text"] = text });
+            if (r?.Ok == true) Toast(text.Length > 0 ? "Saved the alt text" : "Removed the alt text");
+            else Toast(r?.Error ?? "Could not save the alt text", error: true);
+            await ReloadState();
+        });
+    }
+
+    // ================================================================ hyperlinks
+
+    /// Format ▸ Hyperlink… (Ctrl+K) and the right-click menu: the URL a text opens when clicked in a show.
+    void Hyperlink_Click(object sender, RoutedEventArgs e)
+    {
+        if (Single is not int s || SelectedObj is not { } o || (o.Kind != "text" && o.Kind != "tex"))
+        {
+            Toast("Select a text or formula to link");
+            return;
+        }
+        var current = o.Format?.Link;
+        if (Dialogs.Hyperlink(this, current) is not { } url || url == (current ?? "")) return;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "link", ["url"] = url }));
     }
 
     // ================================================================ inspector
@@ -1280,6 +1312,8 @@ public partial class MainWindow : Window
         else
         {
             if (o is { } obj && (obj.IsText || obj.Kind == "table")) Add(obj.Kind == "tex" ? "Edit LaTeX" : "Edit Text", () => canvas.BeginTextEdit(sel[0]), gesture: "Enter");
+            if (o is { Kind: "text" or "tex" } lo)
+                Add(lo.Format?.Link == null ? "Add Hyperlink…" : "Edit Hyperlink…", () => Hyperlink_Click(this, new RoutedEventArgs()), gesture: "Ctrl+K");
             Add("Delete", DeleteSelection, gesture: "Del");
             m.Items.Add(new Separator());
             Add("Bring to Front", () => ArrangeSelection("front"), gesture: "Ctrl+Shift+]");
@@ -1906,6 +1940,7 @@ public partial class MainWindow : Window
         if (ctrl && !shift && key == Key.B) { ToggleBold(); e.Handled = true; return; }
         if (ctrl && key == Key.I && !shift) { ToggleItalic(); e.Handled = true; return; }
         if (ctrl && key == Key.U) { Decorate("underline"); e.Handled = true; return; }
+        if (ctrl && key == Key.K) { Hyperlink_Click(sender, e); e.Handled = true; return; }
         if (ctrl && !shift && key == Key.G) { GroupSelection(); e.Handled = true; return; }
         if (ctrl && shift && key == Key.G) { UngroupSelection(); e.Handled = true; return; }
         if (ctrl && key == Key.OemCloseBrackets) { ArrangeSelection(shift ? "front" : "forward"); e.Handled = true; return; }

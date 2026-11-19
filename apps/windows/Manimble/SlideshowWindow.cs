@@ -48,9 +48,14 @@ public sealed class SlideshowWindow : Window
         g.Children.Add(info);
         Content = g;
         KeyDown += OnKey;
-        MouseLeftButtonDown += (_, _) => Step(+1);
+        // a click opens the hyperlink under it, else advances
+        MouseLeftButtonDown += (_, e) => { if (LinkAt(e.GetPosition(this)) is { } url) Tools.OpenUrl(url); else Step(+1); };
         MouseRightButtonDown += (_, _) => Step(-1);
-        MouseMove += (_, _) => { Cursor = Cursors.Arrow; hideCursor.Stop(); hideCursor.Start(); };
+        MouseMove += (_, e) =>
+        {
+            Cursor = LinkAt(e.GetPosition(this)) != null ? Cursors.Hand : Cursors.Arrow;
+            hideCursor.Stop(); hideCursor.Start();
+        };
         hideCursor.Tick += (_, _) => { hideCursor.Stop(); Cursor = Cursors.None; };
         Loaded += async (_, _) => await Fetch(startScene, 3, first: true);
         Closed += (_, _) => { if (open == this) open = null; };
@@ -102,6 +107,14 @@ public sealed class SlideshowWindow : Window
             image.Source = black ? null : Images.Load(s.Pages[page]);
         }
         info.Text = $"{slide + 1} / {deck.Count}" + (s.Pages.Count > 1 ? $" · {page + 1}/{s.Pages.Count}" : "");
+    }
+
+    string? LinkAt(Point p)
+    {
+        if (black || slide >= deck.Count || image.Source is not System.Windows.Media.Imaging.BitmapSource b || b.PixelHeight == 0) return null;
+        var regions = deck[slide].Links?.ElementAtOrDefault(page);
+        if (regions == null || regions.Count == 0) return null;
+        return LinkRegion.Fraction(p, RenderSize, (double)b.PixelWidth / b.PixelHeight) is { } f ? LinkRegion.At(regions, f) : null;
     }
 
     void Step(int d)
