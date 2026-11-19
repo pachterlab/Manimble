@@ -139,6 +139,8 @@
         <MenuItem Header="Add _Horizontal Guide" Click="AddHorizontalGuide_Click"/>
         <MenuItem Header="_Clear Guides" x:Name="ClearGuidesItem" Click="ClearGuides_Click"/>
         <Separator/>
+        <MenuItem Header="Sc_ript…" Click="Script_Click"/>
+        <Separator/>
         <MenuItem Header="Show _Terminal" InputGestureText="Ctrl+`" Click="ShowTerminal_Click"/>
         <MenuItem Header="_New Terminal" Click="NewTerminal_Click"/>
         <Separator/>
@@ -149,6 +151,8 @@
         <MenuItem Header="Play from _Beginning" InputGestureText="F5" Click="PlayBeginning_Click"/>
         <MenuItem Header="Play from _Current Slide" InputGestureText="Shift+F5" Click="PlayCurrent_Click"/>
         <MenuItem Header="Presenter _View" InputGestureText="Alt+F5" Click="PresenterView_Click"/>
+        <MenuItem Header="_Scripted Presentation" Click="ScriptedPresentation_Click"/>
+        <MenuItem Header="Scripted Presentation from Current Slide" Click="ScriptedPresentationCurrent_Click"/>
         <MenuItem Header="_Preview Current Slide&#x2019;s Animations" InputGestureText="Ctrl+Shift+F5" Click="PreviewAnimations_Click"/>
         <Separator/>
         <MenuItem Header="Show _Animations" IsCheckable="True" x:Name="ShowAnimationsItem" Click="ShowAnimations_Click"
@@ -470,8 +474,8 @@
         <TextBox Grid.Row="3" x:Name="SourceError" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="160"
                  VerticalScrollBarVisibility="Auto" Foreground="{StaticResource ErrorBrush}" FontFamily="Cascadia Mono, Consolas" FontSize="11.5"
                  BorderThickness="0,1,0,0"/>
-        <!-- BioCartoon icon search, in the inspector's place (Insert > BioCartoon Icons...) -->
-        <Border Grid.RowSpan="4" x:Name="BioCartoonHost" Visibility="Collapsed"/>
+        <!-- panels in the inspector's place: the BioCartoon icon search, the Script panel -->
+        <Border Grid.RowSpan="4" x:Name="PanelHost" Visibility="Collapsed"/>
       </Grid>
     </Grid>
   </DockPanel>

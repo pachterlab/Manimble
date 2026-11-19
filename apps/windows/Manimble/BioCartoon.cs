@@ -406,14 +406,15 @@ public partial class MainWindow
             biocartoon.IconChosen += icon => InsertBioCartoon(icon, null);
             biocartoon.Closed += HideBioCartoon;
             biocartoon.InstallRequested += () => InstallDependencies_Click(this, new RoutedEventArgs());
-            BioCartoonHost.Child = biocartoon;
         }
+        HideScript();
+        PanelHost.Child = biocartoon;
         if (SourcePane.Visibility != Visibility.Visible) { ShowSourceItem.IsChecked = true; ToggleSource_Click(this, new RoutedEventArgs()); }
-        BioCartoonHost.Visibility = Visibility.Visible;
+        PanelHost.Visibility = Visibility.Visible;
         await biocartoon.Activate(engine.Python);
     }
 
-    void HideBioCartoon() => BioCartoonHost.Visibility = Visibility.Collapsed;
+    void HideBioCartoon() { if (PanelHost.Child == biocartoon) PanelHost.Visibility = Visibility.Collapsed; }
 
     /// Downloads the icon into the deck folder and inserts it as a picture centred on `at` (frame px; null: the
     /// slide's centre), its longer side 3 manim units: an SVG when it is published as one and the engine can draw it

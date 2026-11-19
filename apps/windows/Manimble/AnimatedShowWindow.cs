@@ -60,6 +60,10 @@ public sealed class AnimatedShowWindow : Window
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed,
     };
     readonly Rectangle black = new() { Fill = Brushes.Black, Visibility = Visibility.Collapsed };
+    /// Above the slide, in this window's coordinates: a scripted presentation's pointer and pause badge.
+    public Canvas Overlay { get; } = new() { IsHitTestVisible = false };
+    /// Sees each key first; true swallows it (a scripted presentation's Space pauses the script).
+    public Func<Key, bool>? KeyFilter;
     readonly DispatcherTimer hideCursor = new() { Interval = TimeSpan.FromSeconds(2) };
 
     PresentDeck deck;
@@ -105,6 +109,7 @@ public sealed class AnimatedShowWindow : Window
         root.Children.Add(placeholder);
         root.Children.Add(progress);
         root.Children.Add(counter);
+        root.Children.Add(Overlay);
         root.Children.Add(black);
         Content = root;
         if (screen != null && reference != null) screen.Place(this, reference);
@@ -266,6 +271,20 @@ public sealed class AnimatedShowWindow : Window
         return LinkRegion.Fraction(p, area, Aspect) is { } f ? LinkRegion.At(regions, f) : null;
     }
     public void Go(int i) => Show(i, Mode.Play);
+
+    /// Where the slide is drawn in this window (letterboxed to its aspect).
+    public Rect SlideRect
+    {
+        get
+        {
+            double w = root.ActualWidth, h = root.ActualHeight, a = Aspect;
+            if (w <= 0 || h <= 0) return Rect.Empty;
+            return w / h > a ? new Rect((w - h * a) / 2, 0, h * a, h) : new Rect(0, (h - w / a) / 2, w, w / a);
+        }
+    }
+
+    /// The page is up and still: its picture loaded or its clip played (a looping clip once it is on screen).
+    public bool ScriptPageReady => finished || (Current?.Loop == true && front >= 0);
     void Replay() => Show(index, Mode.Play);
     void Reverse() => Show(index, Mode.Reverse);
 
@@ -297,6 +316,7 @@ public sealed class AnimatedShowWindow : Window
     /// A key of the show (also sent by Presenter View); true when it was one.
     public bool HandleKey(Key key)
     {
+        if (KeyFilter?.Invoke(key) == true) return true;
         if (key is >= Key.D1 and <= Key.D9 || key is >= Key.NumPad1 and <= Key.NumPad9)
         {
             // 1-9: the deck's chapters (sections), as in Manim Slides

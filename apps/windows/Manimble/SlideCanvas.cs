@@ -34,6 +34,10 @@ public sealed class SlideCanvas : Border
         TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(40),
     };
 
+    /// Over the slide, in frame pixels: the Script panel's pointer tracks and preview pointer. It takes the mouse only
+    /// while a track is being set.
+    public Canvas Annotations { get; } = new() { IsHitTestVisible = false };
+
     public SceneData? Scene { get; private set; }
     public int StopIndex { get; private set; }
     public StopInfo? Stop => Scene?.Stops is { Count: > 0 } s ? s[Math.Clamp(StopIndex, 0, s.Count - 1)] : null;
@@ -114,6 +118,7 @@ public sealed class SlideCanvas : Border
         frame.Children.Add(exact);
         frame.Children.Add(composite);
         frame.Children.Add(overlay);
+        frame.Children.Add(Annotations);
         viewbox.Child = frame;
         viewbox.Margin = new Thickness(24);
         hRuler = new Ruler(this, horizontal: true);

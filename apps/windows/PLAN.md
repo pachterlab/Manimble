@@ -63,8 +63,10 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   targets, remembered per deck) are in. Text boxes have side handles that set their wrap width. Table cells are typed into on the slide (double-click a cell) or in the inspector's grid, which also adds and removes rows and columns. BioCartoon icons are in (Insert > BioCartoon Icons…: search, category and collection filters, click or drag an icon onto the slide; SVG when the icon has one); the Mac's credit tags in the picture files, Your library and favourites are not. Python plots are in (Insert > Python Plot…: code or a linked .py file, ▶ on the plot runs it again, double-click edits it, the Mac's plot1@hash.png + plot1.plot.json format). Still to do: Extract Elements.
 - **Phase 3, presenting and sharing:** the animated show, the animation preview and Presenter View are done; New Deck,
   export (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Portable projects are in:
-  Save Project Copy, Package for Sharing (`.manimble`, the Mac app's format) and opening packages. Still to do:
-  scripted presentations, the feedback layer. Presenter View on a real second monitor is untested.
+  Save Project Copy, Package for Sharing (`.manimble`, the Mac app's format) and opening packages. Scripted
+  presentations are in (View > Script…: Speak, Mouse and Pause steps per build, tracks set by clicking or dragging on the
+  slide, previews; Play > Scripted Presentation runs them with Windows' text to speech; the Mac's script.json). Not yet:
+  cloud voices and the scripted movie export. Still to do: the feedback layer. Presenter View on a real second monitor is untested.
 - **Phase 4, terminal:** done. A Terminal tab (Ctrl+`) runs PowerShell in the working copy over ConPTY; outside edits
   re-render the slide.
 - **Phase 5, setup and release:** `install_dependencies.ps1` (tested on a fresh environment), `install_manimble.ps1`

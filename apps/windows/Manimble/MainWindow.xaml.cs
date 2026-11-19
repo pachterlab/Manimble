@@ -297,6 +297,7 @@ public partial class MainWindow : Window
         workspace = ws;
         state = null; scene = null; sceneName = null; shownDir = null;
         LoadGuides();
+        LoadScript();
         slides.Clear();
         suppressSource = true; SourceEditor.Text = ""; suppressSource = false;
         sourceBase = null; SourceLoc.Text = ""; SourceError.Visibility = Visibility.Collapsed;
@@ -632,6 +633,7 @@ public partial class MainWindow : Window
         ShowSource(sc, null);
         RebuildBuilds();
         RebuildInspector();
+        ScriptPageChanged();
     }
 
     /// A render that numbers objects differently (one added or removed above the others): the selection follows
@@ -676,6 +678,7 @@ public partial class MainWindow : Window
         stopIndex = Math.Clamp(i, 0, scene.Stops.Count - 1);
         canvas.SetStop(stopIndex);
         foreach (var (b, k) in BuildStrip.Items.OfType<ToggleButton>().Select((b, k) => (b, k))) b.IsChecked = k == stopIndex;
+        ScriptPageChanged();
     }
 
     async void SlideList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1767,6 +1770,7 @@ public partial class MainWindow : Window
         show.Exited += () => { animatedShow = null; presenter = null; Activate(); };
         animatedShow = show;
         show.Show();
+        StartScriptOn(show);
         if (withPresenter)
         {
             if (audience == null) { show.Topmost = false; Toast("One display: the show is full screen behind Presenter View. With a second display it goes there."); }
@@ -1928,6 +1932,7 @@ public partial class MainWindow : Window
         var ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
         var shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.Escape && scriptPane?.Capturing != null) { scriptPane.CancelCapture(); e.Handled = true; return; }
         // shortcuts that work everywhere
         if (ctrl && key == Key.S) { Save_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.O) { OpenDeck_Click(sender, e); e.Handled = true; return; }
