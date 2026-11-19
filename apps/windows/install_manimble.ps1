@@ -15,70 +15,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
-$Base = Join-Path $env:LOCALAPPDATA 'Manimble'
-$PyEnv = Join-Path $Base 'python'
-$PyExe = Join-Path $PyEnv 'Scripts\python.exe'
-New-Item -ItemType Directory -Force $Base | Out-Null
 
-function Find-BasePython {
-    # a python.org or uv-managed CPython 3.11+; never the Microsoft Store's (it redirects writes under AppData)
-    $cands = @()
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        foreach ($v in '3.12', '3.13', '3.11') {
-            try { $p = (& py "-$v" -c "import sys; print(sys.executable)" 2>$null); if ($p) { $cands += $p.Trim() } } catch {}
-        }
-    }
-    $cands += Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python31*\python.exe" -ErrorAction SilentlyContinue | ForEach-Object FullName
-    foreach ($c in $cands) { if ($c -and (Test-Path $c) -and ($c -notmatch 'WindowsApps')) { return $c } }
-    return $null
-}
-
-if (-not $SkipPython) {
-    if (Test-Path $PyExe) {
-        Write-Host "Python environment: $PyEnv (updating its packages)"
-    } else {
-        Write-Host "Creating the Python environment in $PyEnv"
-        $uv = Get-Command uv -ErrorAction SilentlyContinue
-        $base = Find-BasePython
-        if ($base) {
-            if ($uv) { & uv venv --python $base $PyEnv } else { & $base -m venv $PyEnv }
-        } elseif ($uv) {
-            & uv venv --python 3.12 --python-preference only-managed $PyEnv
-        } else {
-            Write-Host "No Python 3.11+ found. Installing Python 3.12 for this user with winget…"
-            winget install --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
-            $base = Find-BasePython
-            if (-not $base) { throw "Python 3.12 was installed but not found; open a new terminal and run this script again." }
-            & $base -m venv $PyEnv
-        }
-    }
-    $req = Join-Path $Root 'engine\requirements.txt'
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        & uv pip install --python $PyExe -r $req
-    } else {
-        & $PyExe -m pip install --upgrade pip
-        & $PyExe -m pip install -r $req
-    }
-    if ($LASTEXITCODE -ne 0) { throw "Installing the Python packages failed" }
-    Write-Host "Checking that Manim imports (the first import builds caches and takes a minute)…"
-    & $PyExe -c "import manim, PIL, manim_slides; print('manim', manim.__version__)"
-}
-
-if ($WithLatex) {
-    $haveTex = (Get-Command latex -ErrorAction SilentlyContinue) -or
-               (Test-Path "$env:LOCALAPPDATA\Programs\MiKTeX\miktex\bin\x64\latex.exe") -or
-               (Test-Path "$env:ProgramFiles\MiKTeX\miktex\bin\x64\latex.exe")
-    if ($haveTex) { Write-Host "LaTeX is already installed" }
-    else {
-        Write-Host "Installing MiKTeX (LaTeX for formulas)…"
-        winget install --id MiKTeX.MiKTeX --scope user --silent --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -ne 0) { winget install --id MiKTeX.MiKTeX --silent --accept-package-agreements --accept-source-agreements }
-    }
-    $initexmf = @("$env:LOCALAPPDATA\Programs\MiKTeX\miktex\bin\x64\initexmf.exe", "$env:ProgramFiles\MiKTeX\miktex\bin\x64\initexmf.exe") |
-                Where-Object { Test-Path $_ } | Select-Object -First 1
-    # MiKTeX fetches a package the first time a formula needs it, without asking
-    if ($initexmf) { & $initexmf --set-config-value '[MPM]AutoInstall=1' }
-}
+# Python with Manim, and with -WithLatex MiKTeX: the same script the app's first-launch setup runs
+$deps = @{ Requirements = (Join-Path $Root 'engine\requirements.txt') }
+if ($WithLatex) { $deps.WithLatex = $true }
+if ($SkipPython) { $deps.SkipPython = $true }
+if (-not $SkipPython -or $WithLatex) { & (Join-Path $PSScriptRoot 'install_dependencies.ps1') @deps }
 
 if (-not $SkipApp) {
     $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
