@@ -48,6 +48,8 @@ public sealed class SlideCanvas : Border
     public event Action<List<int>, double, double>? MoveCommitted;
     /// An object scaled about its centre by a corner handle.
     public event Action<int, double>? ResizeCommitted;
+    /// A text box's side dragged: its new width (frame px) and the side that moved ("left" or "right").
+    public event Action<int, double, string>? WrapCommitted;
     /// A line's ends dragged: [sx, sy, ex, ey].
     public event Action<int, double[]>? EndpointsCommitted;
     /// A shape or line drawn with a draw tool: tool, start and end (frame px).
@@ -61,7 +63,7 @@ public sealed class SlideCanvas : Border
     /// Text typed into an empty layout placeholder.
     public event Action<Placeholder, string>? PlaceholderCommitted;
 
-    enum Mode { None, Press, Move, Resize, Endpoint, Marquee, Draw, Pen, Guide }
+    enum Mode { None, Press, Move, Resize, Endpoint, Marquee, Draw, Pen, Guide, Wrap }
     Mode mode;
     int? hover;
     Point downAt;
@@ -69,7 +71,8 @@ public sealed class SlideCanvas : Border
     int dragOid;                   // the object of a resize or endpoint drag
     int dragEnd;                   // 0 = start, 1 = end of a line
     double dragScale = 1;          // a resize in progress
-    Rect dragBox;                  // the box a resize started from
+    Rect dragBox;                  // the box a resize or wrap started from
+    Rect? wrapBand;                // a text box's new width while its side is dragged
     Rect? band;                    // marquee or the shape being drawn
     readonly List<Point> penPoints = new();
     readonly List<List<Point>> pendingStrokes = new();
@@ -568,7 +571,15 @@ public sealed class SlideCanvas : Border
             if (BoxOf(oid) is not Rect sb) continue;
             overlay.Children.Add(Outline(sb, Accent, t * 1.4));
             if (Selected.Count == 1)
+            {
                 foreach (var c in Corners(sb)) overlay.Children.Add(Handle(c.X, c.Y, t, round: false));
+                if (Wrappable(oid))
+                {
+                    var wb = wrapBand ?? sb;
+                    if (wrapBand != null) overlay.Children.Add(Outline(wb, new SolidColorBrush(Color.FromRgb(0xff, 0x6c, 0x0c)), t * 1.4));
+                    foreach (var c in SideHandles(new Rect(wb.X, sb.Y, wb.Width, sb.Height))) overlay.Children.Add(Handle(c.X, c.Y, t, round: true));
+                }
+            }
         }
         if (showGrid)
         {
@@ -701,10 +712,24 @@ public sealed class SlideCanvas : Border
             return null;
         }
         if (BoxOf(oid) is not Rect b) return null;
-        var cs = Corners(b);
-        for (int i = 0; i < 4; i++) if ((p - cs[i]).Length <= r) return (oid, i);
-        return null;
+        // the nearest one: on a one-line text box the side handles sit within reach of the corners
+        var cs = Corners(b).ToList();
+        if (Wrappable(oid)) cs.AddRange(SideHandles(b));
+        (int which, double d)? best = null;
+        for (int i = 0; i < cs.Count; i++)
+        {
+            var d = (p - cs[i]).Length;
+            if (d <= r && (best == null || d < best.Value.d)) best = (i < 4 ? i : 16 + i, d);
+        }
+        return best is { } bh ? (oid, bh.which) : null;
     }
+
+    /// Plain text whose string is in the source: its box can be made wider or narrower (re-wrapping it). Not a shared
+    /// constant's text: its box comment would belong to every use of it.
+    bool Wrappable(int oid) => Scene?.Obj(oid) is { Kind: "text" } o && o.TextOk != false && o.Shared == null && editingOid != oid;
+
+    /// The middles of a text box's left and right sides (handles 20 and 21).
+    static Point[] SideHandles(Rect b) => new[] { new Point(b.Left, b.Top + b.Height / 2), new Point(b.Right, b.Top + b.Height / 2) };
 
     /// The members of `oid`'s group (an object outside a group alone).
     List<int> WithGroup(int oid)
@@ -752,7 +777,8 @@ public sealed class SlideCanvas : Border
         if (HandleAt(p) is { } hd)
         {
             dragOid = hd.oid;
-            if (hd.which >= 10) { mode = Mode.Endpoint; dragEnd = hd.which - 10; LineOverrides[hd.oid] = LineEnds(hd.oid)!.ToArray(); }
+            if (hd.which >= 20) { mode = Mode.Wrap; dragEnd = hd.which - 20; dragBox = BoxOf(hd.oid)!.Value; wrapBand = dragBox; }
+            else if (hd.which >= 10) { mode = Mode.Endpoint; dragEnd = hd.which - 10; LineOverrides[hd.oid] = LineEnds(hd.oid)!.ToArray(); }
             else { mode = Mode.Resize; dragScale = 1; dragBox = BoxOf(hd.oid)!.Value; }
             overlay.CaptureMouse();
             return;
@@ -812,6 +838,17 @@ public sealed class SlideCanvas : Border
         if (mode != Mode.None && e.LeftButton != MouseButtonState.Pressed) { EndPress(commit: true); return; }
         switch (mode)
         {
+            case Mode.Wrap:
+            {
+                // the far side stays put; at least a few characters wide
+                double minW = 24 / Scale;
+                var w = dragBox;
+                if (dragEnd == 1) w = new Rect(dragBox.Left, dragBox.Top, Math.Max(minW, p.X - dragBox.Left), dragBox.Height);
+                else { var x0 = Math.Min(dragBox.Right - minW, p.X); w = new Rect(x0, dragBox.Top, dragBox.Right - x0, dragBox.Height); }
+                wrapBand = w;
+                DrawOverlay();
+                return;
+            }
             case Mode.Guide:
                 if (dragGuide is int di && di < UserGuides.Count) UpdateGuideDrag(UserGuides[di].vertical ? p.X : p.Y);
                 return;
@@ -857,7 +894,7 @@ public sealed class SlideCanvas : Border
         if (drawTool != null) return;
         if (HandleAt(p) is { } hd)
         {
-            Cursor = hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
+            Cursor = hd.which >= 20 ? Cursors.SizeWE : hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
             return;
         }
         if (GuideAt(p) is int g)
@@ -891,6 +928,15 @@ public sealed class SlideCanvas : Border
             case Mode.Guide:
                 EndGuideDrag();
                 break;
+            case Mode.Wrap:
+            {
+                var w = wrapBand;
+                wrapBand = null;
+                DrawOverlay();
+                if (commit && w is Rect wb && Math.Abs(wb.Width - dragBox.Width) >= 2)
+                    WrapCommitted?.Invoke(dragOid, wb.Width, dragEnd == 1 ? "right" : "left");
+                break;
+            }
             case Mode.Move:
             {
                 var delta = dragDelta;

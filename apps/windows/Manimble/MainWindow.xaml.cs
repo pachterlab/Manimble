@@ -87,6 +87,7 @@ public partial class MainWindow : Window
         canvas.GuidesChanged += SaveGuides;
         canvas.ShowRulers = RulerItem.IsChecked = Settings.Current.ShowRulers;
         canvas.ResizeCommitted += (oid, ratio) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "resize", ["ratio"] = ratio }));
+        canvas.WrapCommitted += (oid, width, side) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "wrap", ["width"] = width, ["side"] = side }));
         canvas.EndpointsCommitted += (oid, e) => Submit(() => RunEdit(new JsonObject
             { ["oid"] = oid, ["op"] = "endpoints", ["sx"] = e[0], ["sy"] = e[1], ["ex"] = e[2], ["ey"] = e[3] }));
         canvas.DrawCommitted += (tool, a, b) => Insert(tool, new JsonObject { ["sx"] = a.X, ["sy"] = a.Y, ["ex"] = b.X, ["ey"] = b.Y });

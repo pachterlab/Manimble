@@ -60,7 +60,7 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   paste, moves per build. Hyperlinks (Ctrl+K, clickable in the show,
   the stills show and Presenter View) and the Alt Text tab are in. Rulers (View > Ruler, Ctrl+Shift+R) and guides
   (dragged off the rulers or added from the View menu, moved by dragging, removed by dragging them off the slide, snap
-  targets, remembered per deck) are in. Still to do: text-box wrap handles, table cell editing, BioCartoon icons, Python plots, Extract Elements.
+  targets, remembered per deck) are in. Text boxes have side handles that set their wrap width. Still to do: table cell editing, BioCartoon icons, Python plots, Extract Elements.
 - **Phase 3, presenting and sharing:** the animated show, the animation preview and Presenter View are done; New Deck,
   export (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Portable projects are in:
   Save Project Copy, Package for Sharing (`.manimble`, the Mac app's format) and opening packages. Still to do:
