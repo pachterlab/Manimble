@@ -590,6 +590,12 @@ public partial class MainWindow : Window
         {
             var msg = r.Message == "no change" ? "No change" : "Saved · " + r.Message;
             if (r.Siblings is int n) msg += $" ({n} similar objects share this line; all changed)";
+            lastBuildMove = null;
+            if (r.OneBuild == true && req["oid"] is JsonNode bo)
+            {
+                lastBuildMove = (name, bo.GetValue<int>(), req["stop"]?.GetValue<int>() ?? 0);
+                msg += " · in this build only; Ctrl+Shift+A applies it to every build";
+            }
             Toast(msg);
         }
         else Toast(failure ?? r?.Error ?? "edit failed", error: true);
@@ -621,15 +627,25 @@ public partial class MainWindow : Window
         Submit(async () =>
         {
             if (ids.Count == 1)
-                await RunEdit(new JsonObject { ["oid"] = ids[0], ["op"] = "move", ["dx"] = dx, ["dy"] = dy });
+                await RunEdit(new JsonObject { ["oid"] = ids[0], ["op"] = "move", ["dx"] = dx, ["dy"] = dy, ["build"] = true });
             else
                 await AsOneUndoStep("Move", async () =>
                 {
                     foreach (var oid in ids)
-                        await RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "move", ["dx"] = dx, ["dy"] = dy, ["optimistic"] = false }, reload: false);
+                        await RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "move", ["dx"] = dx, ["dy"] = dy, ["build"] = true, ["optimistic"] = false }, reload: false);
                     if (sceneName != null) await LoadScene(sceneName, keepStop: true);
                 });
         });
+    }
+
+    (string scene, int oid, int stop)? lastBuildMove;
+
+    /// Right after a move in one build, that move in every build instead (Ctrl+Shift+A, as on the Mac).
+    void SpreadLastMove()
+    {
+        if (lastBuildMove is not { } m || m.scene != sceneName) { Toast("Move an object in one build first"); return; }
+        lastBuildMove = null;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = m.oid, ["op"] = "spread", ["scene"] = m.scene, ["stop"] = m.stop }));
     }
 
     void Nudge(double dx, double dy)
@@ -699,6 +715,10 @@ public partial class MainWindow : Window
     }
 
     void Delete_Click(object sender, RoutedEventArgs e) => DeleteSelection();
+    void Cut_Click(object sender, RoutedEventArgs e) => CutSelection();
+    void Copy_Click(object sender, RoutedEventArgs e) => CopySelection();
+    void Paste_Click(object sender, RoutedEventArgs e) => PasteOnSlide();
+    void SpreadMove_Click(object sender, RoutedEventArgs e) => SpreadLastMove();
     void SelectAll_Click(object sender, RoutedEventArgs e) => canvas.SelectAll();
     void EditText_Click(object sender, RoutedEventArgs e) { if (canvas.Selected.Count == 1) canvas.BeginTextEdit(canvas.Selected[0]); }
 
@@ -1502,6 +1522,10 @@ public partial class MainWindow : Window
         if (ctrl && shift && key == Key.I) { InsertImage_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.P) { canvas.DrawTool = canvas.DrawTool == "pen" ? null : "pen"; e.Handled = true; return; }
         if (ctrl && shift && key == Key.B) { NewBuild_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.A) { SpreadLastMove(); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.C) { CopySelection(); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.X) { CutSelection(); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.V) { PasteOnSlide(); e.Handled = true; return; }
         if (ctrl && !shift && key == Key.B) { ToggleBold(); e.Handled = true; return; }
         if (ctrl && key == Key.I && !shift) { ToggleItalic(); e.Handled = true; return; }
         if (ctrl && key == Key.U) { Decorate("underline"); e.Handled = true; return; }

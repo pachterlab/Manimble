@@ -33,12 +33,17 @@
         <MenuItem Header="_Undo" InputGestureText="Ctrl+Z" Click="Undo_Click" x:Name="UndoItem"/>
         <MenuItem Header="_Redo" InputGestureText="Ctrl+Y" Click="Redo_Click" x:Name="RedoItem"/>
         <Separator/>
+        <MenuItem Header="Cu_t" InputGestureText="Ctrl+X" Click="Cut_Click"/>
+        <MenuItem Header="_Copy" InputGestureText="Ctrl+C" Click="Copy_Click"/>
+        <MenuItem Header="_Paste" InputGestureText="Ctrl+V" Click="Paste_Click"/>
+        <Separator/>
         <MenuItem Header="_Find…" InputGestureText="Ctrl+F" Click="Find_Click"/>
         <MenuItem Header="Find and Re_place…" InputGestureText="Ctrl+H" Click="FindReplace_Click"/>
         <MenuItem Header="Find _Next" InputGestureText="F3" Click="FindNext_Click"/>
         <MenuItem Header="Find Pre_vious" InputGestureText="Shift+F3" Click="FindPrev_Click"/>
         <Separator/>
         <MenuItem Header="_Delete" InputGestureText="Del" Click="Delete_Click"/>
+        <MenuItem Header="Apply Move to All _Builds" InputGestureText="Ctrl+Shift+A" Click="SpreadMove_Click"/>
         <MenuItem Header="Select _All" InputGestureText="Ctrl+A" Click="SelectAll_Click"/>
         <MenuItem Header="_Edit Text" InputGestureText="Enter" Click="EditText_Click"/>
       </MenuItem>
