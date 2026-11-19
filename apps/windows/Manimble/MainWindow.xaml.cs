@@ -99,6 +99,7 @@ public partial class MainWindow : Window
         };
         BuildPenColorMenu();
         BuildThemeMenu();
+        SyncPlayMenu();
         canvas.ContextMenuOpening += CanvasContextMenu;
         canvas.ContextMenu = new ContextMenu();          // an empty menu, so ContextMenuOpening fires
         engine.EventReceived += OnEngineEvent;
@@ -1451,8 +1452,133 @@ public partial class MainWindow : Window
         await FinishEdits();
         var start = from ?? state?.Scenes.FirstOrDefault(s => s.Hidden != true)?.Name;
         if (start == null) return;
+        if (Settings.Current.ShowAnimations) { await StartPresent(start); return; }
         var show = new SlideshowWindow(engine, start, from == sceneName ? stopIndex : 0) { Owner = this };
         show.Show();
+    }
+
+    // ---------------------------------------------------------------- the animated show
+
+    AnimatedShowWindow? animatedShow;
+    bool presentPending;
+    int presentFrom;
+
+    /// Builds the out-of-date slides with manim, then plays their clips (the `present` "ready" event). The show
+    /// opens once the first few slides from here are built; the rest build behind it ("update" events).
+    async Task StartPresent(string start)
+    {
+        if (animatedShow != null || presentPending) return;
+        presentFrom = Math.Max(0, state?.Scenes.FindIndex(s => s.Name == start) ?? 0);
+        presentPending = true;
+        Busy(+1, "Preparing the presentation…");
+        EditResult? r = null; string? failure = null;
+        try { r = await engine.Call<EditResult>("present", new JsonObject { ["height"] = Settings.Current.AnimationHeight, ["current"] = start, ["ahead"] = 3 }); }
+        catch (Exception e) { failure = e.Message; }
+        if (r?.Ok != true)
+        {
+            presentPending = false;
+            Busy(-1);
+            Toast(failure ?? r?.Error ?? "Could not start the presentation", error: true);
+        }
+    }
+
+    void OpenShow(PresentDeck deck, int startScene)
+    {
+        if (deck.Slides.Count == 0) { Toast("Nothing to show: every slide is hidden or failed to build", error: true); return; }
+        var show = new AnimatedShowWindow(deck, startScene);
+        show.Exited += () => { animatedShow = null; Activate(); };
+        animatedShow = show;
+        show.Show();
+        show.Activate();
+    }
+
+    void OnPresentEvent(JsonElement ev)
+    {
+        var phase = ev.TryGetProperty("phase", out var ph) ? ph.GetString() : null;
+        switch (phase)
+        {
+            case "building":
+                var done = ev.TryGetProperty("done", out var d) ? d.GetInt32() : 0;
+                var total = ev.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
+                var sc = ev.TryGetProperty("scene", out var s) ? s.GetString() : "";
+                Toast($"Building the animations: {sc} ({Math.Min(done + 1, Math.Max(total, 1))} of {total})…");
+                break;
+            case "ready":
+            {
+                var deck = ev.Deserialize<PresentDeck>(Engine.Json) ?? new PresentDeck();
+                if (presentPending) { presentPending = false; Busy(-1); Toast("Presenting · Esc ends the show"); OpenShow(deck, presentFrom); }
+                else animatedShow?.Update(deck);
+                break;
+            }
+            case "update":
+                if (ev.Deserialize<PresentDeck>(Engine.Json) is { } upd) animatedShow?.Update(upd);
+                break;
+            case "error":
+                if (presentPending) { presentPending = false; Busy(-1); }
+                Toast("The presentation could not be built: " + (ev.TryGetProperty("error", out var er) ? LastLine(er.GetString() ?? "") : ""), error: true);
+                break;
+            case "cancelled":
+                if (presentPending) { presentPending = false; Busy(-1); }
+                Toast("Cancelled");
+                break;
+        }
+    }
+
+    bool previewPending;
+
+    async void PreviewAnimations_Click(object sender, RoutedEventArgs e)
+    {
+        if (sceneName == null || previewPending || animatedShow != null) return;
+        await FinishEdits();
+        previewPending = true;
+        Busy(+1, $"Preparing {sceneName}'s animations…");
+        EditResult? r = null; string? failure = null;
+        try { r = await engine.Call<EditResult>("animation_preview", new JsonObject { ["scene"] = sceneName, ["height"] = Settings.Current.AnimationHeight }); }
+        catch (Exception ex) { failure = ex.Message; }
+        if (r?.Ok != true) { previewPending = false; Busy(-1); Toast(failure ?? r?.Error ?? "Could not play this slide", error: true); }
+    }
+
+    void OnPreviewEvent(JsonElement ev)
+    {
+        var phase = ev.TryGetProperty("phase", out var ph) ? ph.GetString() : null;
+        if (phase == "building") { Toast("Building the slide's animations…"); return; }
+        if (!previewPending) return;
+        previewPending = false;
+        Busy(-1);
+        if (phase == "error") { Toast("Could not build the animations: " + (ev.TryGetProperty("error", out var er) ? LastLine(er.GetString() ?? "") : ""), error: true); return; }
+        if (phase != "ready" || !ev.TryGetProperty("clips", out var clips)) return;
+        var scene = ev.TryGetProperty("scene", out var s) ? s.GetString() ?? "" : "";
+        var list = clips.EnumerateArray().ToList();
+        var deck = new PresentDeck
+        {
+            Slides = list.Select((c, i) => new PresentSlide
+            {
+                Scene = scene, Number = 0, Index = i, Count = list.Count,
+                Kind = c.TryGetProperty("kind", out var k) ? k.GetString() ?? "video" : "video",
+                File = c.TryGetProperty("path", out var p) ? p.GetString() : null,
+                Rate = c.TryGetProperty("playbackRate", out var pr) && pr.ValueKind == JsonValueKind.Number ? pr.GetDouble() : 1,
+                RevRate = 1,
+            }).ToList(),
+        };
+        OpenShow(deck, 0);
+    }
+
+    void ShowAnimations_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.Current.ShowAnimations = ShowAnimationsItem.IsChecked;
+        Settings.Current.Save();
+    }
+
+    void Resolution_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as MenuItem)?.Tag is string t && int.TryParse(t, out var h)) { Settings.Current.AnimationHeight = h; Settings.Current.Save(); }
+        SyncPlayMenu();
+    }
+
+    void SyncPlayMenu()
+    {
+        ShowAnimationsItem.IsChecked = Settings.Current.ShowAnimations;
+        foreach (var mi in ResolutionMenu.Items.OfType<MenuItem>()) mi.IsChecked = (string)mi.Tag == Settings.Current.AnimationHeight.ToString();
     }
 
     // ================================================================ engine events
@@ -1487,6 +1613,12 @@ public partial class MainWindow : Window
                 }
                 ReloadStateSoon();
                 break;
+            case "present":
+                OnPresentEvent(ev);
+                break;
+            case "animation_preview":
+                OnPreviewEvent(ev);
+                break;
             case "render_progress":
                 if (name != null && name == sceneName && busy > 0 && StatusText.Text.StartsWith("Rendering")) Toast($"Rendering {name}…");
                 break;
@@ -1504,6 +1636,7 @@ public partial class MainWindow : Window
         // shortcuts that work everywhere
         if (ctrl && key == Key.S) { Save_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.O) { OpenDeck_Click(sender, e); e.Handled = true; return; }
+        if (key == Key.F5 && ctrl && shift) { PreviewAnimations_Click(sender, e); e.Handled = true; return; }
         if (key == Key.F5) { if (shift) PlayCurrent_Click(sender, e); else PlayBeginning_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.F) { OpenFind(false); e.Handled = true; return; }
         if (ctrl && key == Key.H) { OpenFind(true); e.Handled = true; return; }

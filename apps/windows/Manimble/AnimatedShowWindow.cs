@@ -1,0 +1,333 @@
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Shapes;
+using System.Windows.Threading;
+
+namespace Manimble;
+
+/// One Manim Slides slide (a `next_slide()` stop): the clip that plays when you advance to it.
+public sealed class PresentSlide
+{
+    public string Scene { get; set; } = "";
+    public int SceneIndex { get; set; }
+    public int Number { get; set; }
+    public int Index { get; set; }
+    public int Count { get; set; }
+    public string Kind { get; set; } = "video";      // video | image
+    public string? File { get; set; }
+    public string? RevFile { get; set; }
+    public bool Loop { get; set; }
+    public bool AutoNext { get; set; }
+    public double Rate { get; set; } = 1;
+    public double RevRate { get; set; } = 1;
+    public string Notes { get; set; } = "";
+    public string? BuildNotes { get; set; }
+    public bool? Pending { get; set; }
+}
+
+public sealed class PresentDeck
+{
+    public List<PresentSlide> Slides { get; set; } = new();
+    public List<int> Sections { get; set; } = new();
+}
+
+/// The animated show (the Mac's AnimatedPlayer, the native replacement for `manim-slides present`): plays the clips
+/// the engine built, build by build, full screen. Keys follow Manim Slides where they exist (Right next, Left
+/// previous, Space play/pause, R replay, V reverse, Q quit) plus the slideshow's (B blank, P progress, Home/End, Esc);
+/// 1-9 jump to the deck's chapters.
+public sealed class AnimatedShowWindow : Window
+{
+    enum Mode { Play, End, Reverse }
+
+    readonly Grid root = new() { Background = Brushes.Black };
+    readonly Image still = new() { Stretch = Stretch.Uniform };
+    readonly MediaElement[] players = { NewPlayer(), NewPlayer() };
+    int front = -1;                  // the player on screen
+    readonly Rectangle progress = new() { Height = 3, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom };
+    readonly TextBlock counter = new()
+    {
+        Foreground = new SolidColorBrush(Color.FromArgb(0xcc, 0xff, 0xff, 0xff)), FontSize = 13, Margin = new Thickness(16, 0, 16, 12),
+        HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom,
+    };
+    readonly TextBlock placeholder = new()
+    {
+        Foreground = new SolidColorBrush(Color.FromArgb(0x90, 0xff, 0xff, 0xff)), FontSize = 26,
+        HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed,
+    };
+    readonly Rectangle black = new() { Fill = Brushes.Black, Visibility = Visibility.Collapsed };
+    readonly DispatcherTimer hideCursor = new() { Interval = TimeSpan.FromSeconds(2) };
+
+    PresentDeck deck;
+    int index;
+    int generation;
+    bool finished;
+    bool showProgress = true;
+    Mode mode;
+    string sectionDigits = "";
+
+    public event Action? Exited;
+    public event Action? Changed;
+    public PresentSlide? Current => index >= 0 && index < deck.Slides.Count ? deck.Slides[index] : null;
+    public int PageIndex => index;
+    public IReadOnlyList<PresentSlide> Slides => deck.Slides;
+    public bool IsBlackedOut => black.Visibility == Visibility.Visible;
+    public bool IsFinished => finished;
+
+    static MediaElement NewPlayer() => new()
+    {
+        LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Close, Stretch = Stretch.Uniform,
+        ScrubbingEnabled = true, Opacity = 0, IsMuted = false,
+    };
+
+    public AnimatedShowWindow(PresentDeck d, int startScene, Screen? screen = null, Window? reference = null)
+    {
+        deck = d;
+        Title = "Manimble Show";
+        WindowStyle = WindowStyle.None;
+        ResizeMode = ResizeMode.NoResize;
+        Background = Brushes.Black;
+        Topmost = true;
+        ShowInTaskbar = true;
+        root.Children.Add(still);
+        foreach (var p in players)
+        {
+            root.Children.Add(p);
+            p.MediaOpened += OnOpened;
+            p.MediaEnded += OnEnded;
+            p.MediaFailed += (s, e) => { Log.Note("show clip failed: " + e.ErrorException?.Message); finished = true; Changed?.Invoke(); };
+        }
+        progress.Fill = (Brush)Application.Current.Resources["SelectionBrush"];
+        root.Children.Add(placeholder);
+        root.Children.Add(progress);
+        root.Children.Add(counter);
+        root.Children.Add(black);
+        Content = root;
+        if (screen != null && reference != null) screen.Place(this, reference);
+        Loaded += (_, _) =>
+        {
+            WindowState = WindowState.Maximized;
+            var i = deck.Slides.FindIndex(s => s.SceneIndex >= startScene);
+            Show(i < 0 ? 0 : i, Mode.Play);
+        };
+        KeyDown += OnKey;
+        MouseLeftButtonDown += (_, _) => Next();
+        MouseRightButtonDown += (_, _) => Previous();
+        MouseMove += (_, _) => { Cursor = Cursors.Arrow; hideCursor.Stop(); hideCursor.Start(); };
+        hideCursor.Tick += (_, _) => { hideCursor.Stop(); Cursor = Cursors.None; };
+        Cursor = Cursors.None;
+        SizeChanged += (_, _) => UpdateChrome();
+        Closed += (_, _) => { foreach (var p in players) p.Close(); Exited?.Invoke(); };
+    }
+
+    /// The pages again, as slides that were still building get their clips (`present` "update" events). The show
+    /// stays on the build it is showing; a page that was a placeholder comes back at the end of its clip.
+    public void Update(PresentDeck d)
+    {
+        if (d.Slides.Count == 0) return;
+        var old = Current;
+        deck = d;
+        var i = Math.Min(index, d.Slides.Count - 1);
+        if (old != null)
+        {
+            var j = d.Slides.FindIndex(s => s.Scene == old.Scene && s.Index == old.Index);
+            if (j < 0) j = d.Slides.FindIndex(s => s.Scene == old.Scene);
+            if (j < 0) j = d.Slides.FindIndex(s => s.Number >= old.Number);
+            i = j < 0 ? d.Slides.Count - 1 : j;
+        }
+        index = i;
+        if (old?.Pending == true && (d.Slides[i].Pending != true || d.Slides[i].File != old.File)) Show(i, Mode.End);
+        else { UpdateChrome(); Changed?.Invoke(); }
+    }
+
+    // ---------------------------------------------------------------- loading clips
+
+    void Show(int i, Mode m)
+    {
+        if (i < 0 || i >= deck.Slides.Count) return;
+        index = i;
+        mode = m;
+        generation++;
+        finished = false;
+        var slide = deck.Slides[i];
+        UpdateChrome();
+        placeholder.Text = $"Building slide {slide.Number + 1}…";
+        placeholder.Visibility = slide.Pending == true && slide.File == null ? Visibility.Visible : Visibility.Collapsed;
+        if (slide.Kind == "image")
+        {
+            HideVideo();
+            still.Source = slide.File != null ? Images.Load(slide.File) : null;
+            finished = true;
+            Changed?.Invoke();
+            return;
+        }
+        var path = m == Mode.Reverse ? slide.RevFile ?? slide.File : slide.File;
+        if (path == null || !File.Exists(path))
+        {
+            finished = true;                             // nothing to play: settle the page so stepping goes on
+            Changed?.Invoke();
+            return;
+        }
+        // load into the player that is not on screen; it is shown once its first frame is ready (OnOpened)
+        var back = players[front == 0 ? 1 : 0];
+        back.Tag = generation;
+        back.Opacity = 0;
+        back.Source = new Uri(path);
+        back.SpeedRatio = Math.Max(0.1, m == Mode.Reverse ? slide.RevRate : slide.Rate);
+        back.Play();
+        if (m == Mode.End) back.Pause();
+    }
+
+    void OnOpened(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not MediaElement p || p.Tag is not int gen || gen != generation) return;
+        if (mode == Mode.End && p.NaturalDuration.HasTimeSpan)
+        {
+            p.Pause();
+            p.Position = p.NaturalDuration.TimeSpan - TimeSpan.FromMilliseconds(17);
+            finished = true;
+        }
+        // swap: the new clip on top, the old one stopped
+        var old = front >= 0 ? players[front] : null;
+        front = Array.IndexOf(players, p);
+        Panel.SetZIndex(p, 2);
+        if (old != null && old != p) { Panel.SetZIndex(old, 1); old.Stop(); old.Opacity = 0; old.Source = null; }
+        p.Opacity = 1;
+        still.Source = null;
+        Changed?.Invoke();
+    }
+
+    void OnEnded(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not MediaElement p || p.Tag is not int gen || gen != generation) return;
+        var slide = deck.Slides[index];
+        if (mode == Mode.Play && slide.Loop) { p.Position = TimeSpan.Zero; p.Play(); return; }
+        if (mode == Mode.Play && slide.AutoNext && index + 1 < deck.Slides.Count) { Show(index + 1, Mode.Play); return; }
+        finished = true;
+        p.Pause();
+        Changed?.Invoke();
+    }
+
+    void HideVideo()
+    {
+        foreach (var p in players) { p.Stop(); p.Opacity = 0; p.Source = null; }
+        front = -1;
+    }
+
+    void UpdateChrome()
+    {
+        if (deck.Slides.Count == 0) return;
+        var s = deck.Slides[Math.Clamp(index, 0, deck.Slides.Count - 1)];
+        var total = deck.Slides[^1].Number + 1;
+        counter.Text = $"{s.Number + 1} / {total}" + (s.Count > 1 ? $"  ·  {s.Index + 1}/{s.Count}" : "");
+        counter.Visibility = showProgress ? Visibility.Visible : Visibility.Collapsed;
+        progress.Visibility = showProgress ? Visibility.Visible : Visibility.Collapsed;
+        progress.Width = ActualWidth * (index + 1) / Math.Max(1, deck.Slides.Count);
+    }
+
+    // ---------------------------------------------------------------- navigation
+
+    public void Next()
+    {
+        if (index == deck.Slides.Count - 1) { if (finished) Close(); }
+        else Show(index + 1, Mode.Play);
+    }
+    public void Previous() { if (index > 0) Show(index - 1, Mode.End); }
+    public void Go(int i) => Show(i, Mode.Play);
+    void Replay() => Show(index, Mode.Play);
+    void Reverse() => Show(index, Mode.Reverse);
+
+    void PlayPause()
+    {
+        if (finished) { Next(); return; }
+        if (front < 0) return;
+        var p = players[front];
+        if (p.Tag is int g && g == generation && paused) { p.Play(); paused = false; }
+        else { p.Pause(); paused = true; }
+        Changed?.Invoke();
+    }
+    bool paused;
+
+    public void ToggleBlack()
+    {
+        black.Visibility = black.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        Changed?.Invoke();
+    }
+
+    void OnKey(object sender, KeyEventArgs e)
+    {
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key is >= Key.D1 and <= Key.D9 || key is >= Key.NumPad1 and <= Key.NumPad9)
+        {
+            // 1-9: the deck's chapters (sections), as in Manim Slides
+            var n = key >= Key.NumPad1 ? key - Key.NumPad1 : key - Key.D1;
+            if (n < deck.Sections.Count)
+            {
+                var j = deck.Slides.FindIndex(s => s.SceneIndex >= deck.Sections[n]);
+                if (j >= 0) Show(j, Mode.Play);
+            }
+            e.Handled = true;
+            return;
+        }
+        switch (key)
+        {
+            case Key.Escape or Key.Q: Close(); break;
+            case Key.Right or Key.Down or Key.PageDown or Key.Enter or Key.N: Next(); break;
+            case Key.Left or Key.Up or Key.PageUp or Key.Back: Previous(); break;
+            case Key.Space: PlayPause(); break;
+            case Key.R: Replay(); break;
+            case Key.V: Reverse(); break;
+            case Key.B or Key.OemPeriod: ToggleBlack(); break;
+            case Key.P: showProgress = !showProgress; UpdateChrome(); break;
+            case Key.Home: Show(0, Mode.Play); break;
+            case Key.End: Show(deck.Slides.Count - 1, Mode.End); break;
+            default: return;
+        }
+        e.Handled = true;
+    }
+}
+
+/// A display (EnumDisplayMonitors), for putting the show on one monitor and Presenter View on another. Bounds are
+/// physical pixels; `Place` turns them into the window's device-independent units.
+public sealed record Screen(Int32Rect Bounds, bool Primary)
+{
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct RECT { public int L, T, R, B; }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
+    delegate bool MonitorEnum(IntPtr h, IntPtr hdc, IntPtr rect, IntPtr data);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnum cb, IntPtr data);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr h, ref MONITORINFO mi);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    public IntPtr Handle { get; init; }
+
+    public static List<Screen> All()
+    {
+        var outp = new List<Screen>();
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (h, _, _, _) =>
+        {
+            var mi = new MONITORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFO>() };
+            if (GetMonitorInfo(h, ref mi))
+                outp.Add(new Screen(new Int32Rect(mi.rcMonitor.L, mi.rcMonitor.T, mi.rcMonitor.R - mi.rcMonitor.L, mi.rcMonitor.B - mi.rcMonitor.T),
+                                    (mi.dwFlags & 1) != 0) { Handle = h });
+            return true;
+        }, IntPtr.Zero);
+        return outp;
+    }
+
+    /// The display a window is on.
+    public static IntPtr Of(Window w) => MonitorFromWindow(new System.Windows.Interop.WindowInteropHelper(w).Handle, 2);
+
+    /// Moves `w` onto this display (before it is maximized there).
+    public void Place(Window w, Window reference)
+    {
+        var dpi = VisualTreeHelper.GetDpi(reference);
+        w.WindowStartupLocation = WindowStartupLocation.Manual;
+        w.Left = Bounds.X / dpi.DpiScaleX + 40;
+        w.Top = Bounds.Y / dpi.DpiScaleY + 40;
+        w.Width = 800; w.Height = 600;
+    }
+}

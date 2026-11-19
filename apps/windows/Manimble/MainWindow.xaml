@@ -121,6 +121,16 @@
       <MenuItem Header="_Play">
         <MenuItem Header="Play from _Beginning" InputGestureText="F5" Click="PlayBeginning_Click"/>
         <MenuItem Header="Play from _Current Slide" InputGestureText="Shift+F5" Click="PlayCurrent_Click"/>
+        <MenuItem Header="_Preview Current Slide&#x2019;s Animations" InputGestureText="Ctrl+Shift+F5" Click="PreviewAnimations_Click"/>
+        <Separator/>
+        <MenuItem Header="Show _Animations" IsCheckable="True" x:Name="ShowAnimationsItem" Click="ShowAnimations_Click"
+                  ToolTip="Play the slides' real animations (built with manim); off plays the still frames of each build"/>
+        <MenuItem Header="Animation _Resolution" x:Name="ResolutionMenu">
+          <MenuItem Header="720p" Tag="720" IsCheckable="True" Click="Resolution_Click"/>
+          <MenuItem Header="1080p" Tag="1080" IsCheckable="True" Click="Resolution_Click"/>
+          <MenuItem Header="1440p" Tag="1440" IsCheckable="True" Click="Resolution_Click"/>
+          <MenuItem Header="2160p (4K)" Tag="2160" IsCheckable="True" Click="Resolution_Click"/>
+        </MenuItem>
       </MenuItem>
       <MenuItem Header="_Help">
         <MenuItem Header="Manimble _Documentation" Click="Docs_Click"/>

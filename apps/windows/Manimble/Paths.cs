@@ -84,6 +84,8 @@ public sealed class Settings
     public string? Python { get; set; }
     public List<string> RecentDecks { get; set; } = new();
     public bool ShowSource { get; set; } = true;
+    public bool ShowAnimations { get; set; } = true;
+    public int AnimationHeight { get; set; } = 720;
     public double? WindowWidth { get; set; }
     public double? WindowHeight { get; set; }
     public bool WindowMaximized { get; set; }
