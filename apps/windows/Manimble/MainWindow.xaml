@@ -255,18 +255,88 @@
           <TextBlock Text="SELECTION" Style="{StaticResource PaneHeader}"/>
           <TextBlock x:Name="SelTitle" Margin="10,0" TextWrapping="Wrap" FontWeight="SemiBold" Text="Nothing selected"/>
           <TextBlock x:Name="SelDetail" Margin="10,2,10,0" TextWrapping="Wrap" Opacity="0.75" FontSize="12"/>
-          <Grid Margin="10,6,10,0" x:Name="SelFields">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Text="Color" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="12"/>
-            <TextBox Grid.Column="1" x:Name="ColorBox" KeyDown="ColorBox_KeyDown" ToolTip="#RRGGBB · Enter applies" Margin="0,0,10,0"/>
-            <TextBlock Grid.Column="2" Text="Font" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="12"/>
-            <TextBox Grid.Column="3" x:Name="FontBox" KeyDown="FontBox_KeyDown" ToolTip="Font family · Enter applies"/>
-          </Grid>
+          <StackPanel x:Name="SelFields" Margin="10,6,10,0">
+            <StackPanel.Resources>
+              <Style TargetType="ToggleButton" BasedOn="{StaticResource {x:Type ToggleButton}}">
+                <Setter Property="MinWidth" Value="30"/>
+                <Setter Property="Padding" Value="6,2"/>
+                <Setter Property="Margin" Value="0,0,3,0"/>
+              </Style>
+              <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                <Setter Property="MinWidth" Value="30"/>
+                <Setter Property="Padding" Value="6,2"/>
+                <Setter Property="Margin" Value="0,0,3,0"/>
+              </Style>
+            </StackPanel.Resources>
+            <!-- text: font, size, style -->
+            <StackPanel x:Name="TextFormat">
+              <DockPanel Margin="0,0,0,4">
+                <Button DockPanel.Dock="Right" Content="A▾" ToolTip="Smaller (Ctrl+Shift+,)" Click="Smaller_Click" Margin="3,0,0,0"/>
+                <Button DockPanel.Dock="Right" Content="A▴" ToolTip="Bigger (Ctrl+Shift+.)" Click="Bigger_Click" Margin="3,0,0,0"/>
+                <TextBox DockPanel.Dock="Right" x:Name="SizeBox" Width="52" ToolTip="Font size · Enter applies" KeyDown="SizeBox_KeyDown" Margin="6,0,0,0"/>
+                <ComboBox x:Name="FontCombo" IsEditable="True" IsTextSearchEnabled="True" ToolTip="Font family"
+                          SelectionChanged="FontCombo_SelectionChanged" KeyDown="FontCombo_KeyDown"/>
+              </DockPanel>
+              <WrapPanel Margin="0,0,0,4">
+                <ToggleButton x:Name="BoldButton" Content="B" FontWeight="Bold" ToolTip="Bold (Ctrl+B)" Click="Bold_Click"/>
+                <ToggleButton x:Name="ItalicButton" Content="I" FontStyle="Italic" ToolTip="Italic (Ctrl+I)" Click="Italic_Click"/>
+                <ToggleButton x:Name="UnderlineButton" ToolTip="Underline (Ctrl+U)" Click="Underline_Click"><TextBlock Text="U" TextDecorations="Underline"/></ToggleButton>
+                <ToggleButton x:Name="StrikeButton" ToolTip="Strikethrough" Click="Strike_Click"><TextBlock Text="S" TextDecorations="Strikethrough"/></ToggleButton>
+                <Button x:Name="HighlightButton" ToolTip="Highlight" Click="Highlight_Click"><TextBlock Text="H" Background="#80FFD400" Padding="3,0"/></Button>
+                <Separator Margin="3,2" Width="1"/>
+                <ToggleButton x:Name="AlignLeftButton" ToolTip="Align left" Tag="left" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E4;"/></ToggleButton>
+                <ToggleButton x:Name="AlignCenterButton" ToolTip="Center" Tag="center" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E3;"/></ToggleButton>
+                <ToggleButton x:Name="AlignRightButton" ToolTip="Align right" Tag="right" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E2;"/></ToggleButton>
+                <Button ToolTip="Line spacing" Click="Spacing_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9E9;"/></Button>
+                <Button ToolTip="Clear formatting" Click="ClearFormat_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE894;"/></Button>
+              </WrapPanel>
+            </StackPanel>
+            <!-- colour -->
+            <DockPanel Margin="0,0,0,4">
+              <TextBlock Text="Color" VerticalAlignment="Center" Width="44" FontSize="12"/>
+              <Button x:Name="ColorSwatch" DockPanel.Dock="Left" Width="30" Height="24" Padding="0" Click="ColorSwatch_Click" ToolTip="Choose a colour">
+                <Border x:Name="ColorSwatchFill" Width="18" Height="14" BorderBrush="#80808080" BorderThickness="1"/>
+              </Button>
+              <TextBox x:Name="ColorBox" KeyDown="ColorBox_KeyDown" ToolTip="#RRGGBB · Enter applies" Margin="4,0,0,0"/>
+            </DockPanel>
+            <!-- geometry: centre, size, rotation (frame pixels, degrees) -->
+            <Grid Margin="0,0,0,4" x:Name="GeometryFields">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+              <TextBlock Text="X" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="12"/>
+              <TextBox Grid.Column="1" x:Name="XBox" Tag="x" KeyDown="Geometry_KeyDown" Margin="0,0,6,3" ToolTip="Centre, pixels from the left · Enter applies"/>
+              <TextBlock Grid.Column="2" Text="Y" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="12"/>
+              <TextBox Grid.Column="3" x:Name="YBox" Tag="y" KeyDown="Geometry_KeyDown" Margin="0,0,6,3" ToolTip="Centre, pixels from the top · Enter applies"/>
+              <TextBlock Grid.Column="4" Text="↻" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="12"/>
+              <TextBox Grid.Column="5" x:Name="RotBox" Tag="rot" KeyDown="Geometry_KeyDown" Margin="0,0,0,3" ToolTip="Rotation in degrees · Enter applies"/>
+              <TextBlock Grid.Row="1" Text="W" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="12"/>
+              <TextBox Grid.Row="1" Grid.Column="1" x:Name="WBox" Tag="w" KeyDown="Geometry_KeyDown" Margin="0,0,6,0" ToolTip="Width in pixels · Enter applies"/>
+              <TextBlock Grid.Row="1" Grid.Column="2" Text="H" VerticalAlignment="Center" Margin="0,0,4,0" FontSize="12"/>
+              <TextBox Grid.Row="1" Grid.Column="3" x:Name="HBox" Tag="h" KeyDown="Geometry_KeyDown" Margin="0,0,6,0" ToolTip="Height in pixels · Enter applies"/>
+              <CheckBox Grid.Row="1" Grid.Column="4" Grid.ColumnSpan="2" x:Name="AspectLock" Content="Keep ratio" IsChecked="True" FontSize="12" VerticalAlignment="Center"
+                        ToolTip="Width and height change together (text and formulas always do)"/>
+            </Grid>
+          </StackPanel>
+          <!-- arrange: shown for any selection -->
+          <WrapPanel Margin="10,2,10,0" x:Name="ArrangeBar">
+            <WrapPanel.Resources>
+              <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                <Setter Property="Padding" Value="6,2"/>
+                <Setter Property="Margin" Value="0,0,3,3"/>
+                <Setter Property="FontSize" Value="12"/>
+              </Style>
+            </WrapPanel.Resources>
+            <Button Content="To Front" Tag="front" Click="Arrange_Click" ToolTip="Bring to front (Ctrl+Shift+])"/>
+            <Button Content="Forward" Tag="forward" Click="Arrange_Click" ToolTip="Bring forward (Ctrl+])"/>
+            <Button Content="Backward" Tag="backward" Click="Arrange_Click" ToolTip="Send backward (Ctrl+[)"/>
+            <Button Content="To Back" Tag="back" Click="Arrange_Click" ToolTip="Send to back (Ctrl+Shift+[)"/>
+            <Button Content="Group" Click="Group_Click" ToolTip="Group (Ctrl+G)"/>
+            <Button Content="Ungroup" Click="Ungroup_Click" ToolTip="Ungroup (Ctrl+Shift+G)"/>
+          </WrapPanel>
         </StackPanel>
         <DockPanel Grid.Row="1">
           <Button DockPanel.Dock="Right" x:Name="ApplySourceButton" Content="Apply" Padding="10,2" Margin="0,4,8,2"

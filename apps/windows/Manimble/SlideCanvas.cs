@@ -110,6 +110,14 @@ public sealed class SlideCanvas : Border
         overlay.MouseLeftButtonDown += OnDown;
         overlay.MouseMove += OnMove;
         overlay.MouseLeftButtonUp += OnUp;
+        // a right-click acts on what is under it: that object (and its group) becomes the selection first
+        overlay.MouseRightButtonDown += (_, e) =>
+        {
+            if (editor != null) CommitEdit();
+            var hit = HitTest(e.GetPosition(frame));
+            if (hit is int h) { if (!Selected.Contains(h)) Select(WithGroup(h)); }
+            else Select(Array.Empty<int>());
+        };
         overlay.MouseLeave += (_, _) => { if (hover != null) { hover = null; DrawOverlay(); } };
         overlay.LostMouseCapture += (_, _) => { if (mode != Mode.None && Mouse.LeftButton != MouseButtonState.Pressed) EndPress(commit: true); };
         SizeChanged += (_, _) => DrawOverlay();

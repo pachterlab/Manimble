@@ -97,6 +97,8 @@ public partial class MainWindow : Window
             null => "Draw ▾", "pen" => "Pen (Esc ends)", "darrow" => "Drawing: double arrow", var t => "Drawing: " + t,
         };
         BuildPenColorMenu();
+        canvas.ContextMenuOpening += CanvasContextMenu;
+        canvas.ContextMenu = new ContextMenu();          // an empty menu, so ContextMenuOpening fires
         engine.EventReceived += OnEngineEvent;
         engine.Exited += code =>
         {
@@ -775,68 +777,347 @@ public partial class MainWindow : Window
 
     // ================================================================ inspector
 
+    bool suppressInspector;
+    bool fontsLoaded;
+
+    int? Single => canvas.Selected.Count == 1 ? canvas.Selected[0] : null;
+    ObjInfo? SelectedObj => Single is int s ? scene?.Obj(s) : null;
+
     void RebuildInspector()
     {
         var sel = canvas.Selected;
-        if (scene == null || sel.Count == 0)
+        suppressInspector = true;
+        try
         {
-            SelTitle.Text = "Nothing selected";
-            SelDetail.Text = "Click an object on the slide. Drag to move it, double-click text to retype it, Delete removes it.";
-            SelFields.Visibility = Visibility.Collapsed;
-            return;
+            if (scene == null || sel.Count == 0)
+            {
+                SelTitle.Text = "Nothing selected";
+                SelDetail.Text = "Click an object on the slide. Drag to move it, drag a corner to resize it, double-click text to retype it, Delete removes it.";
+                SelFields.Visibility = Visibility.Collapsed;
+                ArrangeBar.Visibility = Visibility.Collapsed;
+                return;
+            }
+            ArrangeBar.Visibility = Visibility.Visible;
+            if (sel.Count > 1)
+            {
+                SelTitle.Text = $"{sel.Count} objects";
+                SelDetail.Text = "Drag or use the arrow keys to move them together; Ctrl+G groups them.";
+                SelFields.Visibility = Visibility.Visible;
+                TextFormat.Visibility = Visibility.Collapsed;
+                GeometryFields.Visibility = Visibility.Collapsed;
+                ColorBox.Text = "";
+                ColorSwatchFill.Background = Brushes.Transparent;
+                return;
+            }
+            var o = scene.Obj(sel[0]);
+            if (o == null) { SelTitle.Text = "Object"; SelDetail.Text = ""; SelFields.Visibility = Visibility.Collapsed; return; }
+            var kind = o.Kind switch
+            {
+                "text" => "Text", "tex" => "Formula", "image" => "Picture", "line" => "Line", "table" => "Table",
+                "shape" => o.Shape ?? "Shape", _ => o.Kind,
+            };
+            SelTitle.Text = o.IsText ? $"{kind}: {Short(o.Value)}" : kind;
+            var details = new List<string> { "made at " + o.Loc };
+            if (o.Shared is { } sh) details.Add($"shared {sh.Name}, used {sh.Uses}×");
+            if (o.Group is int g) details.Add($"in group {g}");
+            if (o.TextOk == false && o.TextNote != null) details.Add(o.TextNote);
+            if (o.Siblings > 1) details.Add($"{o.Siblings} similar objects come from this line");
+            SelDetail.Text = string.Join(" · ", details);
+            SelFields.Visibility = Visibility.Visible;
+            GeometryFields.Visibility = Visibility.Visible;
+            TextFormat.Visibility = o.IsText ? Visibility.Visible : Visibility.Collapsed;
+            if (o.IsText)
+            {
+                if (!fontsLoaded)
+                {
+                    FontCombo.ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(n => n).ToList();
+                    fontsLoaded = true;
+                }
+                FontCombo.IsEnabled = o.Kind == "text";
+                FontCombo.Text = o.Font ?? scene.Font ?? "";
+                SizeBox.Text = o.FontSize is double fs ? fs.ToString("0.#") : "";
+                BoldButton.IsChecked = string.Equals(o.Weight, "BOLD", StringComparison.OrdinalIgnoreCase);
+                ItalicButton.IsChecked = string.Equals(o.Slant, "ITALIC", StringComparison.OrdinalIgnoreCase);
+                BoldButton.IsEnabled = ItalicButton.IsEnabled = o.Kind == "text";
+                UnderlineButton.IsChecked = o.Format?.Underline == true;
+                StrikeButton.IsChecked = o.Format?.Strike == true;
+                var align = o.Format?.Align ?? "left";
+                AlignLeftButton.IsChecked = align == "left";
+                AlignCenterButton.IsChecked = align == "center";
+                AlignRightButton.IsChecked = align == "right";
+                AlignLeftButton.IsEnabled = AlignCenterButton.IsEnabled = AlignRightButton.IsEnabled = o.Kind == "text";
+            }
+            ColorBox.Text = o.Color ?? "";
+            ColorSwatchFill.Background = o.Color != null && TryColor(o.Color) is Color c ? new SolidColorBrush(c) : Brushes.Transparent;
+            if (canvas.Stop?.Box(sel[0]) is Rect b)
+            {
+                XBox.Text = (b.X + b.Width / 2).ToString("0");
+                YBox.Text = (b.Y + b.Height / 2).ToString("0");
+                var (w, h) = Dims(sel[0], o);
+                WBox.Text = w.ToString("0");
+                HBox.Text = h.ToString("0");
+            }
+            RotBox.Text = (o.Rotation ?? 0).ToString("0.#");
+            HighlightSourceLine(o.Loc);         // the source pane shows where the object was made
         }
-        if (sel.Count > 1)
-        {
-            SelTitle.Text = $"{sel.Count} objects";
-            SelDetail.Text = "Drag or use the arrow keys to move them together.";
-            SelFields.Visibility = Visibility.Collapsed;
-            return;
-        }
-        var o = scene.Obj(sel[0]);
-        if (o == null) { SelTitle.Text = "Object"; SelDetail.Text = ""; SelFields.Visibility = Visibility.Collapsed; return; }
-        var kind = o.Kind switch
-        {
-            "text" => "Text", "tex" => "Formula", "image" => "Picture", "line" => "Line", "table" => "Table",
-            "shape" => o.Shape ?? "Shape", _ => o.Kind,
-        };
-        SelTitle.Text = o.IsText ? $"{kind}: {Short(o.Value)}" : kind;
-        var details = new List<string> { "made at " + o.Loc };
-        if (o.FontSize is double fs) details.Add($"font size {fs:0.#}");
-        if (o.Shared is { } sh) details.Add($"shared {sh.Name}, used {sh.Uses}×");
-        if (o.TextOk == false && o.TextNote != null) details.Add(o.TextNote);
-        if (o.Siblings > 1) details.Add($"{o.Siblings} similar objects come from this line");
-        SelDetail.Text = string.Join(" · ", details);
-        SelFields.Visibility = Visibility.Visible;
-        ColorBox.Text = o.Color ?? "";
-        FontBox.Text = o.Font ?? "";
-        FontBox.IsEnabled = o.Kind == "text";
-        // the source pane shows where the object was made
-        HighlightSourceLine(o.Loc);
+        finally { suppressInspector = false; }
+    }
+
+    (double w, double h) Dims(int oid, ObjInfo o)
+    {
+        if (o.Dims is { Length: 2 } d) return (d[0], d[1]);
+        var b = canvas.Stop?.Box(oid) ?? new Rect();
+        return (b.Width, b.Height);
+    }
+
+    static Color? TryColor(string hex)
+    {
+        try { return (Color)ColorConverter.ConvertFromString(hex); } catch { return null; }
     }
 
     static string Short(string s) { s = s.Replace('\n', ' '); return s.Length > 60 ? s[..60] + "…" : s; }
 
+    /// The same edit on every selected object, as one undo step.
+    void EditSelection(string label, Func<int, JsonObject> make)
+    {
+        var ids = canvas.Selected.ToList();
+        if (ids.Count == 0) return;
+        if (ids.Count == 1) { Submit(() => RunEdit(make(ids[0]))); return; }
+        Submit(() => AsOneUndoStep(label, async () =>
+        {
+            foreach (var oid in ids) await RunEdit(make(oid), reload: oid == ids[^1]);
+        }));
+    }
+
+    void ApplyColor(string hex)
+    {
+        hex = hex.Trim();
+        if (!hex.StartsWith('#')) hex = "#" + hex;
+        if (hex.Length != 7 || TryColor(hex) == null) { Toast("A colour is #RRGGBB", error: true); return; }
+        hex = hex.ToUpperInvariant();
+        EditSelection("Color", oid => new JsonObject { ["oid"] = oid, ["op"] = "color", ["value"] = hex });
+    }
+
     void ColorBox_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter || canvas.Selected.Count == 0) return;
-        var v = ColorBox.Text.Trim();
-        if (!v.StartsWith('#')) v = "#" + v;
-        if (v.Length != 7) { Toast("A colour is #RRGGBB", error: true); return; }
-        var ids = canvas.Selected.ToList();
-        Submit(() => AsOneUndoStep("Color", async () =>
-        {
-            foreach (var oid in ids) await RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "color", ["value"] = v.ToUpperInvariant() }, reload: oid == ids[^1]);
-        }));
+        ApplyColor(ColorBox.Text);
         canvas.Focus();
         e.Handled = true;
     }
 
-    void FontBox_KeyDown(object sender, KeyEventArgs e)
+    static readonly (string name, string hex)[] Palette =
     {
-        if (e.Key != Key.Enter || canvas.Selected.Count != 1) return;
-        var v = FontBox.Text.Trim();
-        Submit(async () => { await RunEdit(new JsonObject { ["oid"] = canvas.Selected[0], ["op"] = "font", ["value"] = v }); });
+        ("White", "#FFFFFF"), ("Light grey", "#BBBBBB"), ("Grey", "#888888"), ("Black", "#000000"), ("Red", "#FC6255"),
+        ("Orange", "#FF862F"), ("Yellow", "#FFFF00"), ("Green", "#83C167"), ("Teal", "#5CD0B3"), ("Blue", "#58C4DD"),
+        ("Purple", "#9A72AC"), ("Pink", "#D147BD"),
+    };
+
+    void ColorSwatch_Click(object sender, RoutedEventArgs e)
+    {
+        if (canvas.Selected.Count == 0) return;
+        var items = Palette.Select(p => (p.name, (string?)p.hex, (RoutedEventHandler)((_, _) => ApplyColor(p.hex)))).ToList();
+        items.Add(("-", null, (_, _) => { }));
+        items.Add(("Other (type #RRGGBB)…", null, (_, _) => { ColorBox.Focus(); ColorBox.SelectAll(); }));
+        DropDown(ColorSwatch, items.ToArray());
+    }
+
+    void CommitStyle(string? font = null, string? weight = null, string? slant = null)
+    {
+        if (Single is not int s || SelectedObj is not { Kind: "text" }) return;
+        var req = new JsonObject { ["oid"] = s, ["op"] = "style", ["shared"] = true };
+        if (font != null) req["font"] = font;
+        if (weight != null) req["weight"] = weight;
+        if (slant != null) req["slant"] = slant;
+        Submit(() => RunEdit(req));
+    }
+
+    void FontCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (suppressInspector || FontCombo.SelectedItem is not string f || f == SelectedObj?.Font) return;
+        CommitStyle(font: f);
+    }
+
+    void FontCombo_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        var f = FontCombo.Text.Trim();
+        if (f.Length > 0 && f != SelectedObj?.Font) CommitStyle(font: f);
         canvas.Focus();
+        e.Handled = true;
+    }
+
+    void CommitFontSize(double v)
+    {
+        if (Single is not int s || SelectedObj is not { IsText: true } || v < 4 || v > 400) return;
+        SizeBox.Text = v.ToString("0.#");
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "font", ["value"] = Math.Round(v, 1) }));
+    }
+
+    void SizeBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        if (double.TryParse(SizeBox.Text, out var v)) CommitFontSize(v);
+        canvas.Focus();
+        e.Handled = true;
+    }
+
+    void Bigger_Click(object sender, RoutedEventArgs e) { if (SelectedObj?.FontSize is double fs) CommitFontSize(Math.Round(fs * 1.15)); }
+    void Smaller_Click(object sender, RoutedEventArgs e) { if (SelectedObj?.FontSize is double fs) CommitFontSize(Math.Max(4, Math.Round(fs / 1.15))); }
+
+    void Bold_Click(object sender, RoutedEventArgs e) => ToggleBold();
+    void Italic_Click(object sender, RoutedEventArgs e) => ToggleItalic();
+    void ToggleBold()
+    {
+        if (SelectedObj is not { Kind: "text" } o) return;
+        CommitStyle(weight: string.Equals(o.Weight, "BOLD", StringComparison.OrdinalIgnoreCase) ? "NORMAL" : "BOLD");
+    }
+    void ToggleItalic()
+    {
+        if (SelectedObj is not { Kind: "text" } o) return;
+        CommitStyle(slant: string.Equals(o.Slant, "ITALIC", StringComparison.OrdinalIgnoreCase) ? "NORMAL" : "ITALIC");
+    }
+
+    void Decorate(string kind)
+    {
+        if (Single is not int s || SelectedObj is not { IsText: true } o) return;
+        var on = kind == "underline" ? o.Format?.Underline != true : o.Format?.Strike != true;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "decorate", ["kind"] = kind, ["on"] = on }));
+    }
+    void Underline_Click(object sender, RoutedEventArgs e) => Decorate("underline");
+    void Strike_Click(object sender, RoutedEventArgs e) => Decorate("strike");
+
+    void Highlight_Click(object sender, RoutedEventArgs e)
+    {
+        if (Single is not int s || SelectedObj is not { IsText: true }) return;
+        void Set(string? hex)
+        {
+            var req = new JsonObject { ["oid"] = s, ["op"] = "highlight", ["opacity"] = 0.6 };
+            if (hex != null) req["color"] = hex;
+            Submit(() => RunEdit(req));
+        }
+        DropDown(HighlightButton, ("Yellow", "#FFD400", (_, _) => Set("#FFD400")), ("Green", "#34C759", (_, _) => Set("#34C759")),
+            ("Blue", "#4D7CFF", (_, _) => Set("#4D7CFF")), ("Pink", "#FF5FA2", (_, _) => Set("#FF5FA2")),
+            ("Orange", "#FF9A2E", (_, _) => Set("#FF9A2E")), ("-", null, (_, _) => { }), ("No highlight", null, (_, _) => Set(null)));
+    }
+
+    void Align_Click(object sender, RoutedEventArgs e)
+    {
+        if (Single is not int s || SelectedObj is not { Kind: "text" } || (sender as FrameworkElement)?.Tag is not string v) return;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "align", ["value"] = v }));
+    }
+
+    void Spacing_Click(object sender, RoutedEventArgs e)
+    {
+        if (Single is not int s || SelectedObj is not { Kind: "text" }) return;
+        // Manim's line_spacing is relative to the font size with 0.3 as single; 1.0 is single here, as in PowerPoint
+        void Set(double v) => Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "spacing", ["value"] = Math.Max(-0.6, v - 0.7) }));
+        DropDown((Button)sender, ("1.0 (single)", null, (_, _) => Set(1.0)), ("1.15", null, (_, _) => Set(1.15)), ("1.5", null, (_, _) => Set(1.5)),
+            ("2.0 (double)", null, (_, _) => Set(2.0)), ("2.5", null, (_, _) => Set(2.5)), ("3.0", null, (_, _) => Set(3.0)));
+    }
+
+    void ClearFormat_Click(object sender, RoutedEventArgs e)
+    {
+        if (Single is not int s || SelectedObj is not { IsText: true }) return;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "clear_format" }));
+    }
+
+    void Geometry_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter || Single is not int s || SelectedObj is not { } o || sender is not TextBox box) return;
+        e.Handled = true;
+        if (!double.TryParse(box.Text, out var v)) { Toast("Type a number", error: true); return; }
+        var b = canvas.Stop?.Box(s);
+        switch (box.Tag as string)
+        {
+            case "x" when b is Rect r: OnMoveCommitted(new List<int> { s }, v - (r.X + r.Width / 2), 0); canvas.Nudge(0, 0); break;
+            case "y" when b is Rect r: OnMoveCommitted(new List<int> { s }, 0, v - (r.Y + r.Height / 2)); break;
+            case "rot": Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "rotate", ["degrees"] = v })); break;
+            case "w" or "h" when v > 0:
+            {
+                var (w, h) = Dims(s, o);
+                var stretch = AspectLock.IsChecked != true && o.Kind is "image" or "shape";
+                if (!stretch)
+                {
+                    var ratio = (string)box.Tag == "w" ? v / Math.Max(1, w) : v / Math.Max(1, h);
+                    Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "resize", ["ratio"] = ratio }));
+                }
+                else
+                {
+                    var req = new JsonObject { ["oid"] = s, ["op"] = "size" };
+                    req[(string)box.Tag == "w" ? "width" : "height"] = v;
+                    Submit(() => RunEdit(req));
+                }
+                break;
+            }
+        }
+        canvas.Focus();
+    }
+
+    // ================================================================ arrange
+
+    void ArrangeSelection(string how)
+    {
+        var ids = canvas.Selected.ToList();
+        if (ids.Count == 0) return;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = ids[0], ["oids"] = new JsonArray(ids.Select(i => (JsonNode)i).ToArray()), ["op"] = "order", ["value"] = how }));
+    }
+
+    void Arrange_Click(object sender, RoutedEventArgs e) { if ((sender as FrameworkElement)?.Tag is string how) ArrangeSelection(how); }
+
+    void GroupSelection()
+    {
+        var ids = canvas.Selected.ToList();
+        if (ids.Count < 2) { Toast("Select two or more objects to group them"); return; }
+        Submit(() => RunEdit(new JsonObject { ["oid"] = ids[0], ["oids"] = new JsonArray(ids.Select(i => (JsonNode)i).ToArray()), ["op"] = "group" }));
+    }
+
+    void UngroupSelection()
+    {
+        var ids = canvas.Selected.ToList();
+        if (ids.Count == 0) return;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = ids[0], ["oids"] = new JsonArray(ids.Select(i => (JsonNode)i).ToArray()), ["op"] = "ungroup" }));
+    }
+
+    void Group_Click(object sender, RoutedEventArgs e) => GroupSelection();
+    void Ungroup_Click(object sender, RoutedEventArgs e) => UngroupSelection();
+
+    /// The canvas's right-click menu, for what is selected.
+    void CanvasContextMenu(object sender, ContextMenuEventArgs e)
+    {
+        var m = new ContextMenu();
+        void Add(string header, Action a, bool enabled = true, string? gesture = null)
+        {
+            var mi = new MenuItem { Header = header, IsEnabled = enabled, InputGestureText = gesture ?? "" };
+            mi.Click += (_, _) => a();
+            m.Items.Add(mi);
+        }
+        var sel = canvas.Selected.ToList();
+        var o = SelectedObj;
+        if (sel.Count == 0)
+        {
+            Add("Insert Text", () => Insert("text", typeAfter: true), gesture: "Ctrl+Shift+T");
+            Add("Insert Formula…", () => InsertFormula_Click(this, new RoutedEventArgs()), gesture: "Ctrl+Shift+E");
+            Add("Insert Image…", () => InsertImage_Click(this, new RoutedEventArgs()), gesture: "Ctrl+Shift+I");
+            m.Items.Add(new Separator());
+            Add("Select All", canvas.SelectAll, gesture: "Ctrl+A");
+            Add("New Build", () => NewBuild_Click(this, new RoutedEventArgs()), gesture: "Ctrl+Shift+B");
+        }
+        else
+        {
+            if (o is { } obj && (obj.IsText || obj.Kind == "table")) Add(obj.Kind == "tex" ? "Edit LaTeX" : "Edit Text", () => canvas.BeginTextEdit(sel[0]), gesture: "Enter");
+            Add("Delete", DeleteSelection, gesture: "Del");
+            m.Items.Add(new Separator());
+            Add("Bring to Front", () => ArrangeSelection("front"), gesture: "Ctrl+Shift+]");
+            Add("Bring Forward", () => ArrangeSelection("forward"), gesture: "Ctrl+]");
+            Add("Send Backward", () => ArrangeSelection("backward"), gesture: "Ctrl+[");
+            Add("Send to Back", () => ArrangeSelection("back"), gesture: "Ctrl+Shift+[");
+            m.Items.Add(new Separator());
+            Add("Group", GroupSelection, sel.Count > 1, "Ctrl+G");
+            Add("Ungroup", UngroupSelection, sel.Any(i => scene?.Obj(i)?.Group != null), "Ctrl+Shift+G");
+        }
+        m.PlacementTarget = canvas;
+        m.IsOpen = true;
         e.Handled = true;
     }
 
@@ -1212,6 +1493,15 @@ public partial class MainWindow : Window
         if (ctrl && shift && key == Key.I) { InsertImage_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.P) { canvas.DrawTool = canvas.DrawTool == "pen" ? null : "pen"; e.Handled = true; return; }
         if (ctrl && shift && key == Key.B) { NewBuild_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.B) { ToggleBold(); e.Handled = true; return; }
+        if (ctrl && key == Key.I && !shift) { ToggleItalic(); e.Handled = true; return; }
+        if (ctrl && key == Key.U) { Decorate("underline"); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.G) { GroupSelection(); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.G) { UngroupSelection(); e.Handled = true; return; }
+        if (ctrl && key == Key.OemCloseBrackets) { ArrangeSelection(shift ? "front" : "forward"); e.Handled = true; return; }
+        if (ctrl && key == Key.OemOpenBrackets) { ArrangeSelection(shift ? "back" : "backward"); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.OemPeriod) { Bigger_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.OemComma) { Smaller_Click(sender, e); e.Handled = true; return; }
         if (key == Key.Escape && canvas.DrawTool != null) { canvas.DrawTool = null; e.Handled = true; return; }
         if (ctrl && key == Key.D) { DuplicateSlide_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.A) { canvas.SelectAll(); e.Handled = true; return; }
