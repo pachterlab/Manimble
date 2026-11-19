@@ -1199,7 +1199,8 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let status = NSTextField(labelWithString: "")
     private let installButton = NSButton(title: "Install BioCartoon", target: nil, action: nil)
-    private let downloadButton = NSButton(title: "Download", target: nil, action: nil)
+    private let downloadButton = NSButton(title: BioCartoonPane.downloadTitle, target: nil, action: nil)
+    private static let downloadTitle = "Download Icons"
     /// The download of every catalog image, while it runs (the button stops it).
     private var downloadAll: Task<Void, Never>?
     private let grid = NSCollectionView()
@@ -1777,7 +1778,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         }
     }
 
-    /// The header's Download: every catalog image into the offline folder (opened in Finder), after saying how much
+    /// The header's Download Icons: every catalog image into the offline folder (opened in Finder), after saying how much
     /// that is; images already there are kept. Pressed again while it runs, it stops (what came in is kept).
     @objc private func downloadAllPressed() {
         if let t = downloadAll { t.cancel(); return }
@@ -1790,14 +1791,14 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
             defer { downloadButton.isEnabled = true }
             let todo: (keys: [String], bytes: Int64, total: Int)
             do { todo = try await BCOffline.missing(exe) } catch {
-                downloadButton.title = "Download"
+                downloadButton.title = Self.downloadTitle
                 setMessage("Could not list the catalog's images: \(error)")
                 return
             }
             try? FileManager.default.createDirectory(at: BCOffline.assets, withIntermediateDirectories: true)
             NSWorkspace.shared.open(folder)
             guard !todo.keys.isEmpty else {
-                downloadButton.title = "Download"
+                downloadButton.title = Self.downloadTitle
                 setMessage("All \(Self.count(todo.total)) images are downloaded, in \(folder.path).")
                 return
             }
@@ -1807,7 +1808,7 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
                 + (todo.keys.count < todo.total ? "The other \(Self.count(todo.total - todo.keys.count)) are there already. " : "")
                 + "Searches then show them without internet."
             a.addButton(withTitle: "Download"); a.addButton(withTitle: "Cancel")
-            guard a.runModal() == .alertFirstButtonReturn else { downloadButton.title = "Download"; return }
+            guard a.runModal() == .alertFirstButtonReturn else { downloadButton.title = Self.downloadTitle; return }
             let n = todo.keys.count
             downloadButton.title = "Stop"
             downloadButton.toolTip = "Stop downloading (images downloaded so far are kept)"
@@ -1818,12 +1819,12 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
                     self?.status.stringValue = "Downloaded \(Self.count(done)) of \(Self.count(n)) images…"
                 }
                 downloadAll = nil
-                downloadButton.title = "Download"
+                downloadButton.title = Self.downloadTitle
                 downloadButton.toolTip = "Download every icon's image, so searches show them without internet"
                 status.stringValue = ""
                 let stopped = Task.isCancelled
                 setMessage((stopped ? "Download stopped: " : "Downloaded ") + "\(Self.count(r.got)) images into \(folder.path)"
-                           + (r.failed > 0 && !stopped ? "; \(Self.count(r.failed)) could not be downloaded (press Download to try them again)." : "."))
+                           + (r.failed > 0 && !stopped ? "; \(Self.count(r.failed)) could not be downloaded (press Download Icons to try them again)." : "."))
                 grid.reloadData()      // tiles that had no thumbnail
             }
         }

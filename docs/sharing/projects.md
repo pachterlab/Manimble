@@ -64,6 +64,7 @@ manimbler --convert talk.manimble --output talk.mp4   # the animated show as a m
 manimbler --convert talk.manimble --slides 1-3,7 --output excerpt.mp4
 manimbler --convert talk.manimble --to pdf --output handout.pdf
 manimbler --convert talk.manimble --to html --output talk.html
+manimbler --submit talk.manimble --title "My talk" --authors "Ada Lovelace"   # share it on the Examples page
 ```
 
 | Option | Meaning |
@@ -72,12 +73,15 @@ manimbler --convert talk.manimble --to html --output talk.html
 | `--info FILE` | Show the slide order, build counts, package size and the estimated running time of the movie. |
 | `--extract FILE` | Unpack into a project folder (by default, the package name without `.manimble`). |
 | `--convert FILE` | Convert to MP4, PDF or HTML. |
+| `--submit FILE` | Check the package, then upload it with the details below for review for the [Examples page](../examples.md). |
 | `--to {mp4,pdf,html}` | The format, if the output name doesn't make it clear. |
 | `-o`, `--output` | The output file or folder. |
 | `--slides LIST` | Only these slides, by number, range or name. They keep their order in the deck. |
 | `--hold SECONDS` | How long each build's last frame is held in a movie (default 2; `0` for no pauses). |
 | `--fps N` | The movie's frame rate (default 30). |
 | `--force` | Replace existing output. |
+| `--title`, `--authors`, `--institution`, `--date`, `--keywords`, `--description` | The example's details, for `--submit`. You are asked for a missing title and authors. |
+| `--yes` | With `--submit`, confirm that you may share the presentation instead of being asked. |
 
 Conversion follows the deck's `order.txt`. Movies have no sound. PDF and HTML conversion use the installed Manim
 Slides; keep a generated HTML file together with its `_assets` folder when you share it.

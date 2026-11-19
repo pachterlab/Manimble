@@ -60,7 +60,7 @@ class ManimblerTests(unittest.TestCase):
 
     def run_command(self, *args):
         return subprocess.run([sys.executable, str(COMMAND), *map(str, args)],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def test_convert_follows_slide_order_and_holds_each_build(self):
         package = self.make_package()
@@ -136,6 +136,74 @@ class ManimblerTests(unittest.TestCase):
         self.assertEqual(rejected.returncode, 1)
         self.assertIn("Invalid archive entry", rejected.stderr)
         self.assertFalse((self.root / "unsafe").exists())
+
+    def serve_examples(self, status=201, reply=None):
+        """A stand-in for the Examples Worker that records what it was sent."""
+        import http.server
+        import threading
+        received = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                received["path"] = self.path
+                received["meta"] = self.headers["x-manimble-meta"]
+                received["body"] = self.rfile.read(int(self.headers["content-length"]))
+                body = json.dumps(reply or {"id": "0" * 32}).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}", received
+
+    def run_submit(self, url, *args):
+        import os
+        return subprocess.run([sys.executable, str(COMMAND), "--submit", *map(str, args)],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              env={**os.environ, "MANIMBLE_EXAMPLES_URL": url})
+
+    def test_submit_uploads_package_and_details(self):
+        from urllib.parse import unquote
+        package = self.make_package()
+        url, received = self.serve_examples(reply={"id": "a" * 32, "issue_url": "https://example.test/1"})
+        result = self.run_submit(url, package, "--title", "Knots & links", "--authors", "Ada Lovelace",
+                                 "--date", "2026-11-19", "--keywords", "topology", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(received["path"], "/submit")
+        self.assertEqual(received["body"], package.read_bytes())
+        meta = json.loads(unquote(received["meta"]))
+        self.assertEqual(meta["title"], "Knots & links")
+        self.assertEqual(meta["date"], "2026-11-19")
+        self.assertIs(meta["agree"], True)
+        self.assertIn("https://example.test/1", result.stdout)
+
+    def test_submit_refuses_without_consent_or_details(self):
+        package = self.make_package()
+        url, received = self.serve_examples()
+        result = self.run_submit(url, package, "--title", "T", "--authors", "A")
+        self.assertIn("--yes", result.stderr)
+        result = self.run_submit(url, package, "--authors", "A", "--yes")
+        self.assertIn("--title is required", result.stderr)
+        result = self.run_submit(url, package, "--title", "T", "--authors", "A", "--date", "19/11/2026", "--yes")
+        self.assertIn("YYYY-MM-DD", result.stderr)
+        result = self.run_submit(url, self.make_package(missing_video=True), "--title", "T", "--authors", "A", "--yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(received, {})
+        result = self.run_command("--check", package, "--title", "T")
+        self.assertIn("require --submit", result.stderr)
+
+    def test_submit_reports_the_services_refusal(self):
+        url, _ = self.serve_examples(status=429, reply={"error": "please try again tomorrow"})
+        result = self.run_submit(url, self.make_package(), "--title", "T", "--authors", "A", "--yes")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("please try again tomorrow", result.stderr)
 
     @unittest.skipUnless(Path(MANIM_SLIDES).is_file(), "Manim Slides is required")
     def test_pdf_and_html_export(self):

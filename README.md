@@ -79,6 +79,7 @@ manimbler --convert deck.manimble --output talk.mp4
 manimbler --convert deck.manimble --slides 1-3,7 --output excerpt.mp4
 manimbler --convert deck.manimble --to pdf --output handout.pdf
 manimbler --convert deck.manimble --to html --output presentation.html
+manimbler --submit deck.manimble    # share it on the website's Examples page
 ```
 
 `--check` verifies the archive and its referenced media. `--info` shows slide order, build counts, package sizes, and

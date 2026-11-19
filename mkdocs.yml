@@ -51,6 +51,9 @@ theme:
 extra_css:
   - assets/manimble.css
 
+extra_javascript:
+  - assets/examples.js
+
 extra:
   generator: false
   social:
@@ -111,6 +114,7 @@ nav:
       - Importing presentations: sharing/import.md
       - Exporting: sharing/export.md
       - Projects and packages: sharing/projects.md
+  - Examples: examples.md
   - Reference:
       - Keyboard shortcuts: reference/shortcuts.md
       - Deck file format: reference/deck-format.md

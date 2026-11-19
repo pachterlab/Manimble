@@ -1,0 +1,64 @@
+# For examples too large for the upload service (worker/, over 95 MB): the Examples page links here.
+name: Submit an example presentation
+description: Share a presentation made with Manimble for the Examples page.
+title: "[Example] "
+labels: ["example"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for sharing your presentation. Packages up to 95 MB can be uploaded directly on the
+        [Examples page](https://pachterlab.github.io/Manimble/examples/) or with `manimbler --submit`.
+        Use this form for a larger one: upload it to a service such as Zenodo, Google Drive or Dropbox,
+        and paste its link below.
+  - type: input
+    id: example-title
+    attributes:
+      label: Title
+      description: The presentation's title.
+    validations:
+      required: true
+  - type: input
+    id: authors
+    attributes:
+      label: Authors
+      description: Separate names with commas.
+      placeholder: Ada Lovelace, Charles Babbage
+    validations:
+      required: true
+  - type: input
+    id: institution
+    attributes:
+      label: Institution
+      placeholder: University, company or lab
+  - type: input
+    id: date
+    attributes:
+      label: Date
+      description: When the talk was given, if it was (YYYY-MM-DD).
+      placeholder: "2026-11-19"
+  - type: input
+    id: keywords
+    attributes:
+      label: Keywords
+      description: Separate keywords with commas.
+      placeholder: topology, lecture, animation
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A sentence or two about the talk, shown with it on the Examples page.
+  - type: textarea
+    id: package
+    attributes:
+      label: Presentation file
+      description: A link to the `.manimble` package.
+    validations:
+      required: true
+  - type: checkboxes
+    id: permission
+    attributes:
+      label: Permission
+      options:
+        - label: I have the right to share this presentation, and agree that it may be shown and downloaded from the Manimble website.
+          required: true

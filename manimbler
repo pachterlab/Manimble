@@ -12,6 +12,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
@@ -428,6 +431,94 @@ def export(source: Path, destination: Path, *, kind: str, slides: str | None,
         return len(clips), len(scenes)
 
 
+EXAMPLES_SERVICE = "https://api.manimble.com"
+MAX_EXAMPLE_BYTES = 95 * 1024 * 1024  # keep in sync with worker/src/index.ts
+
+
+def _ask(label: str, value: str | None, *, required: bool) -> str:
+    """Use the value given on the command line, or ask for it when run in a terminal."""
+    value = (value or "").strip()
+    while not value and sys.stdin.isatty():
+        value = input(f"{label}{'' if required else ' (optional)'}: ").strip()
+        if not required:
+            break
+    if required and not value:
+        raise ValueError(f"--{label.lower()} is required")
+    return value
+
+
+class _Progress:
+    """A file reader that reports how much of it has been sent."""
+
+    def __init__(self, file, size: int):
+        self.file, self.size, self.sent = file, size, 0
+        self.show = sys.stderr.isatty()
+
+    def read(self, amount: int = -1) -> bytes:
+        chunk = self.file.read(1024 * 1024 if amount is None or amount < 0 else amount)
+        self.sent += len(chunk)
+        if self.show:
+            end = "\n" if self.sent >= self.size else ""
+            print(f"\rUploading… {100 * self.sent // max(self.size, 1)}%", end=end, file=sys.stderr, flush=True)
+        return chunk
+
+
+def submit(source: Path, *, title: str | None, authors: str | None, institution: str | None,
+           date: str | None, keywords: str | None, description: str | None,
+           confirmed: bool = False) -> dict:
+    """Check a package, then upload it with its details for review for the website's Examples page."""
+    project, clips = check(source)
+    print(f"OK: {source} ({len(project.scenes)} slides, {len(clips)} builds; all files intact)")
+    size = source.stat().st_size
+    if size > MAX_EXAMPLE_BYTES:
+        raise ValueError(f"{source.name} is {_human_size(size)}; examples can be at most "
+                         f"{_human_size(MAX_EXAMPLE_BYTES)}. Open an issue on GitHub with a link to it instead.")
+    if date:
+        from datetime import date as Date
+        try:
+            Date.fromisoformat(date)
+        except ValueError:
+            raise ValueError(f"--date must be YYYY-MM-DD, not {date!r}") from None
+    meta = {
+        "title": _ask("Title", title, required=True),
+        "authors": _ask("Authors", authors, required=True),
+        "institution": _ask("Institution", institution, required=False),
+        "date": date or "",
+        "keywords": _ask("Keywords", keywords, required=False),
+        "description": (description or "").strip(),
+    }
+    if not confirmed:
+        if not sys.stdin.isatty():
+            raise ValueError("pass --yes to confirm that you may share this presentation")
+        answer = input(f"Upload {source.name} ({_human_size(size)}) for the Manimble Examples page? It is "
+                       "reviewed, then anyone can download it. Do you have the right to share it? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            raise ValueError("not submitted")
+    service = os.environ.get("MANIMBLE_EXAMPLES_URL", EXAMPLES_SERVICE).rstrip("/")
+    header = urllib.parse.quote(json.dumps({**meta, "agree": True}, ensure_ascii=False), safe="")
+    with source.open("rb") as file:
+        request = urllib.request.Request(f"{service}/submit", data=_Progress(file, size), method="POST", headers={
+            "content-type": "application/zip", "content-length": str(size),
+            "x-manimble-meta": header, "user-agent": "manimbler",
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as error:
+            try:
+                message = json.load(error).get("error") or error.reason
+            except ValueError:
+                message = error.reason
+            raise RuntimeError(f"the Examples service refused the upload: {message}") from None
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"couldn't reach the Examples service: {error.reason}") from None
+    print(f"Submitted “{meta['title']}”. It appears on https://pachterlab.github.io/Manimble/examples/ "
+          "once it has been reviewed.")
+    if result.get("issue_url"):
+        print(f"Review: {result['issue_url']}")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Tools for .manimble project files")
     actions = parser.add_mutually_exclusive_group(required=True)
@@ -439,6 +530,8 @@ def main(argv: list[str] | None = None) -> int:
                          help="show slides, builds, size, and running time")
     actions.add_argument("--extract", metavar="FILE", type=Path,
                          help="unpack the project into a directory")
+    actions.add_argument("--submit", metavar="FILE", type=Path,
+                         help="upload the project for the Manimble website's Examples page")
     parser.add_argument("--to", choices=("mp4", "pdf", "html"),
                         help="conversion format (default: MP4 or output extension)")
     parser.add_argument("-o", "--output", type=Path, help="output file or extraction directory")
@@ -448,8 +541,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds to hold each build in MP4 (default: 2)")
     parser.add_argument("--fps", type=int, default=30, help="output frame rate (default: 30)")
     parser.add_argument("--force", action="store_true", help="replace existing conversion output")
+    submission = parser.add_argument_group("example details (with --submit)")
+    submission.add_argument("--title", help="the presentation's title")
+    submission.add_argument("--authors", help="authors, separated by commas")
+    submission.add_argument("--institution", help="university, company or lab")
+    submission.add_argument("--date", help="when the talk was given (YYYY-MM-DD)")
+    submission.add_argument("--keywords", help="keywords, separated by commas")
+    submission.add_argument("--description", help="a sentence or two about the talk")
+    submission.add_argument("--yes", action="store_true",
+                            help="confirm that you may share it, without being asked")
     args = parser.parse_args(argv)
-    source = (args.convert or args.check or args.info or args.extract).expanduser()
+    source = (args.convert or args.check or args.info or args.extract or args.submit).expanduser()
+    details = ("title", "authors", "institution", "date", "keywords", "description", "yes")
+    if args.submit is None and any(getattr(args, name) for name in details):
+        parser.error("--title, --authors, --institution, --date, --keywords, --description, "
+                     "and --yes require --submit")
     if args.convert is None and (args.to or args.slides or args.force):
         parser.error("--to, --slides, and --force require --convert")
     if args.convert is None and args.output and args.extract is None:
@@ -460,6 +566,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"OK: {source} ({len(project.scenes)} slides, {len(clips)} builds; all files intact)")
         elif args.info:
             info(source, hold=args.hold)
+        elif args.submit:
+            submit(source, title=args.title, authors=args.authors, institution=args.institution,
+                   date=args.date, keywords=args.keywords, description=args.description,
+                   confirmed=args.yes)
         elif args.extract:
             destination = (args.output or source.with_suffix("")).expanduser()
             print(f"Extracted {extract(source, destination)}")
