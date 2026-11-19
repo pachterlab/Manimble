@@ -50,6 +50,7 @@ both, as on the Mac.
 | `Ruler.cs` | the rulers along the canvas, in manim units; drag a guide off them onto the slide |
 | `TableEditing.cs` | table cells: typed into on the slide, or in the inspector's grid (rows and columns added or removed there) |
 | `BioCartoon.cs` | the BioCartoon icon search panel (the `biocartoon` command line) and inserting its icons |
+| `PythonPlot.cs` | Python plots: the plot editor, running the code, and pointing the picture at a new output |
 | `SlideCanvas.cs` | the canvas: the exact frame when idle, backdrop and sprites while dragging or while an optimistic edit waits for its render |
 | `SlideshowWindow.cs` | the full-screen show of the exact frames |
 | `Models.cs` | the engine's replies |

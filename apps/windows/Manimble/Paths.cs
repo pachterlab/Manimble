@@ -93,6 +93,8 @@ public sealed class Settings
     public bool SkipLatexSetup { get; set; }
     /// Rulers along the slide (View > Ruler).
     public bool ShowRulers { get; set; } = true;
+    /// The Python that runs Python plots, when chosen in the plot editor (else the first with matplotlib).
+    public string? PlotPython { get; set; }
     /// The user's guides per deck (the original folder, lower-cased): [1 = vertical / 0 = horizontal, frame px].
     public Dictionary<string, List<double[]>> Guides { get; set; } = new();
 

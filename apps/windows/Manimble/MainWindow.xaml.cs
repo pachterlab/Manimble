@@ -82,6 +82,9 @@ public partial class MainWindow : Window
         SourceEditor.Options.IndentationSize = 4;
         canvas.MoveCommitted += OnMoveCommitted;
         canvas.CellCommitted += CommitCell;
+        canvas.HasCornerAction = oid => PlotOf(oid) != null;
+        canvas.CornerAction += RerunPlot;
+        canvas.ObjectDoubleClicked += EditPlot;
         canvas.CanDrop = d => d.GetDataPresent(BioCartoonPanel.DragFormat);
         canvas.DataDropped += (d, p) => { if (BioCartoonPanel.FromDrag(d) is { } icon) BioCartoonDropped(icon, p); };
         canvas.TextCommitted += (oid, text) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "text", ["value"] = text }));
@@ -1325,6 +1328,13 @@ public partial class MainWindow : Window
             if (o is { Kind: "text" or "tex" } lo)
                 Add(lo.Format?.Link == null ? "Add Hyperlink…" : "Edit Hyperlink…", () => Hyperlink_Click(this, new RoutedEventArgs()), gesture: "Ctrl+K");
             Add("Delete", DeleteSelection, gesture: "Del");
+            if (sel.Count == 1 && PlotOf(sel[0]) != null)
+            {
+                m.Items.Add(new Separator());
+                var plot = sel[0];
+                Add("Edit Plot…", () => EditPlot(plot), gesture: "Enter");
+                Add("Run Plot Again", () => RerunPlot(plot));
+            }
             m.Items.Add(new Separator());
             Add("Bring to Front", () => ArrangeSelection("front"), gesture: "Ctrl+Shift+]");
             Add("Bring Forward", () => ArrangeSelection("forward"), gesture: "Ctrl+]");
@@ -1977,7 +1987,9 @@ public partial class MainWindow : Window
             case Key.Right: Nudge(step, 0); e.Handled = canvas.Selected.Count > 0; break;
             case Key.Up: Nudge(0, -step); e.Handled = canvas.Selected.Count > 0; break;
             case Key.Down: Nudge(0, step); e.Handled = canvas.Selected.Count > 0; break;
-            case Key.Enter when canvas.Selected.Count == 1: canvas.BeginTextEdit(canvas.Selected[0]); e.Handled = true; break;
+            case Key.Enter when canvas.Selected.Count == 1:
+                if (PlotOf(canvas.Selected[0]) != null) EditPlot(canvas.Selected[0]); else canvas.BeginTextEdit(canvas.Selected[0]);
+                e.Handled = true; break;
             case Key.Escape: canvas.Select(Array.Empty<int>()); e.Handled = true; break;
         }
     }

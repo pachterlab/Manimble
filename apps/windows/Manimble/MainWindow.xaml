@@ -90,6 +90,7 @@
         <MenuItem Header="_Math Table…" Tag="math" Click="InsertTable_Click"/>
         <MenuItem Header="_Image…" InputGestureText="Ctrl+Shift+I" Click="InsertImage_Click"/>
         <MenuItem Header="_BioCartoon Icons…" Click="BioCartoon_Click"/>
+        <MenuItem Header="Python _Plot…" Click="InsertPythonPlot_Click"/>
         <Separator/>
         <MenuItem Header="Slide _Numbers…" Click="SlideNumbers_Click"/>
       </MenuItem>
@@ -202,6 +203,9 @@
         </Button>
         <Button Click="BioCartoon_Click" ToolTip="Search BioCartoon's library of scientific illustrations">
           <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8B9;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="BioCartoon"/></StackPanel>
+        </Button>
+        <Button Click="InsertPythonPlot_Click" ToolTip="Insert a picture drawn by Python code (Matplotlib), which can be run again">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9D2;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Python Plot"/></StackPanel>
         </Button>
         <Button Click="InsertImage_Click" ToolTip="Insert an image (Ctrl+Shift+I)">
           <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xEB9F;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Image"/></StackPanel>

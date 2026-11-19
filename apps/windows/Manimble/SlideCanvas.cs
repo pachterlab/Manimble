@@ -66,6 +66,11 @@ public sealed class SlideCanvas : Border
     public event Action<IDataObject, Point>? DataDropped;
     /// Something dragged over the slide: whether it can be dropped there.
     public Func<IDataObject, bool>? CanDrop;
+    /// Objects with a ▶ badge on hover (Python plots, to run their code again), and its click.
+    public Func<int, bool>? HasCornerAction;
+    public event Action<int>? CornerAction;
+    /// A double-click on an object that is not text or a table (a Python plot opens its editor).
+    public event Action<int>? ObjectDoubleClicked;
     /// Text typed into an empty layout placeholder.
     public event Action<Placeholder, string>? PlaceholderCommitted;
 
@@ -269,6 +274,25 @@ public sealed class SlideCanvas : Border
         DrawOverlay();
         GuidesChanged?.Invoke();
     }
+
+    /// The object whose ▶ badge shows: the one under the pointer, else the single selection.
+    int? CornerTarget()
+    {
+        if (HasCornerAction == null || mode != Mode.None || drawTool != null || editor != null) return null;
+        if (hover is int h && HasCornerAction(h)) return h;
+        return Selected.Count == 1 && HasCornerAction(Selected[0]) ? Selected[0] : null;
+    }
+
+    /// The ▶ badge inside an object's top-right corner (clear of the corner's resize handle).
+    Rect? CornerRect(int oid)
+    {
+        if (BoxOf(oid) is not Rect b) return null;
+        double s = 24 / Scale, inset = 10 / Scale;
+        if (b.Width < s + 2 * inset || b.Height < s + 2 * inset) return new Rect(b.Right + inset / 2, b.Top, s, s);
+        return new Rect(b.Right - s - inset, b.Top + inset, s, s);
+    }
+
+    int? CornerAt(Point p) => CornerTarget() is int c && CornerRect(c) is Rect r && r.Contains(p) ? c : null;
 
     /// The user guide under a frame point (within a few screen pixels).
     int? GuideAt(Point p)
@@ -620,6 +644,21 @@ public sealed class SlideCanvas : Border
                 ? new Line { X1 = pos, Y1 = 0, X2 = pos, Y2 = frame.Height, Stroke = orange, StrokeThickness = t, StrokeDashArray = new DoubleCollection { 4, 3 }, IsHitTestVisible = false }
                 : new Line { X1 = 0, Y1 = pos, X2 = frame.Width, Y2 = pos, Stroke = orange, StrokeThickness = t, StrokeDashArray = new DoubleCollection { 4, 3 }, IsHitTestVisible = false });
         }
+        if (CornerTarget() is int ct && CornerRect(ct) is Rect cr)
+        {
+            overlay.Children.Add(Placed(new Ellipse
+            {
+                Width = cr.Width, Height = cr.Height, Fill = new SolidColorBrush(Color.FromArgb(0xe0, 0x20, 0x22, 0x28)),
+                Stroke = Accent, StrokeThickness = t, IsHitTestVisible = false,
+            }, cr.X, cr.Y));
+            double k = cr.Width;
+            var tri = new Polygon
+            {
+                Points = new PointCollection { new(cr.X + k * 0.38, cr.Y + k * 0.28), new(cr.X + k * 0.38, cr.Y + k * 0.72), new(cr.X + k * 0.74, cr.Y + k * 0.5) },
+                Fill = Brushes.White, IsHitTestVisible = false,
+            };
+            overlay.Children.Add(tri);
+        }
         if (band is Rect bd)
         {
             if (mode == Mode.Marquee)
@@ -784,6 +823,11 @@ public sealed class SlideCanvas : Border
             overlay.CaptureMouse();
             return;
         }
+        if (CornerAt(p) is int ca)
+        {
+            CornerAction?.Invoke(ca);
+            return;
+        }
         if (HandleAt(p) is { } hd)
         {
             dragOid = hd.oid;
@@ -806,6 +850,7 @@ public sealed class SlideCanvas : Border
         {
             // a double-click retypes text and formulas; on anything else it is an ordinary press (a quick drag)
             if (hit is int h && Scene?.Obj(h) is { } o && (o.IsText || o.Kind == "table")) { BeginTextEdit(h, p); return; }
+            if (hit is int dh && HasCornerAction?.Invoke(dh) == true) { Select(new[] { dh }); ObjectDoubleClicked?.Invoke(dh); return; }
             if (hit == null && PlaceholderAt(p) is { } ph) { BeginPlaceholderEdit(ph); return; }
         }
         if (hit is int oid)
@@ -902,6 +947,7 @@ public sealed class SlideCanvas : Border
                 return;
         }
         if (drawTool != null) return;
+        if (CornerAt(p) != null) { Cursor = Cursors.Hand; return; }
         if (HandleAt(p) is { } hd)
         {
             Cursor = hd.which >= 20 ? Cursors.SizeWE : hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
