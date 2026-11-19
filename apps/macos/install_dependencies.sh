@@ -15,9 +15,9 @@ set -euo pipefail
 REPO=pachterlab/Manimble
 SUPPORT="$HOME/Library/Application Support/Manimble"
 TINYTEX="$HOME/Library/TinyTeX"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 VERSION="${MANIMBLE_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
-  HERE="$(cd "$(dirname "$0")" && pwd)"
   VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$HERE/../Info.plist" 2>/dev/null \
     || cat "$HERE/../../VERSION" 2>/dev/null || true)"
 fi
@@ -41,6 +41,26 @@ arch() { [[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" == 1 ]] && echo arm64 |
 # download URL DEST: curl's progress bar ends each update with "NN.N%", which the setup window reads
 download() { run curl -fL --retry 3 --progress-bar -o "$2" "$1"; }
 
+# Every download is checked against a SHA-256 before it is unpacked, so one altered or cut short on the way is never used.
+sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
+
+# github_digest OWNER/REPO TAG ASSET: the SHA-256 GitHub recorded when the release asset was uploaded (the API's
+# "digest" field), or nothing when it can't be had. TAG "latest" means the newest release.
+github_digest() {
+  local rel="tags/$2"
+  [[ "$2" == latest ]] && rel=latest
+  { curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1/releases/$rel" 2>/dev/null     | grep -oE '"(name|digest)": *"[^"]*"'     | awk -F'"' -v want="$3" '$2 == "name" { hit = ($4 == want) } $2 == "digest" && hit { sub(/^sha256:/, "", $4); print $4; exit }'
+  } || true
+}
+
+# verify FILE EXPECTED_SHA256 WHAT
+verify() {
+  local got
+  [[ -n "$2" ]] || { echo "Could not get the checksum to verify $3 with" >&2; return 1; }
+  got="$(sha256 "$1")"
+  [[ "$got" == "$2" ]] || { echo "$3 failed its checksum (expected $2, got $got)" >&2; return 1; }
+}
+
 check_tex() {
   if ! command -v latex >/dev/null 2>&1; then echo missing; return; fi
   if command -v dvisvgm >/dev/null 2>&1 \
@@ -52,19 +72,36 @@ check_tex() {
 }
 
 install_python() {
-  local a tmp url
+  local a tmp url name pinned expected
   a="$(arch)"
+  name="Manimble-python-$a.tar.gz"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
+  # A release build carries its runtimes' checksums (written by the release workflow); a build from source asks
+  # GitHub for the checksum of the release asset it downloads.
+  pinned="$(awk -v a="$a" '$1 == a { print $2 }' "$HERE/runtime-sha256.txt" 2>/dev/null || true)"
   step "Downloading Python and Manim"
   # the runtime built for this version, else the newest one (a build from source between releases);
-  # MANIMBLE_RUNTIME_URL points elsewhere, e.g. file:///path/to/Manimble-python-arm64.tar.gz from build_python_runtime.sh
-  for url in ${MANIMBLE_RUNTIME_URL:+"$MANIMBLE_RUNTIME_URL"} ${VERSION:+"https://github.com/$REPO/releases/download/v$VERSION/Manimble-python-$a.tar.gz"} \
-             "https://github.com/$REPO/releases/latest/download/Manimble-python-$a.tar.gz"; do
-    if download "$url" "$tmp/python.tar.gz"; then break; fi
+  # MANIMBLE_RUNTIME_URL points elsewhere, e.g. file:///path/to/Manimble-python-arm64.tar.gz from build_python_runtime.sh,
+  # checked against MANIMBLE_RUNTIME_SHA256 when that is set
+  for url in ${MANIMBLE_RUNTIME_URL:+"$MANIMBLE_RUNTIME_URL"} ${VERSION:+"https://github.com/$REPO/releases/download/v$VERSION/$name"} \
+             "https://github.com/$REPO/releases/latest/download/$name"; do
+    rm -f "$tmp/python.tar.gz"
+    download "$url" "$tmp/python.tar.gz" || continue
+    if [[ "$url" == "${MANIMBLE_RUNTIME_URL:-}" ]]; then
+      if [[ -z "${MANIMBLE_RUNTIME_SHA256:-}" ]]; then echo "Not verifying $url: MANIMBLE_RUNTIME_SHA256 is not set" >&2; break; fi
+      expected="$MANIMBLE_RUNTIME_SHA256"
+    elif [[ -n "$pinned" ]]; then
+      expected="$pinned"
+    elif [[ "$url" == */latest/* ]]; then
+      expected="$(github_digest "$REPO" latest "$name")"
+    else
+      expected="$(github_digest "$REPO" "v$VERSION" "$name")"
+    fi
+    verify "$tmp/python.tar.gz" "$expected" "The Python runtime from $url" && break
     rm -f "$tmp/python.tar.gz"
   done
-  [[ -f "$tmp/python.tar.gz" ]] || { echo "Could not download the Python runtime" >&2; exit 1; }
+  [[ -f "$tmp/python.tar.gz" ]] || { echo "Could not download a verified Python runtime" >&2; exit 1; }
   step "Unpacking Python"
   run tar -xzf "$tmp/python.tar.gz" -C "$tmp"
   step "Checking Python"
@@ -90,6 +127,7 @@ install_tex() {
     [[ -n "$tag" ]] || { echo "Could not find the latest TinyTeX release" >&2; exit 1; }
     step "Downloading LaTeX (TinyTeX $tag)"
     download "https://github.com/rstudio/tinytex-releases/releases/download/$tag/TinyTeX-1-darwin-$tag.tar.xz" "$tmp/tinytex.tar.xz"
+    verify "$tmp/tinytex.tar.xz" "$(github_digest rstudio/tinytex-releases "$tag" "TinyTeX-1-darwin-$tag.tar.xz")" "TinyTeX $tag" || exit 1
     step "Unpacking LaTeX"
     run tar -xJf "$tmp/tinytex.tar.xz" -C "$tmp"
     mkdir -p "$(dirname "$TINYTEX")"

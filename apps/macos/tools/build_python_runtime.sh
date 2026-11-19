@@ -18,17 +18,26 @@ OUT="$(cd "$OUT" && pwd)"
 PBS_TAG=20261021
 PY_VERSION=3.11.17
 MICROMAMBA_VERSION=2.9.0-0
+# SHA-256s of the two downloads below, per architecture (GitHub shows them as each release asset's "digest");
+# update them with PBS_TAG, PY_VERSION or MICROMAMBA_VERSION
 ARCH="$(uname -m)"
 case "$ARCH" in
-  arm64) TRIPLE=aarch64-apple-darwin; CONDA_PLATFORM=osx-arm64 ;;
-  x86_64) TRIPLE=x86_64-apple-darwin; CONDA_PLATFORM=osx-64 ;;
+  arm64) TRIPLE=aarch64-apple-darwin; CONDA_PLATFORM=osx-arm64
+    PY_SHA256=1d1335d9d526bc37061af3fe72b0edd88056d7e7d9488eb631946b10b4ab97bb
+    MICROMAMBA_SHA256=ec2a072f028e1a7cf20f3e2e74d5a8127cf5a5f27636375b5359811565f4e5be ;;
+  x86_64) TRIPLE=x86_64-apple-darwin; CONDA_PLATFORM=osx-64
+    PY_SHA256=2a9df73aa8f6ff595f912dfb642c7933f604f5c6e24234fd524cb77b2629b9fc
+    MICROMAMBA_SHA256=1e71054bb3ac9a076e21f7ec48acfef536f9b3f1408f371a942784bf5ef83d8a ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 1 ;;
 esac
+# check FILE SHA256
+check() { echo "$2  $1" | shasum -a 256 -c --quiet - || { echo "$1 does not match its pinned SHA-256" >&2; exit 1; }; }
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 curl -fsSL -o "$WORK/python.tar.gz" \
   "https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG/cpython-$PY_VERSION+$PBS_TAG-$TRIPLE-install_only_stripped.tar.gz"
+check "$WORK/python.tar.gz" "$PY_SHA256"
 tar -xzf "$WORK/python.tar.gz" -C "$WORK"   # -> $WORK/python
 PY="$WORK/python/bin/python3"
 ln -sf python3 "$WORK/python/bin/python"
@@ -37,6 +46,7 @@ ln -sf python3 "$WORK/python/bin/python"
 # packages that carry the .pc files cairo's pkg-config dependencies need (libzlib etc. are runtime-only)
 curl -fsSL -o "$WORK/micromamba" \
   "https://github.com/mamba-org/micromamba-releases/releases/download/$MICROMAMBA_VERSION/micromamba-$CONDA_PLATFORM"
+check "$WORK/micromamba" "$MICROMAMBA_SHA256"
 chmod +x "$WORK/micromamba"
 CF="$WORK/cf"
 MAMBA_ROOT_PREFIX="$WORK/mamba" "$WORK/micromamba" create -q -y -p "$CF" -c conda-forge --override-channels \

@@ -1,0 +1,16 @@
+# Opens pull requests when a pinned dependency has a newer release (security fixes included):
+# the GitHub Actions in .github/workflows (pinned by commit, with the version in a comment) and the Python
+# packages the app's runtime is built from (engine/requirements.txt).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /engine
+    schedule:
+      interval: monthly
