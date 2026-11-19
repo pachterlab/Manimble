@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <PackageReference Include="AvalonEdit" Version="6.3.0.90" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
   </ItemGroup>
 
   <!-- the shared engine ships next to Manimble.exe, as engine\manimble -->
@@ -30,6 +31,8 @@
     <None Include="..\..\..\engine\manimble\**\*.md"
           Link="engine\manimble\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\engine\requirements.txt" Link="engine\requirements.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the terminal page: xterm.js (MIT, see Terminal\LICENSE-xterm.txt) -->
+    <None Include="Terminal\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

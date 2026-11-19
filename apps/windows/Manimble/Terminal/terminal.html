@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Manimble Terminal</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1b1e; overflow: hidden; }
+  #term { position: absolute; inset: 4px 0 0 8px; }
+  .xterm .xterm-viewport { scrollbar-width: thin; }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script>
+  // xterm.js draws the terminal; the app runs the shell in a Windows pseudo console (ConPTY) and passes the bytes:
+  // host -> page {type: "out", data}, page -> host {type: "in", data} and {type: "resize", cols, rows}
+  const term = new Terminal({
+    fontFamily: '"Cascadia Mono", Consolas, monospace', fontSize: 13, cursorBlink: true, scrollback: 10000,
+    allowProposedApi: true, convertEol: false,
+    theme: { background: '#1b1b1e', foreground: '#e6e6e6', cursor: '#e6e6e6', selectionBackground: '#3a5a8c' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('term'));
+  const post = m => window.chrome.webview.postMessage(m);
+  function resize() {
+    try { fit.fit(); } catch (e) {}
+    post({ type: 'resize', cols: term.cols, rows: term.rows });
+  }
+  term.onData(d => post({ type: 'in', data: d }));
+  // Ctrl+C copies when text is selected (else it goes to the shell); Ctrl+V pastes
+  term.attachCustomKeyEventHandler(e => {
+    if (e.type !== 'keydown') return true;
+    if (e.ctrlKey && !e.shiftKey && e.key === 'c' && term.hasSelection()) { post({ type: 'copy', data: term.getSelection() }); term.clearSelection(); return false; }
+    if (e.ctrlKey && (e.key === 'v' || (e.shiftKey && e.key === 'V'))) { post({ type: 'paste' }); return false; }
+    return true;
+  });
+  window.chrome.webview.addEventListener('message', ev => {
+    const m = ev.data;
+    if (m.type === 'out') term.write(m.data);
+    else if (m.type === 'clear') term.reset();
+    else if (m.type === 'focus') term.focus();
+    else if (m.type === 'paste') term.paste(m.data);
+  });
+  new ResizeObserver(resize).observe(document.getElementById('term'));
+  window.addEventListener('load', () => { resize(); post({ type: 'ready', cols: term.cols, rows: term.rows }); term.focus(); });
+</script>
+</body>
+</html>

@@ -128,6 +128,9 @@
         <MenuItem Header="_Grid Lines" IsCheckable="True" x:Name="GridItem" InputGestureText="Ctrl+'" Click="Grid_Click"/>
         <MenuItem Header="S_nap to Objects" IsCheckable="True" IsChecked="True" x:Name="SnapItem" Click="Snap_Click"/>
         <Separator/>
+        <MenuItem Header="Show _Terminal" InputGestureText="Ctrl+`" Click="ShowTerminal_Click"/>
+        <MenuItem Header="_New Terminal" Click="NewTerminal_Click"/>
+        <Separator/>
         <MenuItem Header="_Source Pane" IsCheckable="True" x:Name="ShowSourceItem" Click="ToggleSource_Click"/>
         <MenuItem Header="Show Engine _Log" Click="ShowLog_Click"/>
       </MenuItem>
@@ -253,7 +256,7 @@
           <RowDefinition Height="*"/>
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="Auto"/>
-          <RowDefinition Height="90" MinHeight="0"/>
+          <RowDefinition Height="130" MinHeight="0" x:Name="DrawerRow"/>
         </Grid.RowDefinitions>
         <ContentControl x:Name="CanvasHost" Grid.Row="0" Focusable="False"/>
         <!-- find and replace, over the canvas -->
@@ -312,11 +315,15 @@
           </DockPanel>
         </Border>
         <GridSplitter Grid.Row="2" Height="4" HorizontalAlignment="Stretch" Background="#22808080" ResizeDirection="Rows"/>
-        <DockPanel Grid.Row="3">
-          <TextBlock DockPanel.Dock="Top" Text="SPEAKER NOTES" Style="{StaticResource PaneHeader}" Margin="10,4,10,2"/>
-          <TextBox x:Name="NotesBox" AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0" Margin="6,0,6,6"
-                   VerticalScrollBarVisibility="Auto" LostKeyboardFocus="NotesBox_LostFocus"/>
-        </DockPanel>
+        <TabControl Grid.Row="3" x:Name="DrawerTabs" BorderThickness="0" Padding="0" SelectionChanged="DrawerTabs_SelectionChanged">
+          <TabItem Header="Speaker Notes" x:Name="NotesTab">
+            <TextBox x:Name="NotesBox" AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0" Margin="2,2,2,4"
+                     VerticalScrollBarVisibility="Auto" LostKeyboardFocus="NotesBox_LostFocus"/>
+          </TabItem>
+          <TabItem Header="Terminal" x:Name="TerminalTab" ToolTip="A shell in the deck's working copy, for coding agents such as Claude Code (Ctrl+`)">
+            <ContentControl x:Name="TerminalHost" Focusable="False"/>
+          </TabItem>
+        </TabControl>
       </Grid>
       <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch" Background="#22808080" x:Name="SourceSplitter"/>
 

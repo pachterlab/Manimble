@@ -225,6 +225,7 @@ public partial class MainWindow : Window
         WelcomePanel.Visibility = Visibility.Collapsed;
         canvas.ShowMessage("Rendering…");
         Settings.Current.AddRecent(ws.Original);
+        terminal?.Start(ws.Work, ws.Original, engine.Python);         // a shell in the new deck's working copy
         RefreshRecent();
         Toast("Opened " + ws.Original);
         await ReloadState();
@@ -372,6 +373,7 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Normal) { s.WindowWidth = Width; s.WindowHeight = Height; }
         s.Save();
         refreshTimer.Stop();
+        terminal?.Stop();
         Hide();                                   // the engine and the working copy go away behind the scenes
         var ws = workspace;
         await Task.Run(() => { engine.Stop(); ws?.Discard(); });
@@ -1445,6 +1447,44 @@ public partial class MainWindow : Window
         });
     }
 
+    // ================================================================ terminal
+
+    TerminalPanel? terminal;
+
+    void EnsureTerminal()
+    {
+        if (terminal != null) return;
+        terminal = new TerminalPanel();
+        TerminalHost.Content = terminal;
+        if (workspace != null) terminal.Start(workspace.Work, workspace.Original, engine.Python);
+    }
+
+    void DrawerTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.Source != DrawerTabs) return;
+        if (DrawerTabs.SelectedItem == TerminalTab)
+        {
+            EnsureTerminal();
+            if (DrawerRow.Height.Value < 240) DrawerRow.Height = new GridLength(280);
+            Dispatcher.BeginInvoke(() => terminal?.FocusTerminal(), DispatcherPriority.Background);
+        }
+    }
+
+    void ShowTerminal_Click(object sender, RoutedEventArgs e)
+    {
+        if (DrawerTabs.SelectedItem == TerminalTab && terminal?.IsKeyboardFocusWithin == true) { DrawerTabs.SelectedItem = NotesTab; canvas.Focus(); return; }
+        DrawerTabs.SelectedItem = TerminalTab;
+        terminal?.FocusTerminal();
+    }
+
+    void NewTerminal_Click(object sender, RoutedEventArgs e)
+    {
+        DrawerTabs.SelectedItem = TerminalTab;
+        EnsureTerminal();
+        if (workspace != null) terminal!.Start(workspace.Work, workspace.Original, engine.Python);
+        else Toast("Open a deck first: the terminal runs in its working copy", error: true);
+    }
+
     // ================================================================ playing
 
     async void PlayBeginning_Click(object sender, RoutedEventArgs e) => await Play(null);
@@ -1696,6 +1736,7 @@ public partial class MainWindow : Window
         if (key == Key.F5 && ctrl && shift) { PreviewAnimations_Click(sender, e); e.Handled = true; return; }
         if (key == Key.F5 && Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) { PresenterView_Click(sender, e); e.Handled = true; return; }
         if (key == Key.F5) { if (shift) PlayCurrent_Click(sender, e); else PlayBeginning_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && key == Key.Oem3) { ShowTerminal_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.F) { OpenFind(false); e.Handled = true; return; }
         if (ctrl && key == Key.H) { OpenFind(true); e.Handled = true; return; }
         if (key == Key.F3) { _ = StepFind(shift ? -1 : +1); e.Handled = true; return; }

@@ -67,7 +67,6 @@ public sealed class AnimatedShowWindow : Window
     bool finished;
     bool showProgress = true;
     Mode mode;
-    string sectionDigits = "";
 
     public event Action? Exited;
     public event Action? Changed;
