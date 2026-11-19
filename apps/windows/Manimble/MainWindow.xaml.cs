@@ -82,6 +82,8 @@ public partial class MainWindow : Window
         SourceEditor.Options.IndentationSize = 4;
         canvas.MoveCommitted += OnMoveCommitted;
         canvas.CellCommitted += CommitCell;
+        canvas.CanDrop = d => d.GetDataPresent(BioCartoonPanel.DragFormat);
+        canvas.DataDropped += (d, p) => { if (BioCartoonPanel.FromDrag(d) is { } icon) BioCartoonDropped(icon, p); };
         canvas.TextCommitted += (oid, text) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "text", ["value"] = text }));
         canvas.PlaceholderCommitted += OnPlaceholderCommitted;
         canvas.SelectionChanged += RebuildInspector;

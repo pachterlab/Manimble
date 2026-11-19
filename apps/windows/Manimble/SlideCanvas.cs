@@ -62,6 +62,10 @@ public sealed class SlideCanvas : Border
     public event Action<int, string>? TextCommitted;
     /// One table cell retyped on the slide: the table, row, column and its new text.
     public event Action<int, int, int, string>? CellCommitted;
+    /// Something dragged from elsewhere in the app dropped on the slide (an icon from the BioCartoon panel), at a frame point.
+    public event Action<IDataObject, Point>? DataDropped;
+    /// Something dragged over the slide: whether it can be dropped there.
+    public Func<IDataObject, bool>? CanDrop;
     /// Text typed into an empty layout placeholder.
     public event Action<Placeholder, string>? PlaceholderCommitted;
 
@@ -138,6 +142,9 @@ public sealed class SlideCanvas : Border
         overlay.MouseLeftButtonDown += OnDown;
         overlay.MouseMove += OnMove;
         overlay.MouseLeftButtonUp += OnUp;
+        overlay.AllowDrop = true;
+        overlay.DragOver += (_, e) => { e.Effects = CanDrop?.Invoke(e.Data) == true ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
+        overlay.Drop += (_, e) => { if (CanDrop?.Invoke(e.Data) == true) { DataDropped?.Invoke(e.Data, e.GetPosition(frame)); e.Handled = true; } };
         // a right-click acts on what is under it: that object (and its group) becomes the selection first
         overlay.MouseRightButtonDown += (_, e) =>
         {
