@@ -33,6 +33,11 @@
         <MenuItem Header="_Undo" InputGestureText="Ctrl+Z" Click="Undo_Click" x:Name="UndoItem"/>
         <MenuItem Header="_Redo" InputGestureText="Ctrl+Y" Click="Redo_Click" x:Name="RedoItem"/>
         <Separator/>
+        <MenuItem Header="_Find…" InputGestureText="Ctrl+F" Click="Find_Click"/>
+        <MenuItem Header="Find and Re_place…" InputGestureText="Ctrl+H" Click="FindReplace_Click"/>
+        <MenuItem Header="Find _Next" InputGestureText="F3" Click="FindNext_Click"/>
+        <MenuItem Header="Find Pre_vious" InputGestureText="Shift+F3" Click="FindPrev_Click"/>
+        <Separator/>
         <MenuItem Header="_Delete" InputGestureText="Del" Click="Delete_Click"/>
         <MenuItem Header="Select _All" InputGestureText="Ctrl+A" Click="SelectAll_Click"/>
         <MenuItem Header="_Edit Text" InputGestureText="Enter" Click="EditText_Click"/>
@@ -63,6 +68,15 @@
         <MenuItem Header="_Word Table…" Tag="word" Click="InsertTable_Click"/>
         <MenuItem Header="_Math Table…" Tag="math" Click="InsertTable_Click"/>
         <MenuItem Header="_Image…" InputGestureText="Ctrl+Shift+I" Click="InsertImage_Click"/>
+        <Separator/>
+        <MenuItem Header="Slide _Numbers…" Click="SlideNumbers_Click"/>
+      </MenuItem>
+      <MenuItem Header="F_ormat">
+        <MenuItem Header="_Theme" x:Name="ThemeMenu"/>
+        <MenuItem Header="_Background…" Click="Background_Click"/>
+        <Separator/>
+        <MenuItem Header="Apply _Dark Mode to Deck…" Tag="dark" Click="DarkMode_Click"/>
+        <MenuItem Header="Apply _Inverted Colors to Deck…" Tag="invert" Click="DarkMode_Click"/>
       </MenuItem>
       <MenuItem Header="_Slide">
         <MenuItem Header="_New Slide">
@@ -88,6 +102,14 @@
         <MenuItem Header="Next B_uild" InputGestureText="Page Down" Click="NextBuild_Click"/>
       </MenuItem>
       <MenuItem Header="_View">
+        <MenuItem Header="Zoom _In" InputGestureText="Ctrl+=" Click="ZoomIn_Click"/>
+        <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Click="ZoomOut_Click"/>
+        <MenuItem Header="_Fit in Window" InputGestureText="Ctrl+0" Click="ZoomFit_Click"/>
+        <MenuItem Header="_Actual Size" Click="ZoomActual_Click"/>
+        <Separator/>
+        <MenuItem Header="_Grid Lines" IsCheckable="True" x:Name="GridItem" InputGestureText="Ctrl+'" Click="Grid_Click"/>
+        <MenuItem Header="S_nap to Objects" IsCheckable="True" IsChecked="True" x:Name="SnapItem" Click="Snap_Click"/>
+        <Separator/>
         <MenuItem Header="_Source Pane" IsCheckable="True" x:Name="ShowSourceItem" Click="ToggleSource_Click"/>
         <MenuItem Header="Show Engine _Log" Click="ShowLog_Click"/>
       </MenuItem>
@@ -182,8 +204,8 @@
                 <StackPanel Grid.Column="1">
                   <Border BorderThickness="1" BorderBrush="{Binding Ring}" CornerRadius="3" Background="#FF000000">
                     <Grid>
-                      <Image Source="{Binding Thumb}" Stretch="Uniform" Height="{Binding ThumbHeight}"/>
-                      <TextBlock Text="{Binding Badge}" Foreground="White" Background="#99000000" Padding="4,1"
+                      <Image Source="{Binding Thumb}" Stretch="Uniform" Height="{Binding ThumbHeight}" Width="200"/>
+                      <TextBlock Text="{Binding Badge}" Visibility="{Binding BadgeVisibility}" Foreground="White" Background="#99000000" Padding="4,1"
                                  HorizontalAlignment="Right" VerticalAlignment="Bottom" FontSize="10" Margin="3"/>
                     </Grid>
                   </Border>
@@ -205,6 +227,31 @@
           <RowDefinition Height="90" MinHeight="0"/>
         </Grid.RowDefinitions>
         <ContentControl x:Name="CanvasHost" Grid.Row="0" Focusable="False"/>
+        <!-- find and replace, over the canvas -->
+        <Border Grid.Row="0" x:Name="FindBar" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0,8,12,0" Padding="10,8" CornerRadius="6" Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                BorderBrush="#40808080" BorderThickness="1" Width="440">
+          <StackPanel>
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Content="✕" Padding="6,1" Margin="4,0,0,0" Click="FindClose_Click" ToolTip="Close (Esc)"/>
+              <Button DockPanel.Dock="Right" Content="↓" Padding="6,1" Margin="2,0,0,0" Click="FindNext_Click" ToolTip="Next (F3, Enter)"/>
+              <Button DockPanel.Dock="Right" Content="↑" Padding="6,1" Margin="2,0,0,0" Click="FindPrev_Click" ToolTip="Previous (Shift+F3)"/>
+              <TextBlock DockPanel.Dock="Right" x:Name="FindCount" VerticalAlignment="Center" Margin="6,0" Opacity="0.7" FontSize="12" MinWidth="54" TextAlignment="Right"/>
+              <TextBox x:Name="FindBox" TextChanged="FindBox_TextChanged" KeyDown="FindBox_KeyDown" ToolTip="Find in the text, formulas and notes of every slide"/>
+            </DockPanel>
+            <DockPanel x:Name="ReplaceRow" Margin="0,6,0,0" Visibility="Collapsed">
+              <Button DockPanel.Dock="Right" Content="All" Padding="8,1" Margin="4,0,0,0" Click="ReplaceAll_Click" ToolTip="Replace every match (one undo step)"/>
+              <Button DockPanel.Dock="Right" Content="Replace" Padding="8,1" Margin="4,0,0,0" Click="ReplaceOne_Click" ToolTip="Replace this match"/>
+              <TextBox x:Name="ReplaceBox" KeyDown="ReplaceBox_KeyDown" ToolTip="Replace with (with Regex, \1 or $1 names a group)"/>
+            </DockPanel>
+            <WrapPanel Margin="0,6,0,0">
+              <CheckBox x:Name="FindCase" Content="Match case" Margin="0,0,10,0" FontSize="12" Click="FindOption_Click"/>
+              <CheckBox x:Name="FindWord" Content="Whole words" Margin="0,0,10,0" FontSize="12" Click="FindOption_Click"/>
+              <CheckBox x:Name="FindRegex" Content="Regex" Margin="0,0,10,0" FontSize="12" Click="FindOption_Click"/>
+              <CheckBox x:Name="FindNotes" Content="Speaker notes" FontSize="12" Click="FindOption_Click"/>
+            </WrapPanel>
+          </StackPanel>
+        </Border>
         <Border Grid.Row="0" x:Name="WelcomePanel" Background="{StaticResource CanvasBackBrush}">
           <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="460">
             <TextBlock Text="Manimble" FontSize="34" FontWeight="SemiBold" Foreground="White" HorizontalAlignment="Center"/>

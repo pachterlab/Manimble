@@ -102,8 +102,17 @@ public sealed class SlideCanvas : Border
         viewbox.Child = frame;
         viewbox.Margin = new Thickness(24);
         var host = new Grid();
-        host.Children.Add(viewbox);
+        scroller.Content = viewbox;
+        host.Children.Add(scroller);
         host.Children.Add(emptyText);
+        // Ctrl+wheel zooms, as in other editors
+        scroller.PreviewMouseWheel += (_, e) =>
+        {
+            if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) return;
+            ZoomBy(e.Delta > 0 ? 1.15 : 1 / 1.15);
+            e.Handled = true;
+        };
+        scroller.SizeChanged += (_, _) => { if (zoom == null) DrawOverlay(); };
         Child = host;
         frame.Width = 1280; frame.Height = 720;
         viewbox.Visibility = Visibility.Collapsed;
@@ -124,6 +133,89 @@ public sealed class SlideCanvas : Border
     }
 
     double Scale => viewbox.ActualWidth > 0 && frame.Width > 0 ? viewbox.ActualWidth / frame.Width : 1;
+
+    // ---------------------------------------------------------------- zoom, grid, snapping
+
+    readonly ScrollViewer scroller = new()
+    {
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        Focusable = false,
+    };
+    double? zoom;
+    /// Screen pixels per frame pixel (device-independent); null fits the slide in the window.
+    public double? Zoom
+    {
+        get => zoom;
+        set
+        {
+            zoom = value is double z ? Math.Clamp(z, 0.1, 8) : null;
+            if (zoom is double k)
+            {
+                viewbox.Width = frame.Width * k; viewbox.Height = frame.Height * k;
+                scroller.HorizontalScrollBarVisibility = scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            }
+            else
+            {
+                viewbox.Width = double.NaN; viewbox.Height = double.NaN;
+                scroller.HorizontalScrollBarVisibility = scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            }
+            ZoomChanged?.Invoke();
+            Dispatcher.BeginInvoke(DrawOverlay, System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+    }
+    public event Action? ZoomChanged;
+    /// The zoom on screen now (the fitted one when fitting).
+    public double CurrentZoom => Scale;
+    public void ZoomBy(double f) => Zoom = CurrentZoom * f;
+
+    bool showGrid;
+    public bool ShowGrid { get => showGrid; set { showGrid = value; DrawOverlay(); } }
+    public bool SnapEnabled { get; set; } = true;
+    readonly List<(bool vertical, double pos)> guides = new();
+
+    /// A move snapped so an edge or the centre of the moving box lines up with another object's or the slide's
+    /// (within a few screen pixels); the lines it lines up on are drawn while dragging. Alt moves freely.
+    Vector Snap(Vector delta)
+    {
+        guides.Clear();
+        if (!SnapEnabled || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) || Stop == null) return delta;
+        Rect? moving = null;
+        foreach (var oid in Selected)
+        {
+            var b = Scene?.Obj(oid)?.FrameBox ?? Stop.Box(oid);
+            if (b is not Rect r) continue;
+            var p = Overrides.TryGetValue(oid, out var o) ? o.Offset : new Vector();
+            r.Offset(p);
+            moving = moving is Rect m ? Rect.Union(m, r) : r;
+        }
+        if (moving is not Rect mv) return delta;
+        mv.Offset(delta);
+        var xs = new List<double> { 0, frame.Width / 2, frame.Width };
+        var ys = new List<double> { 0, frame.Height / 2, frame.Height };
+        foreach (var v in Stop.Visible)
+        {
+            int oid = (int)v[0];
+            if (Selected.Contains(oid)) continue;
+            var r = new Rect(new Point(v[1], v[2]), new Point(v[3], v[4]));
+            xs.AddRange(new[] { r.Left, r.Left + r.Width / 2, r.Right });
+            ys.AddRange(new[] { r.Top, r.Top + r.Height / 2, r.Bottom });
+        }
+        double tol = 6 / Scale;
+        (double d, double t)? Best(double[] cands, List<double> targets)
+        {
+            (double d, double t)? best = null;
+            foreach (var c in cands)
+                foreach (var t in targets)
+                {
+                    var d = t - c;
+                    if (Math.Abs(d) <= tol && (best == null || Math.Abs(d) < Math.Abs(best.Value.d))) best = (d, t);
+                }
+            return best;
+        }
+        if (Best(new[] { mv.Left, mv.Left + mv.Width / 2, mv.Right }, xs) is { } bx) { delta.X += bx.d; guides.Add((true, bx.t)); }
+        if (Best(new[] { mv.Top, mv.Top + mv.Height / 2, mv.Bottom }, ys) is { } by) { delta.Y += by.d; guides.Add((false, by.t)); }
+        return delta;
+    }
     public Size FrameSize => new(frame.Width, frame.Height);
 
     public void ShowMessage(string text)
@@ -150,6 +242,7 @@ public sealed class SlideCanvas : Border
         }
         frame.Width = sc.FrameW;
         frame.Height = sc.FrameH;
+        if (zoom != null) Zoom = zoom;            // the zoomed size follows a deck of another frame size
         emptyText.Visibility = Visibility.Collapsed;
         viewbox.Visibility = Visibility.Visible;
         Redraw();
@@ -331,6 +424,26 @@ public sealed class SlideCanvas : Border
             overlay.Children.Add(Outline(sb, Accent, t * 1.4));
             if (Selected.Count == 1)
                 foreach (var c in Corners(sb)) overlay.Children.Add(Handle(c.X, c.Y, t, round: false));
+        }
+        if (showGrid)
+        {
+            // one line per manim unit, the centre lines stronger
+            double step = frame.Width / 14.222222222222221;
+            var faint = new SolidColorBrush(Color.FromArgb(0x38, 0x80, 0xb0, 0xff));
+            var strong = new SolidColorBrush(Color.FromArgb(0x70, 0x80, 0xb0, 0xff));
+            for (double x = frame.Width / 2 % step; x < frame.Width; x += step)
+                overlay.Children.Add(new Line { X1 = x, Y1 = 0, X2 = x, Y2 = frame.Height, StrokeThickness = t * 0.7, IsHitTestVisible = false,
+                                                Stroke = Math.Abs(x - frame.Width / 2) < 1 ? strong : faint });
+            for (double y = frame.Height / 2 % step; y < frame.Height; y += step)
+                overlay.Children.Add(new Line { X1 = 0, Y1 = y, X2 = frame.Width, Y2 = y, StrokeThickness = t * 0.7, IsHitTestVisible = false,
+                                                Stroke = Math.Abs(y - frame.Height / 2) < 1 ? strong : faint });
+        }
+        foreach (var (vertical, pos) in guides)
+        {
+            var orange = new SolidColorBrush(Color.FromRgb(0xff, 0x8c, 0x1a));
+            overlay.Children.Add(vertical
+                ? new Line { X1 = pos, Y1 = 0, X2 = pos, Y2 = frame.Height, Stroke = orange, StrokeThickness = t, StrokeDashArray = new DoubleCollection { 4, 3 }, IsHitTestVisible = false }
+                : new Line { X1 = 0, Y1 = pos, X2 = frame.Width, Y2 = pos, Stroke = orange, StrokeThickness = t, StrokeDashArray = new DoubleCollection { 4, 3 }, IsHitTestVisible = false });
         }
         if (band is Rect bd)
         {
@@ -542,7 +655,7 @@ public sealed class SlideCanvas : Border
                 mode = Mode.Move;
                 dragDelta = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)     // Shift: horizontal or vertical only
                     ? (Math.Abs(delta.X) > Math.Abs(delta.Y) ? new Vector(delta.X, 0) : new Vector(0, delta.Y))
-                    : delta;
+                    : Snap(delta);
                 Redraw();
                 return;
             }
@@ -606,6 +719,7 @@ public sealed class SlideCanvas : Border
             {
                 var delta = dragDelta;
                 dragDelta = new Vector();
+                guides.Clear();
                 if (commit && delta.Length > 0.01)
                 {
                     foreach (var oid in Selected)

@@ -24,7 +24,8 @@ public sealed class SlideItem : INotifyPropertyChanged
     public int Number { get => number; set { number = value; On(nameof(Number)); } }
     public BitmapSource? Thumb => Images.Load(thumbPath, 320);
     public double ThumbHeight => 112;
-    public string Badge { get => badge; set { if (badge != value) { badge = value; On(nameof(Badge)); } } }
+    public string Badge { get => badge; set { if (badge != value) { badge = value; On(nameof(Badge)); On(nameof(BadgeVisibility)); } } }
+    public Visibility BadgeVisibility => badge.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public double Opacity => hidden || Unused ? 0.45 : 1;
     public Brush Ring => error ? (Brush)Application.Current.Resources["ErrorBrush"]
         : current ? (Brush)Application.Current.Resources["SelectionBrush"] : new SolidColorBrush(Color.FromArgb(0x40, 0x80, 0x80, 0x80));
@@ -97,6 +98,7 @@ public partial class MainWindow : Window
             null => "Draw ▾", "pen" => "Pen (Esc ends)", "darrow" => "Drawing: double arrow", var t => "Drawing: " + t,
         };
         BuildPenColorMenu();
+        BuildThemeMenu();
         canvas.ContextMenuOpening += CanvasContextMenu;
         canvas.ContextMenu = new ContextMenu();          // an empty menu, so ContextMenuOpening fires
         engine.EventReceived += OnEngineEvent;
@@ -1483,6 +1485,13 @@ public partial class MainWindow : Window
         if (ctrl && key == Key.S) { Save_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.O) { OpenDeck_Click(sender, e); e.Handled = true; return; }
         if (key == Key.F5) { if (shift) PlayCurrent_Click(sender, e); else PlayBeginning_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && key == Key.F) { OpenFind(false); e.Handled = true; return; }
+        if (ctrl && key == Key.H) { OpenFind(true); e.Handled = true; return; }
+        if (key == Key.F3) { _ = StepFind(shift ? -1 : +1); e.Handled = true; return; }
+        if (ctrl && key is Key.OemPlus or Key.Add) { canvas.ZoomBy(1.25); e.Handled = true; return; }
+        if (ctrl && key is Key.OemMinus or Key.Subtract) { canvas.ZoomBy(0.8); e.Handled = true; return; }
+        if (ctrl && key is Key.D0 or Key.NumPad0) { canvas.Zoom = null; e.Handled = true; return; }
+        if (ctrl && key == Key.OemQuotes) { GridItem.IsChecked = !GridItem.IsChecked; canvas.ShowGrid = GridItem.IsChecked; e.Handled = true; return; }
         // typing in a text field: its own keys
         if (Keyboard.FocusedElement is TextBox || SourceEditor.IsKeyboardFocusWithin || canvas.IsEditingText) return;
         if (ctrl && key == Key.Z) { _ = UndoRedo(shift ? "redo" : "undo"); e.Handled = true; return; }
@@ -1503,6 +1512,7 @@ public partial class MainWindow : Window
         if (ctrl && shift && key == Key.OemPeriod) { Bigger_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.OemComma) { Smaller_Click(sender, e); e.Handled = true; return; }
         if (key == Key.Escape && canvas.DrawTool != null) { canvas.DrawTool = null; e.Handled = true; return; }
+        if (key == Key.Escape && FindBar.Visibility == Visibility.Visible && canvas.Selected.Count == 0) { CloseFind(); e.Handled = true; return; }
         if (ctrl && key == Key.D) { DuplicateSlide_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.A) { canvas.SelectAll(); e.Handled = true; return; }
         if (ctrl && shift && key == Key.Up) { MoveSlideUp_Click(sender, e); e.Handled = true; return; }
