@@ -417,6 +417,21 @@
               <CheckBox Grid.Row="1" Grid.Column="4" Grid.ColumnSpan="2" x:Name="AspectLock" Content="Keep ratio" IsChecked="True" FontSize="12" VerticalAlignment="Center"
                         ToolTip="Width and height change together (text and formulas always do)"/>
             </Grid>
+            <!-- table: its cells (double-click a cell on the slide to type into it) -->
+            <StackPanel x:Name="TableFields" Visibility="Collapsed" Margin="0,2,0,4">
+              <TextBlock Text="Cells" FontSize="12" Opacity="0.75" Margin="0,0,0,3"/>
+              <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" MaxHeight="260">
+                <Grid x:Name="TableGrid"/>
+              </ScrollViewer>
+              <WrapPanel Margin="0,4,0,0">
+                <Button Content="+ Row" ToolTip="Add a row at the bottom" Click="TableAddRow_Click" FontSize="12"/>
+                <Button Content="&#x2212; Row" ToolTip="Remove the bottom row" Click="TableRemoveRow_Click" FontSize="12"/>
+                <Button Content="+ Col" ToolTip="Add a column on the right" Click="TableAddCol_Click" FontSize="12"/>
+                <Button Content="&#x2212; Col" ToolTip="Remove the right column" Click="TableRemoveCol_Click" FontSize="12"/>
+                <Button Content="Apply Table" Click="TableApply_Click" FontSize="12" Margin="6,0,0,0"/>
+              </WrapPanel>
+              <TextBlock Text="Tab: next cell · Enter: apply" FontSize="11" Opacity="0.55" Margin="0,3,0,0"/>
+            </StackPanel>
           </StackPanel>
           <!-- arrange: shown for any selection -->
           <WrapPanel Margin="10,2,10,0" x:Name="ArrangeBar">

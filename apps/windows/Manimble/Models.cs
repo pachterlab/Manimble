@@ -109,6 +109,34 @@ public sealed class ObjInfo
 
     public Rect? FrameBox => Frame is { Length: 4 } f ? new Rect(new Point(f[0], f[1]), new Point(f[2], f[3])) : null;
     public bool IsText => Kind is "text" or "tex";
+
+    /// A table's cells as text (its value is the rows as JSON; numbers written as in the source).
+    public List<List<string>> TableRows()
+    {
+        var rows = new List<List<string>>();
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(Value);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) return rows;
+            foreach (var r in doc.RootElement.EnumerateArray())
+            {
+                var row = new List<string>();
+                if (r.ValueKind == System.Text.Json.JsonValueKind.Array)
+                    foreach (var c in r.EnumerateArray())
+                        row.Add(c.ValueKind switch
+                        {
+                            System.Text.Json.JsonValueKind.String => c.GetString() ?? "",
+                            System.Text.Json.JsonValueKind.Number => c.GetDouble() is var v && v == Math.Round(v) && Math.Abs(v) < 1e15
+                                ? ((long)v).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                                : v.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            _ => c.ToString(),
+                        });
+                rows.Add(row);
+            }
+        }
+        catch (System.Text.Json.JsonException) { }
+        return rows;
+    }
 }
 
 public sealed class ChangedLines

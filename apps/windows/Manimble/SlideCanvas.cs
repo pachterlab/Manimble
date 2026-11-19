@@ -60,6 +60,8 @@ public sealed class SlideCanvas : Border
     public event Action? DrawToolChanged;
     /// Text or formula retyped.
     public event Action<int, string>? TextCommitted;
+    /// One table cell retyped on the slide: the table, row, column and its new text.
+    public event Action<int, int, int, string>? CellCommitted;
     /// Text typed into an empty layout placeholder.
     public event Action<Placeholder, string>? PlaceholderCommitted;
 
@@ -79,6 +81,7 @@ public sealed class SlideCanvas : Border
     (BitmapSource img, Rect r)? ghost;
     TextBox? editor;
     int? editingOid;
+    (int oid, int row, int col, string old)? editingCell;
     Placeholder? editingPlaceholder;
 
     string? drawTool;
@@ -795,7 +798,7 @@ public sealed class SlideCanvas : Border
         if (e.ClickCount == 2)
         {
             // a double-click retypes text and formulas; on anything else it is an ordinary press (a quick drag)
-            if (hit is int h && Scene?.Obj(h) is { } o && (o.IsText || o.Kind == "table")) { BeginTextEdit(h); return; }
+            if (hit is int h && Scene?.Obj(h) is { } o && (o.IsText || o.Kind == "table")) { BeginTextEdit(h, p); return; }
             if (hit == null && PlaceholderAt(p) is { } ph) { BeginPlaceholderEdit(ph); return; }
         }
         if (hit is int oid)
@@ -1044,9 +1047,43 @@ public sealed class SlideCanvas : Border
 
     // ---------------------------------------------------------------- text editing in place
 
-    public void BeginTextEdit(int oid)
+    /// The cells of a table as drawn: row, column, the cell's box and its text's ink box (frame px).
+    public List<(int row, int col, Rect cell, Rect ink)> TableCells(int oid)
+    {
+        var list = new List<(int, int, Rect, Rect)>();
+        if (Stop?.Cells == null || !Stop.Cells.TryGetValue(oid.ToString(), out var cells)) return list;
+        foreach (var c in cells)
+            if (c.Length >= 10)
+                list.Add(((int)c[0], (int)c[1], new Rect(new Point(c[2], c[3]), new Point(c[4], c[5])), new Rect(new Point(c[6], c[7]), new Point(c[8], c[9]))));
+        return list;
+    }
+
+    /// Types into the table cell under `at` (else the first cell) right on the slide. False when the table's cells
+    /// are not known (moved and not yet re-rendered, or none reported).
+    public bool BeginCellEdit(int oid, Point? at = null)
+    {
+        if (Scene?.Obj(oid) is not { Kind: "table" } o || Overrides.ContainsKey(oid)) return false;
+        var cells = TableCells(oid);
+        if (cells.Count == 0) return false;
+        var c = at is Point q && cells.FirstOrDefault(k => k.cell.Contains(q)) is { cell.Width: > 0 } hit ? hit : cells[0];
+        var rows = o.TableRows();
+        if (c.row >= rows.Count || c.col >= rows[c.row].Count) return false;
+        var current = rows[c.row][c.col];
+        CancelEdit();
+        Select(new[] { oid });
+        editingCell = (oid, c.row, c.col, current);
+        // the text the size of the cell's ink (a blank cell's ink is a hidden "Cell")
+        var fontPx = Math.Clamp(c.ink.Height * 0.95, 12, 90);
+        var d = Math.Max(3, 0.08 * Math.Min(c.cell.Width, c.cell.Height));
+        var area = new Rect(c.cell.X + d, c.cell.Y + d, Math.Max(40, c.cell.Width - 2 * d), Math.Max(fontPx * 1.5, c.cell.Height - 2 * d));
+        OpenEditor(area, current, fontPx, $"Row {c.row + 1}, column {c.col + 1} · Enter or Tab applies · Esc cancels", false);
+        return true;
+    }
+
+    public void BeginTextEdit(int oid, Point? at = null)
     {
         if (Scene?.Obj(oid) is not { } o || BoxOf(oid) is not Rect r) return;
+        if (o.Kind == "table") { BeginCellEdit(oid, at); return; }
         CancelEdit();
         Select(new[] { oid });
         editingOid = oid;
@@ -1094,15 +1131,17 @@ public sealed class SlideCanvas : Border
     {
         if (e.Key == Key.Escape) { CancelEdit(); Focus(); e.Handled = true; }
         else if (e.Key == Key.Enter && !Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) { CommitEdit(); Focus(); e.Handled = true; }
+        else if (e.Key == Key.Tab && editingCell != null) { CommitEdit(); Focus(); e.Handled = true; }
     }
 
     public void CommitEdit()
     {
         if (editor == null) return;
         var text = editor.Text;
-        var oid = editingOid; var ph = editingPlaceholder;
+        var oid = editingOid; var ph = editingPlaceholder; var cell = editingCell;
         CancelEdit();
-        if (oid is int o && Scene?.Obj(o) is { } obj && text != obj.Value) TextCommitted?.Invoke(o, text);
+        if (cell is { } c) { if (text != c.old) CellCommitted?.Invoke(c.oid, c.row, c.col, text); }
+        else if (oid is int o && Scene?.Obj(o) is { } obj && text != obj.Value) TextCommitted?.Invoke(o, text);
         else if (ph != null && text.Trim().Length > 0) PlaceholderCommitted?.Invoke(ph, text);
     }
 
@@ -1112,6 +1151,7 @@ public sealed class SlideCanvas : Border
         overlay.Children.Remove(editor);
         editor = null;
         editingOid = null;
+        editingCell = null;
         var hadPh = editingPlaceholder != null;
         editingPlaceholder = null;
         if (hadPh) DrawOverlay();

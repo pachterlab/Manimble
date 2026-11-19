@@ -81,6 +81,7 @@ public partial class MainWindow : Window
         SourceEditor.Options.ConvertTabsToSpaces = true;
         SourceEditor.Options.IndentationSize = 4;
         canvas.MoveCommitted += OnMoveCommitted;
+        canvas.CellCommitted += CommitCell;
         canvas.TextCommitted += (oid, text) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "text", ["value"] = text }));
         canvas.PlaceholderCommitted += OnPlaceholderCommitted;
         canvas.SelectionChanged += RebuildInspector;
@@ -1005,6 +1006,7 @@ public partial class MainWindow : Window
                 SelDetail.Text = "Click an object on the slide. Drag to move it, drag a corner to resize it, double-click text to retype it, Delete removes it.";
                 SelFields.Visibility = Visibility.Collapsed;
                 ArrangeBar.Visibility = Visibility.Collapsed;
+                HideTableEditor();
                 return;
             }
             ArrangeBar.Visibility = Visibility.Visible;
@@ -1015,6 +1017,7 @@ public partial class MainWindow : Window
                 SelFields.Visibility = Visibility.Visible;
                 TextFormat.Visibility = Visibility.Collapsed;
                 GeometryFields.Visibility = Visibility.Collapsed;
+                HideTableEditor();
                 ColorBox.Text = "";
                 ColorSwatchFill.Background = Brushes.Transparent;
                 return;
@@ -1036,6 +1039,7 @@ public partial class MainWindow : Window
             SelFields.Visibility = Visibility.Visible;
             GeometryFields.Visibility = Visibility.Visible;
             TextFormat.Visibility = o.IsText ? Visibility.Visible : Visibility.Collapsed;
+            if (o.Kind == "table") ShowTableEditor(sel[0], o); else HideTableEditor();
             if (o.IsText)
             {
                 if (!fontsLoaded)
@@ -1315,7 +1319,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            if (o is { } obj && (obj.IsText || obj.Kind == "table")) Add(obj.Kind == "tex" ? "Edit LaTeX" : "Edit Text", () => canvas.BeginTextEdit(sel[0]), gesture: "Enter");
+            if (o is { } obj && (obj.IsText || obj.Kind == "table")) Add(obj.Kind == "tex" ? "Edit LaTeX" : obj.Kind == "table" ? "Edit Cell" : "Edit Text", () => canvas.BeginTextEdit(sel[0]), gesture: "Enter");
             if (o is { Kind: "text" or "tex" } lo)
                 Add(lo.Format?.Link == null ? "Add Hyperlink…" : "Edit Hyperlink…", () => Hyperlink_Click(this, new RoutedEventArgs()), gesture: "Ctrl+K");
             Add("Delete", DeleteSelection, gesture: "Del");
