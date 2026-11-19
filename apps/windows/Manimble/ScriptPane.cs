@@ -316,6 +316,7 @@ public partial class MainWindow
             scriptPane.StopPlaying += StopScriptPreview;
         }
         if (SourcePane.Visibility != Visibility.Visible) { ShowSourceItem.IsChecked = true; ToggleSource_Click(this, new RoutedEventArgs()); }
+        HideFeedbackPane();
         PanelHost.Child = scriptPane;
         PanelHost.Visibility = Visibility.Visible;
         ScriptPageChanged();

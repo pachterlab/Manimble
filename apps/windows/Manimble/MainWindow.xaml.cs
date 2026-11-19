@@ -298,6 +298,7 @@ public partial class MainWindow : Window
         state = null; scene = null; sceneName = null; shownDir = null;
         LoadGuides();
         LoadScript();
+        LoadFeedback();
         slides.Clear();
         suppressSource = true; SourceEditor.Text = ""; suppressSource = false;
         sourceBase = null; SourceLoc.Text = ""; SourceError.Visibility = Visibility.Collapsed;
@@ -634,6 +635,7 @@ public partial class MainWindow : Window
         RebuildBuilds();
         RebuildInspector();
         ScriptPageChanged();
+        FeedbackPageChanged();
     }
 
     /// A render that numbers objects differently (one added or removed above the others): the selection follows
@@ -679,6 +681,7 @@ public partial class MainWindow : Window
         canvas.SetStop(stopIndex);
         foreach (var (b, k) in BuildStrip.Items.OfType<ToggleButton>().Select((b, k) => (b, k))) b.IsChecked = k == stopIndex;
         ScriptPageChanged();
+        FeedbackPageChanged();
     }
 
     async void SlideList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1774,7 +1777,7 @@ public partial class MainWindow : Window
         if (withPresenter)
         {
             if (audience == null) { show.Topmost = false; Toast("One display: the show is full screen behind Presenter View. With a second display it goes there."); }
-            var p = new PresenterWindow(show, PresenterStill);
+            var p = new PresenterWindow(show, PresenterStill) { Feedback = feedback };
             presenter = p;
             p.Show();
             p.Activate();

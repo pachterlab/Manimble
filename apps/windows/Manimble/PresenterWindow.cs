@@ -26,6 +26,16 @@ public sealed class PresenterWindow : Window
     readonly TextBlock counter = new() { Foreground = Brushes.Gray, FontSize = 18, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom };
     readonly TextBlock state = new() { Foreground = Brushes.Gray, FontSize = 14, Margin = new Thickness(0, 6, 0, 0) };
     readonly DispatcherTimer tick = new() { Interval = TimeSpan.FromSeconds(1) };
+    readonly FeedbackLayer feedbackLayer = new();
+    Button? feedbackButton;
+    /// The deck's feedback notes: shown over the current slide; in Feedback Mode (F) a click there adds one. The
+    /// audience display never shows them.
+    public FeedbackStore? Feedback
+    {
+        get => feedbackLayer.Store;
+        set { feedbackLayer.Store = value; if (feedbackButton != null) feedbackButton.IsEnabled = value != null; Refresh(); }
+    }
+    bool feedbackMode;
     DateTime started = DateTime.Now;
     TimeSpan pausedFor;
     DateTime? pausedAt;
@@ -37,7 +47,10 @@ public sealed class PresenterWindow : Window
         Title = "Manimble Presenter View";
         Background = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x16));
         WindowState = WindowState.Maximized;
-        live.Child = new Rectangle16x9(new VisualBrush(show.Stage) { Stretch = Stretch.Uniform });
+        var mirror = new Rectangle16x9(new VisualBrush(show.Stage) { Stretch = Stretch.Uniform });
+        live.Child = new Grid { Children = { mirror, feedbackLayer } };
+        feedbackLayer.SlideRect = () => SlideInMirror(mirror);
+        live.SizeChanged += (_, _) => feedbackLayer.Relayout();
         // the current slide: a click opens the hyperlink under it, else advances
         live.Cursor = Cursors.Arrow;
         live.MouseLeftButtonDown += (_, e) =>
@@ -99,6 +112,9 @@ public sealed class PresenterWindow : Window
         bar.Children.Add(B("Black screen", "B", show.ToggleBlack));
         bar.Children.Add(B("Reset timer", "R… T", ResetTimer));
         bar.Children.Add(B("Pause timer", "", PauseTimer));
+        feedbackButton = B("Feedback Mode", "F: click the slide here to type red feedback notes on it. The audience never sees them; the editor shows them afterwards.", ToggleFeedbackMode);
+        feedbackButton.IsEnabled = false;
+        bar.Children.Add(feedbackButton);
         bar.Children.Add(B("End show", "Esc", () => show.Close()));
         Grid.SetRow(bar, 2); Grid.SetColumnSpan(bar, 3);
         grid.Children.Add(bar);
@@ -111,12 +127,40 @@ public sealed class PresenterWindow : Window
         KeyDown += (_, e) =>
         {
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
+            if (feedbackLayer.IsEditing) return;                 // typing a note: the keys are its
+            if (key == Key.F && Feedback != null) { ToggleFeedbackMode(); e.Handled = true; return; }
             if (key == Key.T) { ResetTimer(); e.Handled = true; return; }
             if (key == Key.Space) { show.Next(); e.Handled = true; return; }
             if (show.HandleKey(key)) e.Handled = true;
         };
         Closed += (_, _) => { tick.Stop(); if (show.IsLoaded) show.Close(); };
         Loaded += (_, _) => { Refresh(); UpdateTime(); };
+    }
+
+    void ToggleFeedbackMode()
+    {
+        feedbackMode = !feedbackMode;
+        feedbackLayer.Placing = feedbackMode;
+        if (feedbackButton != null)
+        {
+            feedbackButton.Content = feedbackMode ? "Feedback Mode: on" : "Feedback Mode";
+            feedbackButton.Background = feedbackMode ? FeedbackLayer.Red : null;
+            feedbackButton.Foreground = feedbackMode ? Brushes.White : null;
+        }
+        if (!feedbackMode) feedbackLayer.EndEditing();
+        Refresh();
+    }
+
+    /// Where the slide is in the mirror: the mirror shows the whole show window fitted into its 16:9 area, and the
+    /// slide is letterboxed within the show window.
+    Rect SlideInMirror(Rectangle16x9 mirror)
+    {
+        Size area = mirror.Area.RenderSize, size = show.Stage is UIElement s ? s.RenderSize : default;
+        var sr = show.SlideRect;
+        if (size.Width <= 0 || size.Height <= 0 || area.Width <= 0 || sr.IsEmpty) return Rect.Empty;
+        var k = Math.Min(area.Width / size.Width, area.Height / size.Height);
+        double ox = (area.Width - size.Width * k) / 2, oy = (area.Height - size.Height * k) / 2;
+        return new Rect(ox + sr.X * k, oy + sr.Y * k, sr.Width * k, sr.Height * k);
     }
 
     void ResetTimer() { started = DateTime.Now; pausedFor = TimeSpan.Zero; pausedAt = null; UpdateTime(); }
@@ -160,14 +204,18 @@ public sealed class PresenterWindow : Window
             nextLabel.Text = "Next: end of the show";
             next.Source = null;
         }
-        state.Text = show.IsBlackedOut ? "The audience sees a black screen (B)" : show.IsFinished ? "Build done" : "Playing";
+        state.Text = (feedbackMode ? "Feedback Mode: click the slide to add a note (F ends it) · " : "")
+                     + (show.IsBlackedOut ? "The audience sees a black screen (B)" : show.IsFinished ? "Build done" : "Playing");
+        feedbackLayer.Scene = cur.Scene;
+        feedbackLayer.Build = cur.Index;
+        feedbackLayer.Relayout();
     }
 
     /// The hyperlink under the pointer in the mirror of the show: the mirror shows the whole show window (its stage)
     /// fitted into a 16:9 area, so the point is first taken back to the show's own coordinates.
     string? LiveLink(MouseEventArgs e)
     {
-        if (live.Child is not Rectangle16x9 r || show.Stage is not UIElement stage) return null;
+        if (live.Child is not Grid { Children: [Rectangle16x9 r, ..] } || show.Stage is not UIElement stage) return null;
         Size area = r.Area.RenderSize, size = stage.RenderSize;
         if (size.Width <= 0 || size.Height <= 0 || area.Width <= 0 || area.Height <= 0) return null;
         var k = Math.Min(area.Width / size.Width, area.Height / size.Height);

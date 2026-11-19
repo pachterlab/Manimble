@@ -38,6 +38,10 @@ public sealed class SlideCanvas : Border
     /// while a track is being set.
     public Canvas Annotations { get; } = new() { IsHitTestVisible = false };
 
+    /// A layer over the slide in frame pixels, above the selection (the feedback notes): clicks pass through where it
+    /// draws nothing.
+    public void AddLayer(UIElement layer) => frame.Children.Add(layer);
+
     public SceneData? Scene { get; private set; }
     public int StopIndex { get; private set; }
     public StopInfo? Stop => Scene?.Stops is { Count: > 0 } s ? s[Math.Clamp(StopIndex, 0, s.Count - 1)] : null;

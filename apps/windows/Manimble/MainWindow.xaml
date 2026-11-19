@@ -140,6 +140,7 @@
         <MenuItem Header="_Clear Guides" x:Name="ClearGuidesItem" Click="ClearGuides_Click"/>
         <Separator/>
         <MenuItem Header="Sc_ript…" Click="Script_Click"/>
+        <MenuItem Header="_Feedback…" Click="Feedback_Click"/>
         <Separator/>
         <MenuItem Header="Show _Terminal" InputGestureText="Ctrl+`" Click="ShowTerminal_Click"/>
         <MenuItem Header="_New Terminal" Click="NewTerminal_Click"/>

@@ -66,7 +66,8 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   Save Project Copy, Package for Sharing (`.manimble`, the Mac app's format) and opening packages. Scripted
   presentations are in (View > Script…: Speak, Mouse and Pause steps per build, tracks set by clicking or dragging on the
   slide, previews; Play > Scripted Presentation runs them with Windows' text to speech; the Mac's script.json). Not yet:
-  cloud voices and the scripted movie export. Still to do: the feedback layer. Presenter View on a real second monitor is untested.
+  cloud voices and the scripted movie export. The feedback layer is in (Presenter View's Feedback Mode, F, types red notes on
+  the slide; the editor shows, moves, retypes and deletes them, and View > Feedback… lists them; the Mac's feedback.json). Presenter View on a real second monitor is untested.
 - **Phase 4, terminal:** done. A Terminal tab (Ctrl+`) runs PowerShell in the working copy over ConPTY; outside edits
   re-render the slide.
 - **Phase 5, setup and release:** `install_dependencies.ps1` (tested on a fresh environment), `install_manimble.ps1`

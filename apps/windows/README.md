@@ -52,6 +52,7 @@ both, as on the Mac.
 | `BioCartoon.cs` | the BioCartoon icon search panel (the `biocartoon` command line) and inserting its icons |
 | `PythonPlot.cs` | Python plots: the plot editor, running the code, and pointing the picture at a new output |
 | `Script.cs`, `ScriptPane.cs` | scripted presentations: the script (`script.json`), its panel, speech and pointer, and the runner on the show |
+| `Feedback.cs`, `FeedbackWiring.cs` | feedback notes (`feedback.json`): the notes layer, the list, Presenter View's Feedback Mode |
 | `SlideCanvas.cs` | the canvas: the exact frame when idle, backdrop and sprites while dragging or while an optimistic edit waits for its render |
 | `SlideshowWindow.cs` | the full-screen show of the exact frames |
 | `Models.cs` | the engine's replies |

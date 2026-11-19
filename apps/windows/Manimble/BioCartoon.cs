@@ -408,6 +408,7 @@ public partial class MainWindow
             biocartoon.InstallRequested += () => InstallDependencies_Click(this, new RoutedEventArgs());
         }
         HideScript();
+        HideFeedbackPane();
         PanelHost.Child = biocartoon;
         if (SourcePane.Visibility != Visibility.Visible) { ShowSourceItem.IsChecked = true; ToggleSource_Click(this, new RoutedEventArgs()); }
         PanelHost.Visibility = Visibility.Visible;
