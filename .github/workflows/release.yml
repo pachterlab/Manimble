@@ -7,6 +7,7 @@
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip
+#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows-Setup.exe
 # Each release also carries Manimble-python-arm64.tar.gz and Manimble-python-x86_64.tar.gz, the Python runtimes
 # (manim included) that the app's first-launch setup window downloads (apps/macos/install_dependencies.sh).
 #
@@ -15,7 +16,11 @@
 # APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID Application: Name (TEAMID)"),
 # APPLE_ID, APPLE_PASSWORD (an app-specific password, not your Apple ID password), APPLE_TEAM_ID.
 # Without them the app is ad-hoc signed, same as a local build, and first launch shows a
-# Gatekeeper warning (right-click -> Open gets past it; the README explains this).
+# Gatekeeper warning (right-click -> Open gets past it; the README explains this). That is only allowed for a dry
+# run: a tag refuses to publish a release that isn't signed and notarized.
+#
+# The app carries the SHA-256s of the Python runtimes it was released with (runtime-sha256.txt, which
+# install_dependencies.sh checks the download against), and each release lists every asset's SHA-256 in SHA256SUMS.
 name: release
 on:
   push:
@@ -23,7 +28,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # The Python runtime is native code, so each architecture is built on its own kind of runner.
@@ -33,9 +38,11 @@ jobs:
         runner: [macos-latest, macos-15-intel]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - run: apps/macos/tools/build_python_runtime.sh out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runtime-${{ matrix.runner }}
           path: out/Manimble-python-*.tar.gz
@@ -45,33 +52,77 @@ jobs:
   # (apps/windows/install_dependencies.ps1).
   windows:
     runs-on: windows-latest
+    # Code signing turns on when these secrets exist: WINDOWS_CERTIFICATE (a base64 .pfx code-signing certificate) and
+    # WINDOWS_CERTIFICATE_PASSWORD. Without them the app and its installer are unsigned and SmartScreen warns on first run.
+    env:
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: "10.0.x"
-      - run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out
-      - uses: actions/upload-artifact@v4
+      - name: Write the code-signing certificate
+        if: env.HAS_WIN_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          "MANIMBLE_SIGN_PFX=$pfx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Build the app, its zip and its installer
+        env:
+          MANIMBLE_SIGN_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows
-          path: out/Manimble-Windows.zip
+          path: |
+            out/Manimble-Windows.zip
+            out/Manimble-Windows-Setup.exe
           if-no-files-found: error
 
   release:
     needs: [runtime, windows]
     runs-on: macos-latest
+    permissions:
+      contents: write   # to publish the GitHub Release
     # `secrets` can't be read in a step's `if:`, so expose whether signing is configured here.
     env:
       HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
       HAS_NOTARY: ${{ secrets.APPLE_ID != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Check the tag matches VERSION
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           v="$(cat VERSION)"
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag is $GITHUB_REF_NAME but VERSION says $v"; exit 1; }
+
+      - name: Check a tagged release will be signed and notarized
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          [ "$HAS_CERT" = true ] && [ "$HAS_NOTARY" = true ] \
+            || { echo "::error::a release needs the APPLE_CERTIFICATE and APPLE_ID secrets (see the top of release.yml)"; exit 1; }
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: runtime-*
+          path: out
+          merge-multiple: true
+
+      - name: Record the Python runtimes' checksums for the app
+        run: |
+          for f in out/Manimble-python-*.tar.gz; do
+            a="${f#out/Manimble-python-}"; echo "${a%.tar.gz} $(shasum -a 256 "$f" | cut -d' ' -f1)"
+          done > runtime-sha256.txt
+          cat runtime-sha256.txt
+          [ "$(wc -l < runtime-sha256.txt)" -eq 2 ] || { echo "::error::expected two runtimes"; exit 1; }
 
       - name: Import the Developer ID certificate
         if: env.HAS_CERT == 'true'
@@ -92,6 +143,7 @@ jobs:
       - name: Build and sign
         env:
           MANIMBLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          MANIMBLE_RUNTIME_SHA256S: ${{ github.workspace }}/runtime-sha256.txt
         run: apps/macos/build_app.sh
 
       - name: Notarize
@@ -126,18 +178,17 @@ jobs:
           xcrun notarytool submit out/Manimble-macOS.dmg --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple out/Manimble-macOS.dmg
 
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-*
-          path: out
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: windows
           path: out
 
-      - uses: actions/upload-artifact@v4
+      - name: List every asset's SHA-256
+        run: |
+          cd out && shasum -a 256 Manimble-macOS.dmg Manimble-macOS.zip Manimble-python-*.tar.gz \
+            Manimble-Windows.zip Manimble-Windows-Setup.exe | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Manimble-macOS
           path: |
@@ -145,6 +196,8 @@ jobs:
             out/Manimble-macOS.dmg
             out/Manimble-python-*.tar.gz
             out/Manimble-Windows.zip
+            out/Manimble-Windows-Setup.exe
+            out/SHA256SUMS
           if-no-files-found: error
 
       - name: Publish the GitHub Release
@@ -152,5 +205,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.dmg out/Manimble-macOS.zip out/Manimble-python-*.tar.gz out/Manimble-Windows.zip --repo "$GITHUB_REPOSITORY" \
+          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.dmg out/Manimble-macOS.zip out/Manimble-python-*.tar.gz \
+            out/Manimble-Windows.zip out/Manimble-Windows-Setup.exe out/SHA256SUMS --repo "$GITHUB_REPOSITORY" \
             --title "Manimble ${GITHUB_REF_NAME#v}" --generate-notes

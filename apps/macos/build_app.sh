@@ -39,6 +39,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/.build/universal/Manimble" "$APP/Contents/MacOS/Manimble"
 rsync -a --exclude __pycache__ "$ROOT/../../engine/" "$APP/Contents/Resources/engine/"
 install -m 755 "$ROOT/install_dependencies.sh" "$APP/Contents/Resources/install_dependencies.sh"
+# A release build carries the SHA-256s of its Python runtimes ("<arch> <sha256>" lines), which install_dependencies.sh
+# checks the download against; without them it asks GitHub for the release asset's checksum.
+if [[ -n "${MANIMBLE_RUNTIME_SHA256S:-}" ]]; then
+  install -m 644 "$MANIMBLE_RUNTIME_SHA256S" "$APP/Contents/Resources/runtime-sha256.txt"
+fi
 cp assets/Manimble.icns "$APP/Contents/Resources/manimble.icns"
 cp assets/ManimbleDocument.icns "$APP/Contents/Resources/manimble-document.icns"
 cp assets/biocartoon.png "$APP/Contents/Resources/biocartoon.png"
