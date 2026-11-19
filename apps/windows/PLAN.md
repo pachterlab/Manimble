@@ -48,3 +48,19 @@ re-render on outside edits (the engine already watches files).
 
 **5. Setup and release.** First-launch dependency installer (Python runtime, LaTeX), `install_manimble.ps1`, icons,
 an MSIX or zip build, and a CI job in `.github/workflows`.
+
+## Status
+
+- **Phase 0, engine on Windows:** done. Platform paths are in `engine/manimble/hostpaths.py`; dark mode and
+  themes handle decks with Windows line endings.
+- **Phase 1, MVP:** done.
+- **Phase 2, editing parity:** done. Resize and line-end handles, marquee selection, drawing tools and the pen,
+  inserting text, formulas, shapes, tables and images, layouts and builds, the format inspector, arrange and group,
+  right-click menu, find and replace, zoom, grid and snapping, themes, background, dark mode, slide numbers, copy and
+  paste, moves per build. Still to do: rulers and draggable guides, text-box wrap handles, table cell editing, hyperlinks
+  and alt text, BioCartoon icons, Python plots, Extract Elements.
+- **Phase 3, presenting and sharing:** the animated show and the animation preview are done; New Deck, export
+  (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Still to do: Presenter View,
+  `.manimble` packages, scripted presentations, the feedback layer.
+- **Phase 4, terminal:** not started.
+- **Phase 5, setup and release:** `install_manimble.ps1` is written; the first-launch installer and CI are not.

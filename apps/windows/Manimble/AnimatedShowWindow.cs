@@ -43,6 +43,7 @@ public sealed class AnimatedShowWindow : Window
     enum Mode { Play, End, Reverse }
 
     readonly Grid root = new() { Background = Brushes.Black };
+    readonly Grid media = new() { Background = Brushes.Black };       // the slide alone (what Presenter View mirrors)
     readonly Image still = new() { Stretch = Stretch.Uniform };
     readonly MediaElement[] players = { NewPlayer(), NewPlayer() };
     int front = -1;                  // the player on screen
@@ -91,10 +92,11 @@ public sealed class AnimatedShowWindow : Window
         Background = Brushes.Black;
         Topmost = true;
         ShowInTaskbar = true;
-        root.Children.Add(still);
+        root.Children.Add(media);
+        media.Children.Add(still);
         foreach (var p in players)
         {
-            root.Children.Add(p);
+            media.Children.Add(p);
             p.MediaOpened += OnOpened;
             p.MediaEnded += OnEnded;
             p.MediaFailed += (s, e) => { Log.Note("show clip failed: " + e.ErrorException?.Message); finished = true; Changed?.Invoke(); };
@@ -256,9 +258,17 @@ public sealed class AnimatedShowWindow : Window
         Changed?.Invoke();
     }
 
+    /// The live picture of the show, for Presenter View to mirror.
+    public Visual Stage => media;
+
     void OnKey(object sender, KeyEventArgs e)
     {
-        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (HandleKey(e.Key == Key.System ? e.SystemKey : e.Key)) e.Handled = true;
+    }
+
+    /// A key of the show (also sent by Presenter View); true when it was one.
+    public bool HandleKey(Key key)
+    {
         if (key is >= Key.D1 and <= Key.D9 || key is >= Key.NumPad1 and <= Key.NumPad9)
         {
             // 1-9: the deck's chapters (sections), as in Manim Slides
@@ -268,8 +278,7 @@ public sealed class AnimatedShowWindow : Window
                 var j = deck.Slides.FindIndex(s => s.SceneIndex >= deck.Sections[n]);
                 if (j >= 0) Show(j, Mode.Play);
             }
-            e.Handled = true;
-            return;
+            return true;
         }
         switch (key)
         {
@@ -283,9 +292,9 @@ public sealed class AnimatedShowWindow : Window
             case Key.P: showProgress = !showProgress; UpdateChrome(); break;
             case Key.Home: Show(0, Mode.Play); break;
             case Key.End: Show(deck.Slides.Count - 1, Mode.End); break;
-            default: return;
+            default: return false;
         }
-        e.Handled = true;
+        return true;
     }
 }
 

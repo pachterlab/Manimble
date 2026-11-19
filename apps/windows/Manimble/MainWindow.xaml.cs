@@ -1460,8 +1460,34 @@ public partial class MainWindow : Window
     // ---------------------------------------------------------------- the animated show
 
     AnimatedShowWindow? animatedShow;
+    PresenterWindow? presenter;
     bool presentPending;
+    bool presentWithPresenter;
     int presentFrom;
+    Dictionary<string, List<string>> presenterStills = new();
+
+    /// Presenter View: the show on the other display, notes, next build and timer on this one (Alt+F5).
+    async void PresenterView_Click(object sender, RoutedEventArgs e)
+    {
+        if (workspace == null || presentPending || animatedShow != null) return;
+        await FinishEdits();
+        presentWithPresenter = true;
+        await StartPresent(sceneName ?? state?.Scenes.FirstOrDefault()?.Name ?? "");
+        if (!presentPending) presentWithPresenter = false;
+    }
+
+    async Task LoadPresenterStills()
+    {
+        try
+        {
+            var d = await engine.Call<DeckPages>("deck_pages", new JsonObject { ["ahead"] = 0 });
+            presenterStills = d?.Slides.ToDictionary(s => s.Scene, s => s.Pages) ?? new();
+        }
+        catch { presenterStills = new(); }
+    }
+
+    string? PresenterStill(string scene, int build) =>
+        presenterStills.TryGetValue(scene, out var pages) && pages.Count > 0 ? pages[Math.Min(build, pages.Count - 1)] : null;
 
     /// Builds the out-of-date slides with manim, then plays their clips (the `present` "ready" event). The show
     /// opens once the first few slides from here are built; the rest build behind it ("update" events).
@@ -1482,14 +1508,31 @@ public partial class MainWindow : Window
         }
     }
 
-    void OpenShow(PresentDeck deck, int startScene)
+    async void OpenShow(PresentDeck deck, int startScene)
     {
         if (deck.Slides.Count == 0) { Toast("Nothing to show: every slide is hidden or failed to build", error: true); return; }
-        var show = new AnimatedShowWindow(deck, startScene);
-        show.Exited += () => { animatedShow = null; Activate(); };
+        var withPresenter = presentWithPresenter;
+        presentWithPresenter = false;
+        Screen? audience = null;
+        if (withPresenter)
+        {
+            var mine = Screen.Of(this);
+            audience = Screen.All().FirstOrDefault(s => s.Handle != mine);
+            await LoadPresenterStills();
+        }
+        var show = new AnimatedShowWindow(deck, startScene, audience, this);
+        show.Exited += () => { animatedShow = null; presenter = null; Activate(); };
         animatedShow = show;
         show.Show();
-        show.Activate();
+        if (withPresenter)
+        {
+            if (audience == null) { show.Topmost = false; Toast("One display: the show is full screen behind Presenter View. With a second display it goes there."); }
+            var p = new PresenterWindow(show, PresenterStill);
+            presenter = p;
+            p.Show();
+            p.Activate();
+        }
+        else show.Activate();
     }
 
     void OnPresentEvent(JsonElement ev)
@@ -1616,6 +1659,15 @@ public partial class MainWindow : Window
             case "present":
                 OnPresentEvent(ev);
                 break;
+            case "export":
+                OnExportEvent(ev, movie: false);
+                break;
+            case "export_movie":
+                OnExportEvent(ev, movie: true);
+                break;
+            case "import":
+                OnImportEvent(ev);
+                break;
             case "animation_preview":
                 OnPreviewEvent(ev);
                 break;
@@ -1636,7 +1688,9 @@ public partial class MainWindow : Window
         // shortcuts that work everywhere
         if (ctrl && key == Key.S) { Save_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.O) { OpenDeck_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.N) { NewDeck_Click(sender, e); e.Handled = true; return; }
         if (key == Key.F5 && ctrl && shift) { PreviewAnimations_Click(sender, e); e.Handled = true; return; }
+        if (key == Key.F5 && Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) { PresenterView_Click(sender, e); e.Handled = true; return; }
         if (key == Key.F5) { if (shift) PlayCurrent_Click(sender, e); else PlayBeginning_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.F) { OpenFind(false); e.Handled = true; return; }
         if (ctrl && key == Key.H) { OpenFind(true); e.Handled = true; return; }
