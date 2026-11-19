@@ -1,4 +1,4 @@
-# Builds Manimble.app and publishes it as a GitHub Release.
+# Builds Manimble.app and Manimble for Windows and publishes them as a GitHub Release.
 #
 #   Release:  bump VERSION, commit, then  git tag v0.1.0 && git push origin v0.1.0
 #   Dry run:  Actions -> release -> Run workflow (builds the app as a workflow artifact only)
@@ -6,6 +6,7 @@
 # The assets keep the same names in every release, so these links always point at the newest ones:
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip
+#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip
 # Each release also carries Manimble-python-arm64.tar.gz and Manimble-python-x86_64.tar.gz, the Python runtimes
 # (manim included) that the app's first-launch setup window downloads (apps/macos/install_dependencies.sh).
 #
@@ -40,8 +41,24 @@ jobs:
           path: out/Manimble-python-*.tar.gz
           if-no-files-found: error
 
+  # Windows: a self-contained app (no .NET install needed); its first-launch setup installs Python with Manim
+  # (apps/windows/install_dependencies.ps1).
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/Manimble-Windows.zip
+          if-no-files-found: error
+
   release:
-    needs: runtime
+    needs: [runtime, windows]
     runs-on: macos-latest
     # `secrets` can't be read in a step's `if:`, so expose whether signing is configured here.
     env:
@@ -115,6 +132,11 @@ jobs:
           path: out
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: out
+
       - uses: actions/upload-artifact@v4
         with:
           name: Manimble-macOS
@@ -122,6 +144,7 @@ jobs:
             out/Manimble-macOS.zip
             out/Manimble-macOS.dmg
             out/Manimble-python-*.tar.gz
+            out/Manimble-Windows.zip
           if-no-files-found: error
 
       - name: Publish the GitHub Release
@@ -129,5 +152,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.dmg out/Manimble-macOS.zip out/Manimble-python-*.tar.gz --repo "$GITHUB_REPOSITORY" \
+          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.dmg out/Manimble-macOS.zip out/Manimble-python-*.tar.gz out/Manimble-Windows.zip --repo "$GITHUB_REPOSITORY" \
             --title "Manimble ${GITHUB_REF_NAME#v}" --generate-notes

@@ -66,4 +66,6 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   re-render the slide.
 - **Phase 5, setup and release:** `install_dependencies.ps1` (tested on a fresh environment), `install_manimble.ps1`
   (tested: builds into `%LOCALAPPDATA%\Programs\Manimble`) and the first-launch setup window (`SetupWindow.cs`, also
-  File > Install Dependencies…) are done. Still to do: a CI job and a packaged release.
+  File > Install Dependencies…) are done. `build_release.ps1` makes a self-contained `Manimble-Windows.zip` (tested: it
+  runs unzipped on its bundled engine); the build workflow builds it on every push and the release workflow attaches it
+  to each GitHub Release. Still to do: an MSIX or installer, code signing, file associations, an app icon.

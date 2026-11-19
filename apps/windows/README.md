@@ -6,6 +6,12 @@ engine reaches the macOS and the Windows app alike. Everything that understands 
 the engine. This folder holds only the UI, the working-copy manager and the platform glue. See [PLAN.md](PLAN.md) for
 what is done and what comes next.
 
+## Install a release
+
+Download `Manimble-Windows.zip` from the [latest release](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip),
+unzip it anywhere and run `Manimble.exe`. It needs no .NET install. On first launch a setup window offers to install
+Python with Manim (and MiKTeX for formulas) for your user account; File > Install Dependencies… brings it back.
+
 ## Install from a checkout
 
 ```powershell
