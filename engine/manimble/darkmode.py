@@ -69,7 +69,8 @@ def changes(h: str, mode: str = "dark") -> bool:
 def _cfg_background(deck: str):
     """(path, text, (start, end) of the value or None, value) for manim.cfg's [CLI] background_color."""
     path = os.path.join(deck, "manim.cfg")
-    text = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+    # newline="": the offsets below are bytes of the file as it is, so a Windows "\r\n" must not be read as "\n"
+    text = open(path, encoding="utf-8", newline="").read() if os.path.exists(path) else ""
     section = None
     pos = 0                                        # byte offset of the line (Edit offsets are bytes)
     for line in text.splitlines(keepends=True):
