@@ -91,6 +91,10 @@ public sealed class Settings
     public bool WindowMaximized { get; set; }
     /// "Not Now" in the setup window when only LaTeX was missing: later launches don't ask again.
     public bool SkipLatexSetup { get; set; }
+    /// Rulers along the slide (View > Ruler).
+    public bool ShowRulers { get; set; } = true;
+    /// The user's guides per deck (the original folder, lower-cased): [1 = vertical / 0 = horizontal, frame px].
+    public Dictionary<string, List<double[]>> Guides { get; set; } = new();
 
     static Settings? current;
     public static Settings Current => current ??= Load();

@@ -61,7 +61,7 @@ public sealed class SlideCanvas : Border
     /// Text typed into an empty layout placeholder.
     public event Action<Placeholder, string>? PlaceholderCommitted;
 
-    enum Mode { None, Press, Move, Resize, Endpoint, Marquee, Draw, Pen }
+    enum Mode { None, Press, Move, Resize, Endpoint, Marquee, Draw, Pen, Guide }
     Mode mode;
     int? hover;
     Point downAt;
@@ -101,10 +101,23 @@ public sealed class SlideCanvas : Border
         frame.Children.Add(overlay);
         viewbox.Child = frame;
         viewbox.Margin = new Thickness(24);
+        hRuler = new Ruler(this, horizontal: true);
+        vRuler = new Ruler(this, horizontal: false);
         var host = new Grid();
+        host.RowDefinitions.Add(rulerRow); host.RowDefinitions.Add(new RowDefinition());
+        host.ColumnDefinitions.Add(rulerCol); host.ColumnDefinitions.Add(new ColumnDefinition());
         scroller.Content = viewbox;
+        var corner = new Border { Background = new SolidColorBrush(Color.FromRgb(0x24, 0x24, 0x28)) };
+        Grid.SetColumn(hRuler, 1);
+        Grid.SetRow(vRuler, 1);
+        Grid.SetRow(scroller, 1); Grid.SetColumn(scroller, 1);
+        Grid.SetRow(emptyText, 1); Grid.SetColumn(emptyText, 1);
+        host.Children.Add(corner);
+        host.Children.Add(hRuler);
+        host.Children.Add(vRuler);
         host.Children.Add(scroller);
         host.Children.Add(emptyText);
+        scroller.ScrollChanged += (_, _) => RedrawRulers();
         // Ctrl+wheel zooms, as in other editors
         scroller.PreviewMouseWheel += (_, e) =>
         {
@@ -127,9 +140,133 @@ public sealed class SlideCanvas : Border
             if (hit is int h) { if (!Selected.Contains(h)) Select(WithGroup(h)); }
             else Select(Array.Empty<int>());
         };
-        overlay.MouseLeave += (_, _) => { if (hover != null) { hover = null; DrawOverlay(); } };
+        overlay.MouseLeave += (_, _) => { pointer = null; RedrawRulers(); if (hover != null) { hover = null; DrawOverlay(); } };
         overlay.LostMouseCapture += (_, _) => { if (mode != Mode.None && Mouse.LeftButton != MouseButtonState.Pressed) EndPress(commit: true); };
         SizeChanged += (_, _) => DrawOverlay();
+        viewbox.SizeChanged += (_, _) => RedrawRulers();
+    }
+
+    // ---------------------------------------------------------------- rulers and guides
+
+    readonly Ruler hRuler, vRuler;
+    readonly RowDefinition rulerRow = new() { Height = new GridLength(Ruler.Thickness) };
+    readonly ColumnDefinition rulerCol = new() { Width = new GridLength(Ruler.Thickness) };
+    Point? pointer;
+    int? dragGuide;
+
+    /// Rulers along the top and left (View > Ruler).
+    public bool ShowRulers
+    {
+        get => rulerRow.Height.Value > 0;
+        set
+        {
+            rulerRow.Height = new GridLength(value ? Ruler.Thickness : 0);
+            rulerCol.Width = new GridLength(value ? Ruler.Thickness : 0);
+            hRuler.Visibility = vRuler.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// Guides the user added (frame px): dragged in from the rulers, moved by dragging, removed by dragging them off
+    /// the slide; moves snap to them.
+    public List<(bool vertical, double pos)> UserGuides { get; } = new();
+    /// The guides changed by hand (to save them).
+    public event Action? GuidesChanged;
+
+    public bool HasSlide => viewbox.Visibility == Visibility.Visible && Stop != null;
+    /// Frame pixels per manim unit.
+    public double UnitPx => Scene?.Frame is { Length: >= 1 } f && f[0] > 0 ? frame.Width / f[0] : frame.Width / 14.222222222222221;
+    /// The pointer over the slide, in frame pixels.
+    public Point? PointerPosition => pointer;
+    public Point FramePoint(MouseEventArgs e) => e.GetPosition(frame);
+    public Point FrameToElement(Point p, Visual to)
+    {
+        try { return frame.TransformToVisual(to).Transform(p); } catch (InvalidOperationException) { return p; }
+    }
+    /// The selection's extent, for the rulers.
+    public Rect? SelectedBox
+    {
+        get
+        {
+            Rect? u = null;
+            foreach (var oid in Selected) if (BoxOf(oid) is Rect r) u = u is Rect a ? Rect.Union(a, r) : r;
+            return u;
+        }
+    }
+
+    void RedrawRulers()
+    {
+        if (!ShowRulers) return;
+        hRuler.InvalidateVisual(); vRuler.InvalidateVisual();
+    }
+
+    public void SetGuides(IEnumerable<(bool vertical, double pos)> guides)
+    {
+        UserGuides.Clear(); UserGuides.AddRange(guides);
+        DrawOverlay();
+    }
+
+    /// A new guide at the slide's centre (View > Add Vertical/Horizontal Guide).
+    public void AddGuide(bool vertical)
+    {
+        UserGuides.Add((vertical, vertical ? frame.Width / 2 : frame.Height / 2));
+        DrawOverlay();
+        GuidesChanged?.Invoke();
+    }
+
+    public void ClearGuides()
+    {
+        UserGuides.Clear();
+        DrawOverlay();
+        GuidesChanged?.Invoke();
+    }
+
+    /// A brand-new guide dragged off a ruler (it starts under the pointer, off the slide).
+    public void BeginGuideDrag(bool vertical, double pos)
+    {
+        UserGuides.Add((vertical, pos));
+        dragGuide = UserGuides.Count - 1;
+        DrawOverlay();
+    }
+
+    /// An existing guide dragged by its ruler marker.
+    public void ContinueGuideDrag(int index)
+    {
+        if (index < 0 || index >= UserGuides.Count) return;
+        dragGuide = index;
+        DrawOverlay();
+    }
+
+    public void UpdateGuideDrag(double pos)
+    {
+        if (dragGuide is not int i || i >= UserGuides.Count) return;
+        UserGuides[i] = (UserGuides[i].vertical, pos);
+        DrawOverlay();
+    }
+
+    /// Drops the dragged guide: gone if it ended off the slide, else kept and saved.
+    public void EndGuideDrag()
+    {
+        if (dragGuide is not int i) return;
+        dragGuide = null;
+        if (i < UserGuides.Count)
+        {
+            var g = UserGuides[i];
+            if (g.pos < 0 || g.pos > (g.vertical ? frame.Width : frame.Height)) UserGuides.RemoveAt(i);
+        }
+        DrawOverlay();
+        GuidesChanged?.Invoke();
+    }
+
+    /// The user guide under a frame point (within a few screen pixels).
+    int? GuideAt(Point p)
+    {
+        double tol = 5 / Scale;
+        for (int i = 0; i < UserGuides.Count; i++)
+        {
+            var g = UserGuides[i];
+            if (Math.Abs((g.vertical ? p.X : p.Y) - g.pos) <= tol) return i;
+        }
+        return null;
     }
 
     double Scale => viewbox.ActualWidth > 0 && frame.Width > 0 ? viewbox.ActualWidth / frame.Width : 1;
@@ -199,6 +336,13 @@ public sealed class SlideCanvas : Border
             var r = new Rect(new Point(v[1], v[2]), new Point(v[3], v[4]));
             xs.AddRange(new[] { r.Left, r.Left + r.Width / 2, r.Right });
             ys.AddRange(new[] { r.Top, r.Top + r.Height / 2, r.Bottom });
+        }
+        foreach (var (vertical, pos) in UserGuides) (vertical ? xs : ys).Add(pos);
+        if (showGrid && UnitPx * Scale > 4)
+        {
+            double u = UnitPx;
+            for (double k = 1; frame.Width / 2 + k * u <= frame.Width + 0.5; k++) xs.AddRange(new[] { frame.Width / 2 + k * u, frame.Width / 2 - k * u });
+            for (double k = 1; frame.Height / 2 + k * u <= frame.Height + 0.5; k++) ys.AddRange(new[] { frame.Height / 2 + k * u, frame.Height / 2 - k * u });
         }
         double tol = 6 / Scale;
         (double d, double t)? Best(double[] cands, List<double> targets)
@@ -376,6 +520,7 @@ public sealed class SlideCanvas : Border
         // the text editor survives a redraw; everything else is drawn again
         for (int i = overlay.Children.Count - 1; i >= 0; i--)
             if (overlay.Children[i] != editor) overlay.Children.RemoveAt(i);
+        RedrawRulers();
         var st = Stop;
         if (st == null || Scene == null) return;
         double t = 1.5 / Scale;
@@ -428,7 +573,7 @@ public sealed class SlideCanvas : Border
         if (showGrid)
         {
             // one line per manim unit, the centre lines stronger
-            double step = frame.Width / 14.222222222222221;
+            double step = UnitPx;
             var faint = new SolidColorBrush(Color.FromArgb(0x38, 0x80, 0xb0, 0xff));
             var strong = new SolidColorBrush(Color.FromArgb(0x70, 0x80, 0xb0, 0xff));
             for (double x = frame.Width / 2 % step; x < frame.Width; x += step)
@@ -437,6 +582,15 @@ public sealed class SlideCanvas : Border
             for (double y = frame.Height / 2 % step; y < frame.Height; y += step)
                 overlay.Children.Add(new Line { X1 = 0, Y1 = y, X2 = frame.Width, Y2 = y, StrokeThickness = t * 0.7, IsHitTestVisible = false,
                                                 Stroke = Math.Abs(y - frame.Height / 2) < 1 ? strong : faint });
+        }
+        for (int i = 0; i < UserGuides.Count; i++)
+        {
+            var (vertical, pos) = UserGuides[i];
+            double gt = i == dragGuide ? t * 1.5 : t;
+            var b = i == dragGuide ? Ruler.GuideBrush : new SolidColorBrush(Color.FromArgb(0xcc, 0x40, 0xd9, 0xff));
+            overlay.Children.Add(vertical
+                ? new Line { X1 = pos, Y1 = 0, X2 = pos, Y2 = frame.Height, Stroke = b, StrokeThickness = gt, IsHitTestVisible = false }
+                : new Line { X1 = 0, Y1 = pos, X2 = frame.Width, Y2 = pos, Stroke = b, StrokeThickness = gt, IsHitTestVisible = false });
         }
         foreach (var (vertical, pos) in guides)
         {
@@ -604,6 +758,14 @@ public sealed class SlideCanvas : Border
             return;
         }
         var hit = HitTest(p);
+        if (e.ClickCount != 2 && GuideAt(p) is int gi)
+        {
+            mode = Mode.Guide;
+            dragGuide = gi;
+            overlay.CaptureMouse();
+            DrawOverlay();
+            return;
+        }
         if (e.ClickCount == 2)
         {
             // a double-click retypes text and formulas; on anything else it is an ordinary press (a quick drag)
@@ -644,10 +806,15 @@ public sealed class SlideCanvas : Border
     void OnMove(object sender, MouseEventArgs e)
     {
         var p = e.GetPosition(frame);
+        pointer = p;
+        RedrawRulers();
         // the button went up somewhere else (another window took the release): end the press here
         if (mode != Mode.None && e.LeftButton != MouseButtonState.Pressed) { EndPress(commit: true); return; }
         switch (mode)
         {
+            case Mode.Guide:
+                if (dragGuide is int di && di < UserGuides.Count) UpdateGuideDrag(UserGuides[di].vertical ? p.X : p.Y);
+                return;
             case Mode.Press or Mode.Move when Selected.Count > 0:
             {
                 var delta = p - downAt;
@@ -693,6 +860,12 @@ public sealed class SlideCanvas : Border
             Cursor = hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
             return;
         }
+        if (GuideAt(p) is int g)
+        {
+            Cursor = UserGuides[g].vertical ? Cursors.SizeWE : Cursors.SizeNS;
+            if (hover != null) { hover = null; DrawOverlay(); }
+            return;
+        }
         var h = HitTest(p);
         Cursor = h != null ? Cursors.SizeAll : PlaceholderAt(p) != null ? Cursors.IBeam : Cursors.Arrow;
         if (h != hover) { hover = h; DrawOverlay(); }
@@ -715,6 +888,9 @@ public sealed class SlideCanvas : Border
         if (overlay.IsMouseCaptured) overlay.ReleaseMouseCapture();
         switch (m)
         {
+            case Mode.Guide:
+                EndGuideDrag();
+                break;
             case Mode.Move:
             {
                 var delta = dragDelta;

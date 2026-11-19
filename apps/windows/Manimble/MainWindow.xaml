@@ -132,6 +132,10 @@
         <Separator/>
         <MenuItem Header="_Grid Lines" IsCheckable="True" x:Name="GridItem" InputGestureText="Ctrl+'" Click="Grid_Click"/>
         <MenuItem Header="S_nap to Objects" IsCheckable="True" IsChecked="True" x:Name="SnapItem" Click="Snap_Click"/>
+        <MenuItem Header="_Ruler" IsCheckable="True" x:Name="RulerItem" InputGestureText="Ctrl+Shift+R" Click="Ruler_Click"/>
+        <MenuItem Header="Add _Vertical Guide" Click="AddVerticalGuide_Click"/>
+        <MenuItem Header="Add _Horizontal Guide" Click="AddHorizontalGuide_Click"/>
+        <MenuItem Header="_Clear Guides" x:Name="ClearGuidesItem" Click="ClearGuides_Click"/>
         <Separator/>
         <MenuItem Header="Show _Terminal" InputGestureText="Ctrl+`" Click="ShowTerminal_Click"/>
         <MenuItem Header="_New Terminal" Click="NewTerminal_Click"/>

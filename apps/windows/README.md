@@ -47,6 +47,7 @@ both, as on the Mac.
 | `SetupWindow.cs` | first-launch setup: offers to install a missing Python or LaTeX with `install_dependencies.ps1` (later: File > Install Dependencies…) |
 | `Workspace.cs` | the working copy (a port of `apps/macos/Sources/Manimble/Workspace.swift`; directory junctions instead of symlinks) |
 | `MainWindow.xaml(.cs)` | navigator, canvas, builds, notes, inspector, source pane, menus and shortcuts |
+| `Ruler.cs` | the rulers along the canvas, in manim units; drag a guide off them onto the slide |
 | `SlideCanvas.cs` | the canvas: the exact frame when idle, backdrop and sprites while dragging or while an optimistic edit waits for its render |
 | `SlideshowWindow.cs` | the full-screen show of the exact frames |
 | `Models.cs` | the engine's replies |

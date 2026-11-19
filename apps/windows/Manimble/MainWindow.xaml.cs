@@ -84,6 +84,8 @@ public partial class MainWindow : Window
         canvas.TextCommitted += (oid, text) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "text", ["value"] = text }));
         canvas.PlaceholderCommitted += OnPlaceholderCommitted;
         canvas.SelectionChanged += RebuildInspector;
+        canvas.GuidesChanged += SaveGuides;
+        canvas.ShowRulers = RulerItem.IsChecked = Settings.Current.ShowRulers;
         canvas.ResizeCommitted += (oid, ratio) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "resize", ["ratio"] = ratio }));
         canvas.EndpointsCommitted += (oid, e) => Submit(() => RunEdit(new JsonObject
             { ["oid"] = oid, ["op"] = "endpoints", ["sx"] = e[0], ["sy"] = e[1], ["ex"] = e[2], ["ey"] = e[3] }));
@@ -287,6 +289,7 @@ public partial class MainWindow : Window
         old?.Discard();
         workspace = ws;
         state = null; scene = null; sceneName = null; shownDir = null;
+        LoadGuides();
         slides.Clear();
         suppressSource = true; SourceEditor.Text = ""; suppressSource = false;
         sourceBase = null; SourceLoc.Text = ""; SourceError.Visibility = Visibility.Collapsed;
@@ -1922,6 +1925,7 @@ public partial class MainWindow : Window
         if (ctrl && key is Key.OemPlus or Key.Add) { canvas.ZoomBy(1.25); e.Handled = true; return; }
         if (ctrl && key is Key.OemMinus or Key.Subtract) { canvas.ZoomBy(0.8); e.Handled = true; return; }
         if (ctrl && key is Key.D0 or Key.NumPad0) { canvas.Zoom = null; e.Handled = true; return; }
+        if (ctrl && shift && key == Key.R) { SetRulers(!RulerItem.IsChecked); e.Handled = true; return; }
         if (ctrl && key == Key.OemQuotes) { GridItem.IsChecked = !GridItem.IsChecked; canvas.ShowGrid = GridItem.IsChecked; e.Handled = true; return; }
         // typing in a text field: its own keys
         if (Keyboard.FocusedElement is TextBox || SourceEditor.IsKeyboardFocusWithin || canvas.IsEditingText) return;

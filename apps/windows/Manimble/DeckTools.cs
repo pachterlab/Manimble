@@ -237,6 +237,46 @@ public partial class MainWindow
     void Grid_Click(object sender, RoutedEventArgs e) => canvas.ShowGrid = GridItem.IsChecked;
     void Snap_Click(object sender, RoutedEventArgs e) => canvas.SnapEnabled = SnapItem.IsChecked;
 
+    // ================================================================ rulers and guides
+
+    void Ruler_Click(object sender, RoutedEventArgs e) => SetRulers(RulerItem.IsChecked);
+
+    void SetRulers(bool on)
+    {
+        RulerItem.IsChecked = on;
+        canvas.ShowRulers = on;
+        Settings.Current.ShowRulers = on;
+        Settings.Current.Save();
+    }
+
+    void AddVerticalGuide_Click(object sender, RoutedEventArgs e) => AddGuide(vertical: true);
+    void AddHorizontalGuide_Click(object sender, RoutedEventArgs e) => AddGuide(vertical: false);
+
+    void AddGuide(bool vertical)
+    {
+        if (sceneName == null || !canvas.HasSlide) return;
+        canvas.AddGuide(vertical);
+        Toast("Guide added at the centre: drag it into place, or off the slide to remove it");
+    }
+
+    void ClearGuides_Click(object sender, RoutedEventArgs e) => canvas.ClearGuides();
+
+    string? GuidesKey => workspace?.Original.ToLowerInvariant();
+
+    void SaveGuides()
+    {
+        if (GuidesKey is not string key) return;
+        if (canvas.UserGuides.Count == 0) Settings.Current.Guides.Remove(key);
+        else Settings.Current.Guides[key] = canvas.UserGuides.Select(g => new[] { g.vertical ? 1.0 : 0.0, g.pos }).ToList();
+        Settings.Current.Save();
+    }
+
+    void LoadGuides()
+    {
+        var saved = GuidesKey is string key && Settings.Current.Guides.TryGetValue(key, out var l) ? l : new List<double[]>();
+        canvas.SetGuides(saved.Where(g => g.Length == 2).Select(g => (g[0] > 0.5, g[1])));
+    }
+
     // ================================================================ themes
 
     void BuildThemeMenu()
