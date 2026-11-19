@@ -1,4 +1,4 @@
-manim==0.21.0
+manim==0.22.1
 manim-slides==5.7.0
 Pillow==12.3.0
 matplotlib==3.11.2
