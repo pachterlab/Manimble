@@ -218,6 +218,10 @@ public partial class MainWindow : Window
         workspace = ws;
         state = null; scene = null; sceneName = null; shownDir = null;
         slides.Clear();
+        suppressSource = true; SourceEditor.Text = ""; suppressSource = false;
+        sourceBase = null; SourceLoc.Text = ""; SourceError.Visibility = Visibility.Collapsed;
+        NotesBox.Text = "";
+        canvas.SetScene(null, 0);
         WelcomePanel.Visibility = Visibility.Collapsed;
         canvas.ShowMessage("Rendering…");
         Settings.Current.AddRecent(ws.Original);

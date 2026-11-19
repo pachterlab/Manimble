@@ -18,8 +18,18 @@ public sealed class PagesResult
 /// File > Import on the Mac. The engine does the work; this is the dialogs and the progress events.
 public partial class MainWindow
 {
-    string DeckBaseName => workspace == null ? "presentation"
-        : Path.GetFileName(Path.GetDirectoryName(workspace.Original)) == "slides" ? "presentation" : Path.GetFileName(workspace.Original);
+    /// The name exports suggest: the deck folder's, or its project's when the folder is just "deck" or "slides".
+    string DeckBaseName
+    {
+        get
+        {
+            if (workspace == null) return "presentation";
+            var name = Path.GetFileName(workspace.Original);
+            if (name.Equals("deck", StringComparison.OrdinalIgnoreCase) || name.Equals("slides", StringComparison.OrdinalIgnoreCase))
+                name = Path.GetFileName(Path.GetDirectoryName(workspace.Original)) ?? name;
+            return string.IsNullOrEmpty(name) ? "presentation" : name;
+        }
+    }
 
     // ================================================================ new deck
 
