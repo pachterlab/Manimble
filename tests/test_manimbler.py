@@ -60,7 +60,7 @@ class ManimblerTests(unittest.TestCase):
 
     def run_command(self, *args):
         return subprocess.run([sys.executable, str(COMMAND), *map(str, args)],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def test_convert_follows_slide_order_and_holds_each_build(self):
         package = self.make_package()
