@@ -651,16 +651,25 @@ class Manimble:
                 "totalScenes": len(self.scenes), "failures": failures}
 
     def _anchors(self) -> dict:
-        """{file: {name: [first line, last line]}} of every top-level def and class, to rebase a render's
-        source positions after lines move above or between them."""
+        """{file: {name: [first line, last line]}} of every top-level def and class, and of the methods of those
+        classes ("Class.method"), to rebase a render's source positions after lines move above or between them
+        (a line added inside a class, such as its `alt_text`, moves the methods below it)."""
+        defs = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
         out = {}
         for rel in self.project.py_files():
             try:
                 tree = self.project.src(rel).tree
             except SyntaxError:
                 continue
-            out[rel] = {n.name: [n.lineno, n.end_lineno] for n in tree.body
-                        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))}
+            spans = {}
+            for n in tree.body:
+                if isinstance(n, defs):
+                    spans[n.name] = [n.lineno, n.end_lineno]
+                    if isinstance(n, ast.ClassDef):
+                        for m in n.body:
+                            if isinstance(m, defs):
+                                spans[f"{n.name}.{m.name}"] = [m.lineno, m.end_lineno]
+            out[rel] = spans
         return out
 
     def _rebased(self, data: dict) -> dict:
@@ -681,14 +690,21 @@ class Manimble:
             cur = new.get(f, {})
 
             def delta(line, spans=spans, cur=cur):
+                # inside a def or class: it moves with the innermost one holding it (a method, else its class)
+                inner = [(name, a) for name, (a, b) in spans if a <= line <= b]
+                if inner:
+                    for name, a in sorted(inner, key=lambda t: -t[1]):
+                        if name in cur:            # a renamed method: its class's move
+                            return cur[name][0] - a
+                    return None
                 d = 0
                 for name, (a, b) in spans:
+                    if "." in name:
+                        continue
                     if a > line:
                         break
                     if name not in cur:
                         return None
-                    if line <= b:
-                        return cur[name][0] - a
                     d = cur[name][1] - b          # module-level code after this def moves with its end
                 return d
             shift[f] = delta
