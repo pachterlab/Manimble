@@ -21,8 +21,8 @@ SIZES = {720: (1280, 720), 1080: (1920, 1080), 1440: (2560, 1440), 2160: (3840, 
 
 def find_ffmpeg() -> str | None:
     """ffmpeg on PATH, or in the usual places when the app was started without a shell's PATH."""
-    for c in (shutil.which("ffmpeg"), "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
-              os.path.expanduser("~/.local/bin/ffmpeg")):
+    from .hostpaths import find_in, tool_dirs
+    for c in (shutil.which("ffmpeg"), find_in(tool_dirs(), "ffmpeg")):
         if c and os.access(c, os.X_OK):
             return c
     try:  # the ffmpeg that the app's Python runtime carries (imageio-ffmpeg)

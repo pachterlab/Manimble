@@ -334,13 +334,8 @@ def compile_pdf(tex: Path) -> tuple[str | None, str | None]:
     no LaTeX is installed (the .tex is the deliverable)."""
     engine = shutil.which("xelatex") or shutil.which("pdflatex")
     if engine is None:
-        for d in ("/Library/TeX/texbin", str(Path.home() / "Library/TinyTeX/bin/universal-darwin")):
-            for e in ("xelatex", "pdflatex"):
-                if Path(d, e).exists():
-                    engine = str(Path(d, e))
-                    break
-            if engine:
-                break
+        from .hostpaths import find_in, tex_dirs
+        engine = find_in(tex_dirs(), "xelatex") or find_in(tex_dirs(), "pdflatex")
     if engine is None:
         return None, None
     pdf = tex.with_suffix(".pdf")

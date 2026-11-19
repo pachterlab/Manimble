@@ -20,6 +20,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .hostpaths import font_dirs
+
 FW, FH = 14.222222222222221, 8.0          # manim frame in units; 1280 x 720 px
 DEFAULT_FONT = "Helvetica Neue"          # used when neither the presentation nor its theme names a font
 PT_PER_FONT_SIZE = 0.945                  # same calibration as the exporter
@@ -27,8 +29,7 @@ PT_PER_FONT_SIZE = 0.945                  # same calibration as the exporter
 # Fonts that ship inside Microsoft Office (Calibri, Cambria, ...) are not installed system-wide, but can be used
 # for measuring text here and registered for rendering by the deck (FONT_REGISTER_SOURCE).
 OFFICE_FONT_DIRS = tuple(sorted(glob.glob("/Applications/Microsoft *.app/Contents/Resources/DFonts")))
-_FONT_DIRS = ("/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts",
-              str(Path.home() / "Library" / "Fonts")) + OFFICE_FONT_DIRS
+_FONT_DIRS = font_dirs() + OFFICE_FONT_DIRS
 
 # written into an imported deck's common.py when it has a table
 TABLE_GRID_SOURCE = '''
