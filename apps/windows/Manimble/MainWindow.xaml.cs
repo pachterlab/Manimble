@@ -126,19 +126,70 @@ public partial class MainWindow : Window
     public async void Start(string? deck)
     {
         Workspace.CleanStale();
-        Busy(+1, "Looking for Python with Manim…");
-        var python = await Tools.FindPython();
-        Busy(-1);
-        if (python == null)
-        {
-            WelcomeText.Text = "Manimble needs a Python with Manim. Run apps\\windows\\install_manimble.ps1 from the Manimble " +
-                               "repository to install one, or choose a Python that has manim with File ▸ Choose Python…";
-            Toast("No Python with Manim found", error: true);
-            return;
-        }
-        StartEngine(python);
-        if (deck != null) await OpenDeck(deck);
+        pendingDeck = deck;
+        await StartWithSetup(firstLaunch: true);
     }
+
+    string? pendingDeck;
+    SetupWindow? setup;
+
+    /// Finds Python and LaTeX; when one is missing, the setup window offers to install it (the Mac app's start()).
+    async Task StartWithSetup(bool firstLaunch)
+    {
+        Busy(+1, firstLaunch ? "Looking for Python with Manim…" : "Checking for Python and LaTeX…");
+        var status = await SetupWindow.Check();
+        Busy(-1);
+        if (status.Python != null && !engine.IsRunning) await LaunchEngine(status.Python);
+        if (status.Python == null)
+        {
+            WelcomeText.Text = "Manimble needs a Python with Manim. The setup window installs one, or choose a Python " +
+                               "that has manim with File ▸ Choose Python…";
+            Toast("No Python with Manim found", error: true);
+        }
+        // only LaTeX missing: the app works meanwhile, and "Not Now" stops the question at later launches
+        if (!firstLaunch || status.Python == null || (!status.Latex && !Settings.Current.SkipLatexSetup))
+            ShowSetup(status);
+    }
+
+    async Task LaunchEngine(string python)
+    {
+        StartEngine(python);
+        if (pendingDeck is { } d) { pendingDeck = null; await OpenDeck(d); }
+    }
+
+    void ShowSetup(SetupWindow.Status status)
+    {
+        if (setup != null) { setup.Activate(); return; }
+        var s = new SetupWindow(status, IsVisible ? this : null);
+        s.OnDone = async (installedPython, installedTex) =>
+        {
+            setup = null;
+            if (installedPython && !engine.IsRunning)
+            {
+                if (await Tools.FindPython() is { } py) await LaunchEngine(py);
+                else Toast("Python was installed but does not import manim; see " + Paths.LogFile, error: true);
+            }
+            else if (installedTex && engine.IsRunning)
+            {
+                // the engine's PATH is set when it starts: restart it so it finds the new LaTeX
+                if (workspace is { IsModified: true })
+                {
+                    Toast("LaTeX is installed. Save the deck and restart Manimble for formulas to render.");
+                    return;
+                }
+                var deck = workspace?.Original;
+                workspace?.Discard(); workspace = null;
+                var py = engine.Python;
+                engine.Stop();
+                if (py != null) { pendingDeck = deck; await LaunchEngine(py); }
+            }
+        };
+        s.OnChoosePython = () => ChoosePython_Click(this, new RoutedEventArgs());
+        setup = s;
+        s.Show();
+    }
+
+    async void InstallDependencies_Click(object sender, RoutedEventArgs e) => await StartWithSetup(firstLaunch: false);
 
     void StartEngine(string python)
     {

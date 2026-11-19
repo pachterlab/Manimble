@@ -89,6 +89,8 @@ public sealed class Settings
     public double? WindowWidth { get; set; }
     public double? WindowHeight { get; set; }
     public bool WindowMaximized { get; set; }
+    /// "Not Now" in the setup window when only LaTeX was missing: later launches don't ask again.
+    public bool SkipLatexSetup { get; set; }
 
     static Settings? current;
     public static Settings Current => current ??= Load();

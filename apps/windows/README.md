@@ -36,14 +36,15 @@ both, as on the Mac.
 |---|---|
 | `Engine.cs` | starts `python -m manimble.rpc`, JSON-lines requests, responses and events; a Job object so render workers die with the app |
 | `Tools.cs` | finds Python (`MANIMBLE_PYTHON`, the saved choice, `%LOCALAPPDATA%\Manimble\python`, the checkout `.venv`, `PATH`) and TeX |
+| `SetupWindow.cs` | first-launch setup: offers to install a missing Python or LaTeX with `install_dependencies.ps1` (later: File > Install Dependencies…) |
 | `Workspace.cs` | the working copy (a port of `apps/macos/Sources/Manimble/Workspace.swift`; directory junctions instead of symlinks) |
 | `MainWindow.xaml(.cs)` | navigator, canvas, builds, notes, inspector, source pane, menus and shortcuts |
 | `SlideCanvas.cs` | the canvas: the exact frame when idle, backdrop and sprites while dragging or while an optimistic edit waits for its render |
 | `SlideshowWindow.cs` | the full-screen show of the exact frames |
 | `Models.cs` | the engine's replies |
 
-Files live in `%LOCALAPPDATA%\Manimble`: `python`, `work` (working copies), `cache` (renders), `manimble.log` and
-`settings.json`.
+Files live in `%LOCALAPPDATA%\Manimble`: `python`, `work` (working copies), `cache` (renders), `manimble.log`,
+`setup.log` (the last install) and `settings.json`.
 
 ## Platform notes
 

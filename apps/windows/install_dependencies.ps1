@@ -21,6 +21,8 @@ $PyExe = Join-Path $PyEnv 'Scripts\python.exe'
 New-Item -ItemType Directory -Force $Base | Out-Null
 
 function Step($text) { Write-Output "== $text" }
+# a failure prints one plain line (the app's setup window shows it) and exits 1, without PowerShell's error record
+trap { Write-Output "Error: $($_.Exception.Message)"; exit 1 }
 
 function Find-BasePython {
     # a python.org or uv-managed CPython 3.11+; never the Microsoft Store's (it redirects writes under AppData)
@@ -90,3 +92,4 @@ if ($WithLatex) {
     }
 }
 Step "Done"
+exit 0

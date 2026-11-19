@@ -20,16 +20,23 @@ $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
 $deps = @{ Requirements = (Join-Path $Root 'engine\requirements.txt') }
 if ($WithLatex) { $deps.WithLatex = $true }
 if ($SkipPython) { $deps.SkipPython = $true }
-if (-not $SkipPython -or $WithLatex) { & (Join-Path $PSScriptRoot 'install_dependencies.ps1') @deps }
+if (-not $SkipPython -or $WithLatex) {
+    & (Join-Path $PSScriptRoot 'install_dependencies.ps1') @deps
+    if ($LASTEXITCODE -ne 0) { throw "Installing the dependencies failed (see above)" }
+}
 
 if (-not $SkipApp) {
-    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $dotnet -or -not (& dotnet --list-sdks)) {
+    # a dotnet with an SDK: on PATH, or a per-user install (dotnet-install.ps1, Visual Studio's user SDKs)
+    $dotnet = @((Get-Command dotnet -All -ErrorAction SilentlyContinue | ForEach-Object Source)
+                "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe", "$env:USERPROFILE\.dotnet\dotnet.exe") |
+        Where-Object { $_ -and (Test-Path $_) -and (& $_ --list-sdks 2>$null | Where-Object { $_ -match '^(1\d)\.' }) } |
+        Select-Object -First 1
+    if (-not $dotnet) {
         throw "Building the app needs the .NET 10 SDK: winget install Microsoft.DotNet.SDK.10"
     }
     $Out = Join-Path $env:LOCALAPPDATA 'Programs\Manimble'
-    Write-Host "Building Manimble into $Out"
-    & dotnet publish (Join-Path $PSScriptRoot 'Manimble\Manimble.csproj') -c Release -r win-x64 --self-contained false -o $Out
+    Write-Host "Building Manimble into $Out (with $dotnet)"
+    & $dotnet publish (Join-Path $PSScriptRoot 'Manimble\Manimble.csproj') -c Release -r win-x64 --self-contained false -o $Out
     if ($LASTEXITCODE -ne 0) { throw "The build failed" }
     # the example deck comes along for File > Open Example Deck
     $ex = Join-Path $Out 'examples\hello\deck'

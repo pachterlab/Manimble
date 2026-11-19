@@ -59,8 +59,11 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   right-click menu, find and replace, zoom, grid and snapping, themes, background, dark mode, slide numbers, copy and
   paste, moves per build. Still to do: rulers and draggable guides, text-box wrap handles, table cell editing, hyperlinks
   and alt text, BioCartoon icons, Python plots, Extract Elements.
-- **Phase 3, presenting and sharing:** the animated show and the animation preview are done; New Deck, export
-  (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Still to do: Presenter View,
-  `.manimble` packages, scripted presentations, the feedback layer.
-- **Phase 4, terminal:** not started.
-- **Phase 5, setup and release:** `install_manimble.ps1` is written; the first-launch installer and CI are not.
+- **Phase 3, presenting and sharing:** the animated show, the animation preview and Presenter View are done; New Deck,
+  export (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Still to do: `.manimble`
+  packages, scripted presentations, the feedback layer. Presenter View on a real second monitor is untested.
+- **Phase 4, terminal:** done. A Terminal tab (Ctrl+`) runs PowerShell in the working copy over ConPTY; outside edits
+  re-render the slide.
+- **Phase 5, setup and release:** `install_dependencies.ps1` (tested on a fresh environment), `install_manimble.ps1`
+  (tested: builds into `%LOCALAPPDATA%\Programs\Manimble`) and the first-launch setup window (`SetupWindow.cs`, also
+  File > Install Dependencies…) are done. Still to do: a CI job and a packaged release.

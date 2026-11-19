@@ -100,7 +100,7 @@ public static class Dialogs
                 {
                     if (int.TryParse(rows.Text, out var r) && int.TryParse(cols.Text, out var c) && r > 0 && c > 0 && r <= 30 && c <= 20)
                     { result = (r, c); w.DialogResult = true; }
-                    else MessageBox.Show(w, "Rows 1â€“30 and columns 1â€“20", "Insert Table");
+                    else MessageBox.Show(w, "Rows 1–30 and columns 1–20", "Insert Table");
                 }),
             },
         };

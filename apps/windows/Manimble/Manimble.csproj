@@ -31,6 +31,8 @@
     <None Include="..\..\..\engine\manimble\**\*.md"
           Link="engine\manimble\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\engine\requirements.txt" Link="engine\requirements.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the first-launch setup runs it (SetupWindow.cs) -->
+    <None Include="..\install_dependencies.ps1" Link="install_dependencies.ps1" CopyToOutputDirectory="PreserveNewest" />
     <!-- the terminal page: xterm.js (MIT, see Terminal\LICENSE-xterm.txt) -->
     <None Include="Terminal\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
