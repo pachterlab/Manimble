@@ -214,3 +214,18 @@ public sealed class SpriteResult
     public double? Cy { get; set; }
     public string? Error { get; set; }
 }
+
+public sealed class DependencyFailure
+{
+    public string Scene { get; set; } = "";
+    public string Error { get; set; } = "";
+}
+
+/// dependency_report: the files the deck's code opened while every slide rendered.
+public sealed class DependencyReport
+{
+    public List<string> Dependencies { get; set; } = new();
+    public int ScannedScenes { get; set; }
+    public int TotalScenes { get; set; }
+    public List<DependencyFailure> Failures { get; set; } = new();
+}

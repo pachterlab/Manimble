@@ -42,6 +42,8 @@ both, as on the Mac.
 |---|---|
 | `Engine.cs` | starts `python -m manimble.rpc`, JSON-lines requests, responses and events; a Job object so render workers die with the app |
 | `Tools.cs` | finds Python (`MANIMBLE_PYTHON`, the saved choice, `%LOCALAPPDATA%\Manimble\python`, the checkout `.venv`, `PATH`) and TeX |
+| `PortableProject.cs` | portable projects: Save Project Copy (a folder) and Package for Sharing (`.manimble`), the same format as the Mac app's, and unpacking them |
+| `FileAssociation.cs` | opens `.manimble` packages from Explorer (registered per user by an installed or unzipped copy) |
 | `SetupWindow.cs` | first-launch setup: offers to install a missing Python or LaTeX with `install_dependencies.ps1` (later: File > Install Dependencies…) |
 | `Workspace.cs` | the working copy (a port of `apps/macos/Sources/Manimble/Workspace.swift`; directory junctions instead of symlinks) |
 | `MainWindow.xaml(.cs)` | navigator, canvas, builds, notes, inspector, source pane, menus and shortcuts |

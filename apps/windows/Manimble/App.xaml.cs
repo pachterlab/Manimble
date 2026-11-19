@@ -9,6 +9,7 @@ public partial class App : Application
     {
         base.OnStartup(e);
         DispatcherUnhandledException += OnUnhandled;
+        FileAssociation.RegisterIfNeeded();
         var w = new MainWindow();
         MainWindow = w;
         w.Show();

@@ -10,6 +10,7 @@
     <AssemblyName>Manimble</AssemblyName>
     <RootNamespace>Manimble</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Manimble.ico</ApplicationIcon>
     <!-- the version comes from the repository's VERSION file, shared with the macOS app -->
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\..\VERSION').Trim())</Version>
     <Product>Manimble</Product>
@@ -35,6 +36,9 @@
     <None Include="..\install_dependencies.ps1" Link="install_dependencies.ps1" CopyToOutputDirectory="PreserveNewest" />
     <!-- the terminal page: xterm.js (MIT, see Terminal\LICENSE-xterm.txt) -->
     <None Include="Terminal\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the icon Explorer shows for .manimble packages (file association) -->
+    <None Remove="Assets\ManimbleDocument.ico" />
+    <Content Include="Assets\ManimbleDocument.ico" Link="ManimbleDocument.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

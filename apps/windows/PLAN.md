@@ -60,12 +60,14 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   paste, moves per build. Still to do: rulers and draggable guides, text-box wrap handles, table cell editing, hyperlinks
   and alt text, BioCartoon icons, Python plots, Extract Elements.
 - **Phase 3, presenting and sharing:** the animated show, the animation preview and Presenter View are done; New Deck,
-  export (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Still to do: `.manimble`
-  packages, scripted presentations, the feedback layer. Presenter View on a real second monitor is untested.
+  export (PowerPoint, PDF, movie, Beamer, Python) and import (PowerPoint, Beamer) are in. Portable projects are in:
+  Save Project Copy, Package for Sharing (`.manimble`, the Mac app's format) and opening packages. Still to do:
+  scripted presentations, the feedback layer. Presenter View on a real second monitor is untested.
 - **Phase 4, terminal:** done. A Terminal tab (Ctrl+`) runs PowerShell in the working copy over ConPTY; outside edits
   re-render the slide.
 - **Phase 5, setup and release:** `install_dependencies.ps1` (tested on a fresh environment), `install_manimble.ps1`
   (tested: builds into `%LOCALAPPDATA%\Programs\Manimble`) and the first-launch setup window (`SetupWindow.cs`, also
   File > Install Dependencies…) are done. `build_release.ps1` makes a self-contained `Manimble-Windows.zip` (tested: it
   runs unzipped on its bundled engine); the build workflow builds it on every push and the release workflow attaches it
-  to each GitHub Release. Still to do: an MSIX or installer, code signing, file associations, an app icon.
+  to each GitHub Release. The app and `.manimble` packages have their icons, and an installed or unzipped copy registers itself (per user)
+  to open `.manimble` files from Explorer. Still to do: an MSIX or installer, code signing.

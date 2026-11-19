@@ -16,6 +16,10 @@ public sealed class Workspace
     public string Work { get; }          // the copied deck folder (what the engine opens)
     public string Root { get; }          // workspace root, deleted on discard
     public string ProjectName { get; }
+    /// The deck inside a project folder, as the portable manifest records it: <deck's parent>/<deck>, with /.
+    public string DeckRelativePath { get; }
+    /// Files Manimble wrote into the working copy (agent instructions): never saved or packaged.
+    public IReadOnlySet<string> OwnFiles => ownFiles;
     readonly Dictionary<string, byte[]?> baseline = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<string> ownFiles = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<string> mirrored = new(StringComparer.OrdinalIgnoreCase);   // copies of the original's surroundings
@@ -42,6 +46,7 @@ public sealed class Workspace
         var xName = Path.GetFileName(x);
         if (string.IsNullOrEmpty(xName)) xName = "deck-parent";
         ProjectName = xName + "-" + deckName;
+        DeckRelativePath = xName + "/" + deckName;
         // each open gets its own root: reopening a deck makes the new copy before the old one is discarded
         Root = Path.Combine(Paths.Base, "work", deckName + "-" + Hash(Original) + "-" + Guid.NewGuid().ToString("N")[..8]);
         var wx = Path.Combine(Root, xName);
@@ -265,26 +270,6 @@ public sealed class Workspace
                 try { File.Delete(p); } catch { }
             }
             compared.Remove(e);
-        }
-    }
-
-    /// The working copy saved as a new deck folder `dest` (Save Project Copy…).
-    public void SaveCopy(string dest)
-    {
-        Directory.CreateDirectory(dest);
-        foreach (var rel in DeckFiles())
-        {
-            var d = Path.Combine(dest, rel);
-            Directory.CreateDirectory(Path.GetDirectoryName(d)!);
-            File.Copy(Path.Combine(Work, rel), d, true);
-        }
-        // the folders the deck links to (assets, media) come along as real copies
-        foreach (var dir in Directory.EnumerateDirectories(Work))
-        {
-            var n = Path.GetFileName(dir);
-            if (Generated.Contains(n) || n.StartsWith('.')) continue;
-            if (new DirectoryInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint) && !Directory.Exists(Path.Combine(dest, n)))
-                CopyDir(dir, Path.Combine(dest, n));
         }
     }
 

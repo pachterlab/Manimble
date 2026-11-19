@@ -239,6 +239,25 @@ public partial class MainWindow : Window
     {
         if (!engine.IsRunning) { Toast("The engine is not running", error: true); return; }
         path = Path.GetFullPath(path);
+        try
+        {
+            if (File.Exists(path) && path.EndsWith(".manimble", StringComparison.OrdinalIgnoreCase))
+            {
+                // a package: unpacked into a project folder, which is what gets edited and saved
+                if (UnpackTarget(path) is not { } target) return;
+                Busy(+1, "Unpacking " + Path.GetFileName(path) + "…");
+                try { path = await Task.Run(() => PortableProject.UnpackArchive(path, target)); }
+                finally { Busy(-1); }
+            }
+            else if (File.Exists(path))
+                path = Path.GetDirectoryName(path)!;      // a file of a deck (a slide's .py): its deck
+            if (Directory.Exists(path) && PortableProject.DeckIn(path) is { } inner) path = inner;
+        }
+        catch (Exception e)
+        {
+            MessageBox.Show(this, e.Message, "Could not open the project", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         if (!Directory.Exists(path)) { Toast("No deck folder at " + path, error: true); return; }
         if (!Directory.EnumerateFiles(path, "*.py").Any())
         {
@@ -346,6 +365,30 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog(this) == true) await OpenDeck(dlg.FolderName);
     }
 
+    async void OpenPackage_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new OpenFileDialog { Title = "Open a Manimble package", Filter = "Manimble package (*.manimble)|*.manimble" };
+        if (dlg.ShowDialog(this) == true) await OpenDeck(dlg.FileName);
+    }
+
+    /// Where a .manimble package is unpacked: a project folder the user names, beside the package by default.
+    /// MANIMBLE_TEST_UNPACK names it without asking.
+    string? UnpackTarget(string package)
+    {
+        if (Environment.GetEnvironmentVariable("MANIMBLE_TEST_UNPACK") is { Length: > 0 } t) return t;
+        var stem = Path.GetFileNameWithoutExtension(package);
+        var dir = Path.GetDirectoryName(package)!;
+        var name = stem;
+        for (int n = 2; Directory.Exists(Path.Combine(dir, name)) || File.Exists(Path.Combine(dir, name)); n++) name = $"{stem} {n}";
+        var dlg = new SaveFileDialog
+        {
+            Title = $"Unpack {Path.GetFileName(package)} into a project folder (you edit and save the folder; the package stays as it is)",
+            InitialDirectory = dir, FileName = name, Filter = "Project folder|*.*", AddExtension = false, OverwritePrompt = false,
+        };
+        if (dlg.ShowDialog(this) != true) return null;
+        return dlg.FileName;
+    }
+
     async void OpenExample_Click(object sender, RoutedEventArgs e)
     {
         var candidates = new List<string>();
@@ -366,16 +409,68 @@ public partial class MainWindow : Window
     void Save_Click(object sender, RoutedEventArgs e) => _ = SaveAsync();
     async Task SaveAsync() { await FinishEdits(); SaveToOriginal(); }
 
+    /// Save Project Copy…: a portable project folder (deck, the files its slides read, manifest), named after the project.
     async void SaveCopy_Click(object sender, RoutedEventArgs e)
     {
         if (workspace == null) return;
-        var dlg = new OpenFolderDialog { Title = "Choose where to put the copy of the deck" };
+        var dlg = new OpenFolderDialog { Title = "Choose where Manimble should create the project folder" };
         if (dlg.ShowDialog(this) != true) return;
-        await FinishEdits();
-        var dest = Path.Combine(dlg.FolderName, Path.GetFileName(workspace.Original) + " copy");
-        try { workspace.SaveCopy(dest); Toast("Saved a copy in " + dest); }
-        catch (Exception ex) { Toast("Could not save the copy: " + ex.Message, error: true); }
+        var name = workspace.ProjectName;
+        var dest = Path.Combine(dlg.FolderName, name);
+        for (int n = 2; Directory.Exists(dest) || File.Exists(dest); n++) dest = Path.Combine(dlg.FolderName, $"{name} ({n})");
+        await SavePortable(dest, archive: false);
     }
+
+    /// Package for Sharing…: the same, zipped as one .manimble file.
+    async void PackageProject_Click(object sender, RoutedEventArgs e)
+    {
+        if (workspace == null) return;
+        var dlg = new SaveFileDialog
+        {
+            Title = "Package the project for sharing: one .manimble file with the deck and the files its slides use",
+            FileName = workspace.ProjectName, DefaultExt = ".manimble", Filter = "Manimble package (*.manimble)|*.manimble",
+        };
+        if (dlg.ShowDialog(this) != true) return;
+        var dest = dlg.FileName;
+        if (!dest.EndsWith(".manimble", StringComparison.OrdinalIgnoreCase)) dest += ".manimble";
+        await SavePortable(dest, archive: true);
+    }
+
+    async Task SavePortable(string destination, bool archive)
+    {
+        var ws = workspace;
+        if (ws == null) return;
+        await FinishEdits();             // the copy holds the last edits, as Save does
+        Busy(+1, "Checking slide dependencies (every slide renders once)…");
+        try
+        {
+            var report = await engine.Call<DependencyReport>("dependency_report");
+            if (report.ScannedScenes != report.TotalScenes)
+            {
+                MessageBox.Show(this, $"Manimble checked {report.ScannedScenes} of {report.TotalScenes} slides. Please try again.",
+                                "Dependency scan incomplete", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (report.Failures.Count > 0)
+            {
+                var details = string.Join("\n", report.Failures.Take(5).Select(f => $"{f.Scene}: {LastLine(f.Error)}"));
+                if (MessageBox.Show(this, $"Manimble found dependencies in {report.ScannedScenes} slides, but the package may be incomplete.\n\n" +
+                                          $"{details}\n\nContinue with the project copy?", "Some slides did not render during the dependency check",
+                                    MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+            }
+            Toast(archive ? "Packaging…" : "Copying the project…");
+            if (archive) await Task.Run(() => PortableProject.CreateArchive(ws, report.Dependencies, destination));
+            else await Task.Run(() => PortableProject.CreateFolder(ws, report.Dependencies, destination));
+            Toast(archive ? "Packaged " + destination : "Saved the project folder " + destination);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Could not save the portable project", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { Busy(-1); }
+    }
+
+    static string LastLine(string s) => s.Split('\n').Where(l => l.Trim().Length > 0).LastOrDefault()?.Trim() ?? s;
 
     async void Revert_Click(object sender, RoutedEventArgs e)
     {
@@ -544,7 +639,6 @@ public partial class MainWindow : Window
         canvas.Selected.AddRange(now);
     }
 
-    static string LastLine(string s) => s.Split('\n').Where(l => l.Trim().Length > 0).LastOrDefault()?.Trim() ?? s;
 
     void RebuildBuilds()
     {

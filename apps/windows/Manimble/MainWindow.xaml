@@ -18,10 +18,12 @@
         <MenuItem Header="_New Deck…" InputGestureText="Ctrl+N" Click="NewDeck_Click"/>
         <MenuItem Header="_Open Deck…" InputGestureText="Ctrl+O" Click="OpenDeck_Click"/>
         <MenuItem Header="Open _Recent" x:Name="RecentMenu"/>
+        <MenuItem Header="Open _Package (.manimble)…" Click="OpenPackage_Click"/>
         <MenuItem Header="Open _Example Deck" Click="OpenExample_Click"/>
         <Separator/>
         <MenuItem Header="_Save to Original" InputGestureText="Ctrl+S" Click="Save_Click" x:Name="SaveItem"/>
         <MenuItem Header="Save Project _Copy…" Click="SaveCopy_Click"/>
+        <MenuItem Header="Package for S_haring…" Click="PackageProject_Click"/>
         <MenuItem Header="Re_vert to Original…" Click="Revert_Click"/>
         <Separator/>
         <MenuItem Header="_Import">
