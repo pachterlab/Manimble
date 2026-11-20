@@ -1,4 +1,4 @@
-# Builds the macOS app on every push and PR, so a change can't quietly break the build.
+# Builds the macOS and Windows apps on every push and PR, so a change can't quietly break either build.
 name: build
 on:
   push:
@@ -15,3 +15,21 @@ jobs:
         with:
           persist-credentials: false
       - run: apps/macos/build_app.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: "10.0.x"
+      - run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Manimble-Windows
+          path: |
+            out/Manimble-Windows.zip
+            out/Manimble-Windows-Setup.exe
+          if-no-files-found: error

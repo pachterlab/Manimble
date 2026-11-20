@@ -1,0 +1,11 @@
+<Application x:Class="Manimble.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ThemeMode="System"
+             ShutdownMode="OnMainWindowClose">
+  <Application.Resources>
+    <SolidColorBrush x:Key="CanvasBackBrush" Color="#FF1B1B1E"/>
+    <SolidColorBrush x:Key="SelectionBrush" Color="#FF4C8DFF"/>
+    <SolidColorBrush x:Key="ErrorBrush" Color="#FFE5484D"/>
+  </Application.Resources>
+</Application>

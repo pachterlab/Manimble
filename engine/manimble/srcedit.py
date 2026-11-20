@@ -144,6 +144,16 @@ class Src:
     def off(self, line: int, col: int) -> int:
         return self.line_starts[line - 1] + col
 
+    def line_end(self, line: int) -> int:
+        """Byte offset where line `line` (1-based) ends, before its "\n" or Windows "\r\n"."""
+        b = self.line_starts[line] - 1 if line < len(self.line_starts) else len(self.data)
+        return b - 1 if b > self.line_starts[line - 1] and self.data[b - 1:b] == b"\r" else b
+
+    @property
+    def newline(self) -> str:
+        """The file's line break, so added lines match it."""
+        return "\r\n" if b"\r\n" in self.data else "\n"
+
     def span(self, node) -> tuple[int, int]:
         return self.off(node.lineno, node.col_offset), self.off(node.end_lineno, node.end_col_offset)
 
@@ -548,7 +558,9 @@ class Planner:
         edits = [Edit(src.rel, a, b, lit)] if not styles or new != getattr(node, "value", None) else []
         call = src.parent.get(node)
         if obj["kind"] == "text" and isinstance(call, ast.Call) and call.args and call.args[0] is node:
-            edits += _shift_text_ranges(src, call, node.value, new, skip=_t2_keys(styles))
+            # the string as written, or (a shared constant's name being replaced on this slide) the text it held
+            old = node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else obj["value"]
+            edits += _shift_text_ranges(src, call, old, new, skip=_t2_keys(styles))
             edits += _set_t2(src, call, new, styles, obj)
         elif _t2_keys(styles):
             raise EditError("part of a text can only be formatted when its string is written in its Text(...) call")
@@ -593,7 +605,7 @@ class Planner:
         """Write the text's `# manimble box` comment with these fields changed (the rest kept)."""
         src, ln = self._box_line(obj)
         a = src.line_starts[ln - 1]
-        b = src.line_starts[ln] - 1 if ln < len(src.line_starts) else len(src.data)
+        b = src.line_end(ln)
         line = src.data[a:b].decode("utf-8")
         merged = dict(parse_box_tag(line) or {})
         merged.update({k: v for k, v in fields.items() if v is not None})
@@ -1113,8 +1125,8 @@ class Planner:
                 return Edit(src.rel, at, at, " " * stmt.col_offset + line + "\n"), stmt.lineno
         last = fn.body[-1]
         indent = " " * last.col_offset
-        at = src.line_starts[last.end_lineno] - 1 if last.end_lineno < len(src.line_starts) else len(src.data)
-        return Edit(src.rel, at, at, "\n" + indent + line), last.end_lineno + 1
+        at = src.line_end(last.end_lineno)
+        return Edit(src.rel, at, at, src.newline + indent + line), last.end_lineno + 1
 
     def plan_delete_stop(self, scene: dict, site: dict | None) -> list[Edit]:
         """Remove the `self.next_slide()` at `site` (recorded while the scene ran), so the build it ends runs on
