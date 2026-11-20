@@ -60,11 +60,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check the tag matches VERSION
+      - name: Check the tag matches VERSION, and the engine's version matches too
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           v="$(cat VERSION)"
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "::error::tag is $GITHUB_REF_NAME but VERSION says $v"; exit 1; }
+          e="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' engine/manimble/__init__.py)"
+          [ "$e" = "$v" ] || { echo "::error::VERSION says $v but engine/manimble/__init__.py says ${e:-nothing}"; exit 1; }
 
       - name: Check a tagged release will be signed and notarized
         if: startsWith(github.ref, 'refs/tags/')
