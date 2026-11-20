@@ -67,7 +67,7 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   presentations are in (View > Script…: Speak, Mouse and Pause steps per build, tracks set by clicking or dragging on the
   slide, previews; Play > Scripted Presentation runs them with Windows' text to speech; the Mac's script.json). Not yet:
   cloud voices and the scripted movie export. The feedback layer is in (Presenter View's Feedback Mode, F, types red notes on
-  the slide; the editor shows, moves, retypes and deletes them, and View > Feedback… lists them; the Mac's feedback.json). Presenter View on a real second monitor is untested.
+  the slide; the editor shows, moves, retypes and deletes them, and View > Feedback… lists them; the Mac's feedback.json). Hyperlinks are tested in the animated show, Presenter View and the stills slideshow (Show Animations off). Presenter View on a real second monitor is untested (one display here); to check with a monitor or projector: Alt+F5 puts the show full screen on the other display and Presenter View on this one, keys and clicks in Presenter View drive the show, Feedback Mode notes stay off the audience display, and Esc ends both.
 - **Phase 4, terminal:** done. A Terminal tab (Ctrl+`) runs PowerShell in the working copy over ConPTY; outside edits
   re-render the slide.
 - **Phase 5, setup and release:** `install_dependencies.ps1` (tested on a fresh environment), `install_manimble.ps1`
