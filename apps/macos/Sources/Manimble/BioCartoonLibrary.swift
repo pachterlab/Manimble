@@ -1,4 +1,5 @@
 import AppKit
+import Security
 import SQLite3
 
 /// Right-click ▸ Add to Local BioCartoon Library… / Upload to Online BioCartoon Library…: the BioCartoon editor's
@@ -109,6 +110,35 @@ enum BCLibrary {
     static var submitted: [String] {
         get { UserDefaults.standard.stringArray(forKey: "biocartoonSubmitted") ?? [] }
         set { UserDefaults.standard.set(newValue, forKey: "biocartoonSubmitted") }
+    }
+
+    /// The submitter's email, remembered for the next submission; kept in the Keychain, not in the defaults.
+    static var savedEmail: String {
+        get {
+            if let old = UserDefaults.standard.string(forKey: "biocartoonEmail") {   // from before it moved
+                UserDefaults.standard.removeObject(forKey: "biocartoonEmail")
+                storeEmail(old)
+                return old
+            }
+            var q = emailQuery
+            q[kSecReturnData as String] = true
+            q[kSecMatchLimit as String] = kSecMatchLimitOne
+            var out: AnyObject?
+            guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let d = out as? Data else { return "" }
+            return String(data: d, encoding: .utf8) ?? ""
+        }
+        set { storeEmail(newValue) }
+    }
+    private static func storeEmail(_ email: String) {
+        SecItemDelete(emailQuery as CFDictionary)
+        guard !email.isEmpty else { return }
+        var q = emailQuery
+        q[kSecValueData as String] = Data(email.utf8)
+        SecItemAdd(q as CFDictionary, nil)
+    }
+    private static var emailQuery: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.pachterlab.Manimble.biocartoon",
+         kSecAttrAccount as String: "email"]
     }
 
     static func wasSubmitted(_ path: String) -> Bool { fingerprint(path).map { submitted.contains($0) } ?? false }
@@ -335,7 +365,7 @@ final class BCLibraryDialog: NSObject, NSTextFieldDelegate, NSComboBoxDelegate {
         creditField.stringValue = UserDefaults.standard.string(forKey: "biocartoonCredit") ?? ""
         emailField.placeholderString = "optional, never published"
         emailField.toolTip = "Only the BioCartoon team sees it, in case they have a question about your submission"
-        emailField.stringValue = UserDefaults.standard.string(forKey: "biocartoonEmail") ?? ""
+        emailField.stringValue = BCLibrary.savedEmail
 
         // the form, top to bottom, as the editor's
         var rows: [NSView] = [], labels: [NSView] = []
@@ -460,7 +490,7 @@ final class BCLibraryDialog: NSObject, NSTextFieldDelegate, NSComboBoxDelegate {
     }
     var credit: String { String(trimmed(creditField).prefix(60)) }
     var email: String { trimmed(emailField) }
-    var licenseKey: String { license.selectedItem?.representedObject as? String ?? "CC0-1.0" }
+    var licenseID: String { license.selectedItem?.representedObject as? String ?? "CC0-1.0" }
     var noAIChecked: Bool { noAI.state == .on }
     var isOfficial: Bool { official.state == .on }
 
@@ -468,7 +498,7 @@ final class BCLibraryDialog: NSObject, NSTextFieldDelegate, NSComboBoxDelegate {
     private var why: String? {
         let over = pic.bytes > (pic.svg != nil ? BCLibrary.maxSVGBytes : BCLibrary.maxPNGBytes)
         if name.isEmpty { return "Give it a name first" }
-        if share && licenseKey == "CC-BY-4.0" && credit.isEmpty { return "CC BY needs a name to credit, or choose CC0" }
+        if share && licenseID == "CC-BY-4.0" && credit.isEmpty { return "CC BY needs a name to credit, or choose CC0" }
         if over { return "Too large: simplify it first" }
         if pic.svg == nil && pngOK.state != .on { return "Confirm adding it as a PNG first" }
         if pic.reducedFrom != nil && reducedOK.state != .on { return "Confirm adding it at the reduced size first" }
@@ -480,7 +510,7 @@ final class BCLibraryDialog: NSObject, NSTextFieldDelegate, NSComboBoxDelegate {
         let ccBy = license.item(at: 1)
         ccBy?.isEnabled = noAI.state == .on
         ccBy?.toolTip = noAI.state == .on ? nil : BCLibrary.ccByNeedsNoAI
-        if noAI.state != .on && licenseKey == "CC-BY-4.0" { license.selectItem(at: 0) }
+        if noAI.state != .on && licenseID == "CC-BY-4.0" { license.selectItem(at: 0) }
         let w = why
         action.isEnabled = w == nil
         action.toolTip = w
@@ -559,7 +589,7 @@ extension MainController {
             biocartoonPane?.reload()
             return true
         }
-        if d.licenseKey == "CC-BY-4.0" && !d.noAIChecked { toast(BCLibrary.ccByNeedsNoAI, error: true); return false }
+        if d.licenseID == "CC-BY-4.0" && !d.noAIChecked { toast(BCLibrary.ccByNeedsNoAI, error: true); return false }
         guard let email = BCLibrary.checkEmail(d.email) else {
             toast("\"\(d.email)\" doesn't look like an email address", error: true); return false
         }
@@ -569,11 +599,11 @@ extension MainController {
         }
         if let busy = BCLibrary.takeSlot() { toast(busy, error: true); return false }
         UserDefaults.standard.set(d.credit, forKey: "biocartoonCredit")
-        UserDefaults.standard.set(email, forKey: "biocartoonEmail")
+        BCLibrary.savedEmail = email
         let author = d.credit.isEmpty ? "anonymous" : d.credit
         let meta = BCLibrary.Meta(title: title, description: d.descriptionText, category: d.categoryName, tags: d.tags,
-                                  author: author, license: d.licenseKey, generative_ai_used: aiUsed, email: email, official: d.isOfficial)
-        let row = BCLibrary.Row(title: title, category: d.categoryName, description: d.descriptionText, license: d.licenseKey,
+                                  author: author, license: d.licenseID, generative_ai_used: aiUsed, email: email, official: d.isOfficial)
+        let row = BCLibrary.Row(title: title, category: d.categoryName, description: d.descriptionText, license: d.licenseID,
                                 author: author, tags: d.tags, aiUsed: aiUsed)
         // noted now, so it can't be submitted again while this one is on its way; dropped if it fails
         if let f = fingerprint { BCLibrary.submitted.append(f) }
@@ -632,7 +662,7 @@ extension MainController {
                 d.descriptionField.stringValue = "A test picture"
                 if share { d.noAI.state = .on; d.refresh(); d.license.selectItem(at: 1); d.creditField.stringValue = "Tester" }
                 d.pngOK.state = .on; d.refresh()
-                log("  enabled after: \(d.action.isEnabled), tags \(d.tags), license \(d.licenseKey)")
+                log("  enabled after: \(d.action.isEnabled), tags \(d.tags), license \(d.licenseID)")
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 shot(d.panel.contentView, "bclibrary-\(name).png")
                 let ok = finishBioCartoonLibrary(d, path: file, catalog: catalog)

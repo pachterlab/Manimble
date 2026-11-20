@@ -105,6 +105,6 @@ done
 find "$WORK/python" -name __pycache__ -type d -prune -exec rm -rf {} +
 "$PY" -c "import manim, cairo, PIL, pptx, manim_slides, imageio_ffmpeg; print('runtime ok: manim', manim.__version__)"
 find "$WORK/python" -name __pycache__ -type d -prune -exec rm -rf {} +
-echo "$PY_VERSION+$PBS_TAG $(cat "$ROOT/engine/requirements.txt" | tr '\n' ' ')" > "$WORK/python/MANIMBLE_RUNTIME"
+echo "$PY_VERSION+$PBS_TAG $(grep -v -e "^#" -e "^$" "$ROOT/engine/requirements.txt" | tr "\n" " ")" > "$WORK/python/MANIMBLE_RUNTIME"
 tar -czf "$OUT/Manimble-python-$ARCH.tar.gz" -C "$WORK" python
 echo "built $OUT/Manimble-python-$ARCH.tar.gz ($(du -h "$OUT/Manimble-python-$ARCH.tar.gz" | cut -f1))"

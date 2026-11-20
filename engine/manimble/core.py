@@ -4073,8 +4073,8 @@ class Manimble:
             def deck(pending, failed):
                 if state["extras"] is None or not pending:
                     state["extras"] = self._present_extras()
-                return {"slides": self._present_slides([s for s in selected if s["name"] not in failed], pending),
-                        **state["extras"]}
+                # a slide whose build fails plays as it looks in the editor, without its animations
+                return {"slides": self._present_slides(selected, pending, stills=set(failed)), **state["extras"]}
 
             def progress(todo, running, just_built, failed):
                 nonlocal restart
@@ -4221,22 +4221,27 @@ class Manimble:
         finally:
             self._presenting = False
 
-    def _present_slides(self, selected: list[dict], pending: set | None = None) -> list[dict]:
+    def _present_slides(self, selected: list[dict], pending: set | None = None,
+                        stills: set | None = None) -> list[dict]:
         """The built clips of the selected scenes, in show order, for the native player. `sceneIndex` is the
         scene's place in order.txt (what chapters and link regions refer to), `number` its place in this show.
         Scenes in `pending` (still building) get one `pending` image page per build: the editor's still when it is
-        up to date, else no file."""
+        up to date, else no file. Scenes in `stills` (their build failed) get the editor's stills as ordinary pages,
+        so they play as they look in the editor, without animations."""
         deck = Path(self.deck).resolve()
         order = [s["name"] for s in self.scenes]
         out = []
         for number, s in enumerate(selected):
             scene_notes = self._notes_of(s["name"])
             first_notes = self._first_build_notes(s["name"])
-            if pending and s["name"] in pending:
+            still = bool(stills) and s["name"] in stills
+            if still or (pending and s["name"] in pending):
                 try:
-                    pages = self._slide_pages(s["name"], wait=False)
+                    pages = self._slide_pages(s["name"], wait=still)
                 except Exception:                         # noqa: BLE001
                     pages = {}
+                if still and not pages.get("pages"):
+                    continue                              # no editor still either (the slide errors): left out
                 files = pages.get("pages") or [None] * max(1, int(pages.get("builds") or 1))
                 build_notes = pages.get("buildNotes") or []
                 for k, f in enumerate(files):
@@ -4246,7 +4251,7 @@ class Manimble:
                         "revFile": None, "loop": False, "autoNext": False, "rate": 1.0, "revRate": 1.0,
                         "notes": scene_notes,
                         "buildNotes": first_notes if k == 0 else (build_notes[k] if k < len(build_notes) else ""),
-                        "pending": True,
+                        "pending": not still,
                     })
                 continue
             data = json.loads((deck / "slides" / f"{s['name']}.json").read_text())

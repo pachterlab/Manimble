@@ -36,11 +36,18 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var renderETA: (start: Date, total: Double)?
 
     var workspace: Workspace? {
-        didSet { for b in [notesBox, buildNotesBox] { b.imageBase = workspace?.work } }     // pictures in the notes
+        didSet {
+            for b in [notesBox, buildNotesBox] { b.imageBase = workspace?.work }     // pictures in the notes
+            syncStartScreen()
+        }
     }
     // Opening a deck can happen while startup is still searching for Python.
     // Keep the selection and open it as soon as launch() has started the engine.
-    private(set) var pendingDeck: String?
+    private(set) var pendingDeck: String? { didSet { syncStartScreen() } }
+    /// A deck is being opened (its working copy made): the start screen stays down, so the busy pill shows.
+    var openingDeck = false { didSet { if openingDeck != oldValue { syncStartScreen() } } }
+    /// New Deck, Open and the recent decks while no deck is open (StartScreen.swift).
+    var startScreen: StartScreen?
     private var setup: Setup?
     var state: StateInfo?
     var showUnusedSlides = false
@@ -181,6 +188,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.center()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(canvas)
+        syncStartScreen()
     }
 
     func buildUI() -> NSView {
@@ -743,9 +751,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if !window.isVisible { window.makeKeyAndOrderFront(nil) }
         closeAnimationPreview()
         window.makeFirstResponder(canvas)
+        openingDeck = true
         Task { @MainActor in
             busy += 1
-            defer { busy -= 1 }
+            defer { busy -= 1; openingDeck = false }
             do {
                 let ws = try Workspace(deck: deck)
                 workspace?.discard()
@@ -1057,8 +1066,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 } else if ev["phase"] as? String == "ready" {
                     startAnimated(d)
                 }
-            case "failed":                                 // one slide failed while the show runs: it is left out
-                toast("Skipping a slide that fails to build: \(ev["scene"] as? String ?? "")", error: true)
+            case "failed":                                 // one slide failed to build: it plays as its stills
+                toast("Playing \(ev["scene"] as? String ?? "a slide") without animations: its build failed", error: true)
             case "built":
                 busyPill.hide()
             default:
