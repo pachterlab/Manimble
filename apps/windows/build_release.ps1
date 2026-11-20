@@ -81,9 +81,10 @@ if (-not $iscc) {
 if (-not $iscc) { throw "The installer needs Inno Setup 6 (winget install JRSoftware.InnoSetup)" }
 $isccArgs = @("/DStage=$Stage", "/DAppVersion=$Version", "/O$Out", '/Q')
 if ($SignTool) {
-    # Inno Setup signs the uninstaller it writes into the installer with this command ($f is the file)
-    $pw = if ($env:MANIMBLE_SIGN_PASSWORD) { " /p `"$($env:MANIMBLE_SIGN_PASSWORD)`"" } else { '' }
-    $isccArgs += @('/DSign', "/Ssigntool=`"$SignTool`" sign /fd sha256 /f `"$Pfx`"$pw /tr $Timestamp /td sha256 /d Manimble `$f")
+    # Inno Setup signs the uninstaller it writes into the installer with this command ($f is the file, $q a quote:
+    # Windows PowerShell mangles literal quotes inside an argument it passes on)
+    $pw = if ($env:MANIMBLE_SIGN_PASSWORD) { ' /p $q' + $env:MANIMBLE_SIGN_PASSWORD + '$q' } else { '' }
+    $isccArgs += @('/DSign', ('/Ssigntool=$q' + $SignTool + '$q sign /fd sha256 /f $q' + $Pfx + '$q' + $pw + " /tr $Timestamp /td sha256 /d Manimble " + '$f'))
 }
 & $iscc @isccArgs (Join-Path $PSScriptRoot 'installer\Manimble.iss')
 if ($LASTEXITCODE -ne 0) { throw "Building the installer failed" }
