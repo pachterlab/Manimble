@@ -101,3 +101,61 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* Examples page: the gallery of examples/gallery/examples.json, and its placeholder. */
+.md-typeset .mb-examples {
+  margin: 1.4rem 0 2rem;
+}
+.md-typeset .mb-examples-empty {
+  padding: 2rem 1rem;
+  border: 1px dashed var(--md-default-fg-color--lighter);
+  border-radius: 0.4rem;
+  text-align: center;
+  color: var(--md-default-fg-color--light);
+}
+.md-typeset .mb-examples-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+.md-typeset .mb-example {
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.4rem;
+}
+.md-typeset .mb-example h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+.md-typeset .mb-example p {
+  margin: 0 0 0.5rem;
+}
+.md-typeset .mb-example-byline {
+  font-size: 0.7rem;
+  color: var(--md-default-fg-color--light);
+}
+.md-typeset .mb-example-description {
+  font-size: 0.75rem;
+}
+.md-typeset .mb-example-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.md-typeset .mb-example-keywords span {
+  padding: 0.05rem 0.45rem;
+  border-radius: 1rem;
+  font-size: 0.65rem;
+  background: var(--md-accent-fg-color--transparent);
+}
+.md-typeset .mb-example .md-button {
+  color: var(--md-typeset-a-color);
+  border-color: currentColor;
+  margin-top: auto;
+  align-self: flex-start;
+  font-size: 0.7rem;
+  padding: 0.35em 1em;
+}
