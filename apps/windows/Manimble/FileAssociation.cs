@@ -6,7 +6,7 @@ namespace Manimble;
 
 /// Opens .manimble packages with this Manimble on a double-click in Explorer, with their own icon (the Mac app's
 /// CFBundleDocumentTypes). Registered for the current user only (HKCU\Software\Classes), so no administrator
-/// rights are needed; a build inside a source checkout leaves the association alone.
+/// rights are needed; a build inside a source checkout, or the Store package, leaves the association alone.
 public static class FileAssociation
 {
     const string Extension = ".manimble";
@@ -18,6 +18,9 @@ public static class FileAssociation
     public static void RegisterIfNeeded()
     {
         if (Paths.CheckoutRoot != null) return;
+        // the Store package declares the association in its manifest (msix\AppxManifest.xml), and its exe path
+        // changes with every update, so it must not be written here
+        if (Paths.IsPackaged) return;
         try
         {
             var exe = Environment.ProcessPath;

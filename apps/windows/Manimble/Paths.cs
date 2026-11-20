@@ -31,8 +31,60 @@ public static class Paths
             // running from a source checkout: prefer the live engine so engine edits need no rebuild
             var checkout = CheckoutRoot;
             if (checkout != null) return Path.Combine(checkout, "engine");
+            if (IsPackaged) return packagedEngine.Value;
             return here;
         }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int GetCurrentPackageFullName(ref uint length, System.Text.StringBuilder? name);
+
+    /// Installed from the Microsoft Store (an MSIX package) rather than the zip or the installer.
+    public static bool IsPackaged { get; } = DetectPackage();
+
+    static bool DetectPackage()
+    {
+        try { uint n = 0; return GetCurrentPackageFullName(ref n, null) != 15700 /* APPMODEL_ERROR_NO_PACKAGE */; }
+        catch { return false; }
+    }
+
+    /// A package's install folder is read-only, so Python could not keep the engine's compiled __pycache__ there and
+    /// would recompile it in every process. The packaged app runs a copy in %LOCALAPPDATA%\Manimble\engine\{version}
+    /// instead, made on first start of each version (older copies are removed).
+    static readonly Lazy<string> packagedEngine = new(() =>
+    {
+        var bundled = Path.Combine(AppContext.BaseDirectory, "engine");
+        try
+        {
+            var version = typeof(Paths).Assembly.GetName().Version?.ToString() ?? "0";
+            var root = Path.Combine(Base, "engine");
+            var dest = Path.Combine(root, version);
+            if (!File.Exists(Path.Combine(dest, "manimble", "rpc.py")))
+            {
+                var tmp = dest + ".tmp";
+                if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
+                CopyTree(bundled, tmp);
+                if (Directory.Exists(dest)) Directory.Delete(dest, true);
+                Directory.Move(tmp, dest);
+            }
+            foreach (var old in Directory.GetDirectories(root))
+                if (!string.Equals(old, dest, StringComparison.OrdinalIgnoreCase))
+                    try { Directory.Delete(old, true); } catch { }
+            return dest;
+        }
+        catch (Exception e)
+        {
+            Log.Note("engine copy: " + e.Message);
+            return bundled;
+        }
+    });
+
+    static void CopyTree(string from, string to)
+    {
+        Directory.CreateDirectory(to);
+        foreach (var f in Directory.GetFiles(from)) File.Copy(f, Path.Combine(to, Path.GetFileName(f)));
+        foreach (var d in Directory.GetDirectories(from))
+            if (Path.GetFileName(d) != "__pycache__") CopyTree(d, Path.Combine(to, Path.GetFileName(d)));
     }
 
     /// The repository checkout this build lives in (apps\windows\...\bin\...), if any.

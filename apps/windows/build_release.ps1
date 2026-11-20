@@ -5,16 +5,25 @@
   Manimble-Windows-Setup.exe (Inno Setup 6, installer\Manimble.iss). The first-launch setup window installs Python
   with Manim (and LaTeX if wanted) into %LOCALAPPDATA%\Manimble on the user's PC. CI runs this (.github/workflows).
 
+  With -Msix it also builds Manimble-Windows.msix, the package to upload to the Microsoft Store (Partner Center),
+  which signs it for free: no certificate is needed for it. Its identity comes from Partner Center (Product
+  management > Product identity): MANIMBLE_STORE_NAME (Package/Identity/Name), MANIMBLE_STORE_PUBLISHER
+  (Package/Identity/Publisher, "CN=...") and MANIMBLE_STORE_PUBLISHER_NAME (Package/Properties/PublisherDisplayName).
+  Without them it gets a local placeholder identity, fine for testing but refused by the Store. The package is left
+  unsigned; to try it on a PC with Developer Mode on, register its unpacked folder:
+      Add-AppxPackage -Register out\msix\AppxManifest.xml
+
   Code signing turns on when MANIMBLE_SIGN_PFX names a .pfx code-signing certificate (MANIMBLE_SIGN_PASSWORD is its
   password): Manimble.exe, the installer and its uninstaller are signed with signtool (Windows SDK) and timestamped.
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer
+  powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer -Msix
 #>
 param(
     [string]$Out = 'out',        # where Manimble-Windows.zip (and Manimble-Windows-Setup.exe) go
     [string]$Dotnet = 'dotnet',  # a dotnet with the .NET 10 SDK
-    [switch]$Installer           # also build the installer (needs Inno Setup 6)
+    [switch]$Installer,          # also build the installer (needs Inno Setup 6)
+    [switch]$Msix                # also build the Microsoft Store package (needs the Windows SDK)
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -69,6 +78,63 @@ $zip = Join-Path $Out 'Manimble-Windows.zip'
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path $Stage -DestinationPath $zip
 "{0} ({1:N0} MB)" -f $zip, ((Get-Item $zip).Length / 1MB)
+
+# ---------------------------------------------------------------- the Microsoft Store package
+
+function Find-SdkTool([string]$Name) {
+    $t = (Get-Command $Name -ErrorAction SilentlyContinue).Source
+    if (-not $t) {
+        $t = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\$Name" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $t) { throw "The Store package needs $Name (the Windows SDK)" }
+    return $t
+}
+
+if ($Msix) {
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION ($Version) must be major.minor.patch for the Store package" }
+    $identity = @{
+        Name                 = if ($env:MANIMBLE_STORE_NAME) { $env:MANIMBLE_STORE_NAME } else { 'Manimble.Local' }
+        Publisher            = if ($env:MANIMBLE_STORE_PUBLISHER) { $env:MANIMBLE_STORE_PUBLISHER } else { 'CN=Manimble Local' }
+        PublisherDisplayName = if ($env:MANIMBLE_STORE_PUBLISHER_NAME) { $env:MANIMBLE_STORE_PUBLISHER_NAME } else { 'Pachter Lab' }
+        Version              = "$Version.0"   # the Store keeps the fourth part for itself: it must be 0
+    }
+    if (-not $env:MANIMBLE_STORE_NAME -or -not $env:MANIMBLE_STORE_PUBLISHER) {
+        Write-Warning "MANIMBLE_STORE_NAME / MANIMBLE_STORE_PUBLISHER are not set: the package gets a local identity the Store will refuse"
+    }
+    $makeappx = Find-SdkTool 'makeappx.exe'
+    $makepri = Find-SdkTool 'makepri.exe'
+    $MsixSrc = Join-Path $PSScriptRoot 'msix'
+
+    # the unpacked package: the staged app, the tile images, the manifest and resources.pri
+    $layout = Join-Path $Out 'msix'
+    if (Test-Path $layout) { Remove-Item -Recurse -Force $layout }
+    Copy-Item $Stage $layout -Recurse
+    New-Item -ItemType Directory -Force (Join-Path $layout 'Assets') | Out-Null
+    Copy-Item (Join-Path $MsixSrc 'Assets\*.png') (Join-Path $layout 'Assets') -Force
+    $manifest = Get-Content (Join-Path $MsixSrc 'AppxManifest.xml') -Raw
+    foreach ($k in $identity.Keys) { $manifest = $manifest.Replace("`$$k`$", [Security.SecurityElement]::Escape($identity[$k])) }
+    if ($manifest -match '\$[A-Za-z]+\$') { throw "AppxManifest.xml still has a token: $($Matches[0])" }
+    [IO.File]::WriteAllText((Join-Path $layout 'AppxManifest.xml'), $manifest, (New-Object Text.UTF8Encoding $false))
+
+    # resources.pri maps Assets\StoreLogo.png and the rest to their scale-/targetsize- variants. It indexes a
+    # folder holding only the images, so the engine's files don't become resources.
+    $pri = Join-Path $Out 'msix-pri'
+    if (Test-Path $pri) { Remove-Item -Recurse -Force $pri }
+    New-Item -ItemType Directory -Force (Join-Path $pri 'Assets') | Out-Null
+    Copy-Item (Join-Path $MsixSrc 'Assets\*.png') (Join-Path $pri 'Assets')
+    $cfg = Join-Path $Out 'priconfig.xml'
+    & $makepri createconfig /cf $cfg /dq en-US /pv 10.0.0 /o | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed" }
+    & $makepri new /pr $pri /cf $cfg /mn (Join-Path $layout 'AppxManifest.xml') /of (Join-Path $layout 'resources.pri') /o
+    if ($LASTEXITCODE -ne 0) { throw "makepri new failed" }
+    Remove-Item -Recurse -Force $pri, $cfg
+
+    $package = Join-Path $Out 'Manimble-Windows.msix'
+    & $makeappx pack /d $layout /p $package /o
+    if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed" }
+    "{0} ({1:N0} MB, {2} {3})" -f $package, ((Get-Item $package).Length / 1MB), $identity.Name, $identity.Version
+}
 
 # ---------------------------------------------------------------- the installer
 

@@ -6,8 +6,8 @@
 # The assets keep the same names in every release, so these links always point at the newest ones:
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.dmg
 #   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-macOS.zip
-#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip
-#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows-Setup.exe
+#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip        (only when signed, below)
+#   https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows-Setup.exe  (only when signed, below)
 # Each release also carries Manimble-python-arm64.tar.gz and Manimble-python-x86_64.tar.gz, the Python runtimes
 # (manim included) that the app's first-launch setup window downloads (apps/macos/install_dependencies.sh).
 #
@@ -18,6 +18,15 @@
 # Without them the app is ad-hoc signed, same as a local build, and first launch shows a
 # Gatekeeper warning (right-click -> Open gets past it; the README explains this). That is only allowed for a dry
 # run: a tag refuses to publish a release that isn't signed and notarized.
+#
+# Windows ships through the Microsoft Store, which signs the package itself, for free. Every run builds
+# Manimble-Windows.msix (the workflow artifact "Manimble-Windows-Store"); upload it to Partner Center for each release
+# (apps/windows/STORE.md). Its identity comes from these repository *variables* (Settings -> Secrets and variables ->
+# Actions -> Variables; they are public in the package anyway), copied from Partner Center's Product identity page:
+# MANIMBLE_STORE_NAME, MANIMBLE_STORE_PUBLISHER, MANIMBLE_STORE_PUBLISHER_NAME. A tag refuses to build without them.
+# The zip and the installer (Manimble-Windows.zip, Manimble-Windows-Setup.exe) are attached to the GitHub Release only
+# when they are signed (secrets WINDOWS_CERTIFICATE, a base64 .pfx, and WINDOWS_CERTIFICATE_PASSWORD), so a tag never
+# publishes unsigned Windows binaries; a dry run still builds them as a workflow artifact.
 #
 # The app carries the SHA-256s of the Python runtimes it was released with (runtime-sha256.txt, which
 # install_dependencies.sh checks the download against), and each release lists every asset's SHA-256 in SHA256SUMS.
@@ -49,14 +58,21 @@ jobs:
           if-no-files-found: error
 
   # Windows: a self-contained app (no .NET install needed); its first-launch setup installs Python with Manim
-  # (apps/windows/install_dependencies.ps1).
+  # (apps/windows/install_dependencies.ps1). The Store package, and the zip and installer (see the top of this file).
   windows:
     runs-on: windows-latest
-    # Code signing turns on when these secrets exist: WINDOWS_CERTIFICATE (a base64 .pfx code-signing certificate) and
-    # WINDOWS_CERTIFICATE_PASSWORD. Without them the app and its installer are unsigned and SmartScreen warns on first run.
     env:
       HAS_WIN_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      MANIMBLE_STORE_NAME: ${{ vars.MANIMBLE_STORE_NAME }}
+      MANIMBLE_STORE_PUBLISHER: ${{ vars.MANIMBLE_STORE_PUBLISHER }}
+      MANIMBLE_STORE_PUBLISHER_NAME: ${{ vars.MANIMBLE_STORE_PUBLISHER_NAME }}
     steps:
+      - name: Check a tagged release has the Store identity
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          [ -n "$MANIMBLE_STORE_NAME" ] && [ -n "$MANIMBLE_STORE_PUBLISHER" ] && [ -n "$MANIMBLE_STORE_PUBLISHER_NAME" ] \
+            || { echo "::error::a release needs the MANIMBLE_STORE_* repository variables (see the top of release.yml)"; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
@@ -72,16 +88,22 @@ jobs:
           $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           "MANIMBLE_SIGN_PFX=$pfx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-      - name: Build the app, its zip and its installer
+      - name: Build the app, its zip, its installer and its Store package
         env:
           MANIMBLE_SIGN_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer
+        run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer -Msix
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows
           path: |
             out/Manimble-Windows.zip
             out/Manimble-Windows-Setup.exe
+          if-no-files-found: error
+      # the file to upload to Partner Center
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Manimble-Windows-Store
+          path: out/Manimble-Windows.msix
           if-no-files-found: error
 
   release:
@@ -93,6 +115,7 @@ jobs:
     env:
       HAS_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
       HAS_NOTARY: ${{ secrets.APPLE_ID != '' }}
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -187,8 +210,14 @@ jobs:
 
       - name: List every asset's SHA-256
         run: |
-          cd out && shasum -a 256 Manimble-macOS.dmg Manimble-macOS.zip Manimble-python-*.tar.gz \
-            Manimble-Windows.zip Manimble-Windows-Setup.exe | tee SHA256SUMS
+          cd out
+          assets=(Manimble-macOS.dmg Manimble-macOS.zip Manimble-python-*.tar.gz)
+          # a tagged release carries the Windows zip and installer only when they are signed (the top of this file)
+          if [ "$HAS_WIN_CERT" = true ] || [ "${GITHUB_REF#refs/tags/}" = "$GITHUB_REF" ]; then
+            assets+=(Manimble-Windows.zip Manimble-Windows-Setup.exe)
+          fi
+          shasum -a 256 "${assets[@]}" | tee SHA256SUMS
+          printf 'out/%s\n' "${assets[@]}" SHA256SUMS > ../release-assets.txt
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -207,6 +236,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/Manimble-macOS.dmg out/Manimble-macOS.zip out/Manimble-python-*.tar.gz \
-            out/Manimble-Windows.zip out/Manimble-Windows-Setup.exe out/SHA256SUMS --repo "$GITHUB_REPOSITORY" \
-            --title "Manimble ${GITHUB_REF_NAME#v}" --generate-notes
+          xargs gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "Manimble ${GITHUB_REF_NAME#v}" --generate-notes < release-assets.txt

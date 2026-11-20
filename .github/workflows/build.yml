@@ -25,11 +25,16 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: "10.0.x"
-      - run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer
+      - run: powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer -Msix
+        env:
+          MANIMBLE_STORE_NAME: ${{ vars.MANIMBLE_STORE_NAME }}
+          MANIMBLE_STORE_PUBLISHER: ${{ vars.MANIMBLE_STORE_PUBLISHER }}
+          MANIMBLE_STORE_PUBLISHER_NAME: ${{ vars.MANIMBLE_STORE_PUBLISHER_NAME }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Manimble-Windows
           path: |
             out/Manimble-Windows.zip
             out/Manimble-Windows-Setup.exe
+            out/Manimble-Windows.msix
           if-no-files-found: error
