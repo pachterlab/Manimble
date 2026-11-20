@@ -8,9 +8,20 @@ what is done and what comes next.
 
 ## Install a release
 
-Download `Manimble-Windows.zip` from the [latest release](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip),
-unzip it anywhere and run `Manimble.exe`. It needs no .NET install. On first launch a setup window offers to install
-Python with Manim (and MiKTeX for formulas) for your user account; File > Install Dependencies… brings it back.
+Download [Manimble-Windows-Setup.exe](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows-Setup.exe)
+and run it. It installs Manimble for your user account only (no administrator rights) in
+`%LOCALAPPDATA%\Programs\Manimble`, with a Start menu shortcut, and makes `.manimble` packages open in Manimble. It
+needs no .NET install. On first launch a setup window offers to install Python with Manim (and MiKTeX for formulas)
+for your user account; File > Install Dependencies… brings it back. Running a newer installer upgrades in place;
+Settings > Apps uninstalls it (your Python environment, settings and decks stay).
+
+Until releases are code-signed, Windows SmartScreen may say it "protected your PC" on first run: click
+**More info**, then **Run anyway**.
+
+Prefer no installer? [Manimble-Windows.zip](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip)
+holds the same app: unzip it anywhere and run `Manimble.exe`.
+
+Each release lists every file's SHA-256 in `SHA256SUMS`; `Get-FileHash Manimble-Windows-Setup.exe` shows yours.
 
 ## Install from a checkout
 
@@ -25,6 +36,17 @@ The script:
 - builds the app into `%LOCALAPPDATA%\Programs\Manimble` and adds a Start menu shortcut.
 
 No administrator rights are needed. Building needs the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`).
+
+To build the release files yourself (`out\Manimble-Windows.zip`, and with `-Installer` the installer, which needs
+Inno Setup 6: `winget install JRSoftware.InnoSetup`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer
+```
+
+With `MANIMBLE_SIGN_PFX` (a `.pfx` code-signing certificate) and `MANIMBLE_SIGN_PASSWORD` set, the app, the installer
+and its uninstaller are signed with signtool and timestamped. The release workflow does this when the repository has
+the `WINDOWS_CERTIFICATE` (the `.pfx`, base64) and `WINDOWS_CERTIFICATE_PASSWORD` secrets.
 
 ## Develop
 

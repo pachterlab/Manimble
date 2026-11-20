@@ -75,4 +75,8 @@ an MSIX or zip build, and a CI job in `.github/workflows`.
   File > Install Dependencies…) are done. `build_release.ps1` makes a self-contained `Manimble-Windows.zip` (tested: it
   runs unzipped on its bundled engine); the build workflow builds it on every push and the release workflow attaches it
   to each GitHub Release. The app and `.manimble` packages have their icons, and an installed or unzipped copy registers itself (per user)
-  to open `.manimble` files from Explorer. Still to do: an MSIX or installer, code signing.
+  to open `.manimble` files from Explorer. The installer is in: `Manimble-Windows-Setup.exe` (Inno Setup, `installer/Manimble.iss`;
+  per user, no administrator rights; Start menu, `.manimble` association, upgrade in place, a clean uninstall that keeps
+  the Python environment and settings; tested install, upgrade over a script install, uninstall, reinstall), built by
+  `build_release.ps1 -Installer` in CI and attached to releases. Code signing is wired in (signtool, from the
+  `WINDOWS_CERTIFICATE` secrets) but needs a certificate: until then releases are unsigned and SmartScreen warns.
