@@ -389,6 +389,14 @@ public partial class MainWindow
     void DarkModeItem_Click(object sender, RoutedEventArgs e) => SetColorView(Images.View == ColorView.Dark ? ColorView.Normal : ColorView.Dark);
     void InvertColorsItem_Click(object sender, RoutedEventArgs e) => SetColorView(Images.View == ColorView.Invert ? ColorView.Normal : ColorView.Invert);
 
+    /// View > Recolor Images Too: inserted pictures follow dark mode / inverted colours too (off by default).
+    void RecolorImagesItem_Click(object sender, RoutedEventArgs e)
+    {
+        Images.RecolorImages = RecolorImagesItem.IsChecked;
+        Settings.Current.RecolorImages = Images.RecolorImages; Settings.Current.Save();
+        if (Images.View != ColorView.Normal) SetColorView(Images.View, save: false);
+    }
+
     /// Show the slides in dark mode, with inverted colours, or as they are: every picture is mapped as it is loaded,
     /// so the canvas, the navigator and the slideshow redraw from it. Nothing is written to the deck.
     void SetColorView(ColorView view, bool save = true)
@@ -396,13 +404,17 @@ public partial class MainWindow
         Images.View = view;
         DarkModeButton.IsChecked = DarkModeItem.IsChecked = view == ColorView.Dark;
         InvertColorsItem.IsChecked = view == ColorView.Invert;
+        RecolorImagesItem.IsChecked = Images.RecolorImages;
         if (save) { Settings.Current.ColorView = view.ToString(); Settings.Current.Save(); }
         foreach (var s in slides) s.RefreshAll();
         if (scene?.Stops != null) ShowStop(stopIndex);
     }
 
-    void RestoreColorView() =>
+    void RestoreColorView()
+    {
+        Images.RecolorImages = Settings.Current.RecolorImages;
         SetColorView(Enum.TryParse<ColorView>(Settings.Current.ColorView, out var v) ? v : ColorView.Normal, save: false);
+    }
 
     // ================================================================ headless check: MANIMBLE_TEST_FORMAT=<dir>
 

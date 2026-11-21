@@ -1863,7 +1863,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let cell = (tv.makeView(withIdentifier: SlideCell.id, owner: nil) as? SlideCell) ?? SlideCell()
         var img: NSImage?
         if let t = s.thumb {
-            let key = (DarkMode.mode.rawValue + ":" + t) as NSString
+            let key = (DarkMode.mode.rawValue + (DarkMode.images ? "+i:" : ":") + t) as NSString
             img = thumbCache.object(forKey: key)
             if img == nil, let i = DarkMode.image(path: t) { thumbCache.setObject(i, forKey: key); img = i }
         }
@@ -2007,7 +2007,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// Images for the builds listed under a slide (nil while a thumbnail is still rendering).
     func buildImages(_ paths: [String]) -> [NSImage?] {
         paths.map { png in
-            let key = (DarkMode.mode.rawValue + ":" + png) as NSString
+            let key = (DarkMode.mode.rawValue + (DarkMode.images ? "+i:" : ":") + png) as NSString
             if let i = thumbCache.object(forKey: key) { return i }
             guard let i = DarkMode.image(path: png) else { return nil }
             thumbCache.setObject(i, forKey: key); return i

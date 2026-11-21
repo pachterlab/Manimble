@@ -880,6 +880,7 @@ class Manimble:
                 item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st, "hidden": bool(s.get("hidden"))}
                 if r and "data" in r:
                     item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
+                    self._write_pics(s["name"], r)
                     item["stops"] = len(r["data"]["stops"])
                 if r and "error" in r and st == "error":
                     item["error"] = r["error"]
@@ -3064,6 +3065,7 @@ class Manimble:
             return {"scene": name, "pages": [], "pending": True, "builds": max(1, builds)}
         base = str(self.cache_dir / name / rec["dir"]) + "/"
         data = rec["data"]
+        self._write_pics(name, rec)
         links: list = [[] for _ in data["stops"]]
         if any(b"manimble_link" in self.project.src(rel).data for rel in self.project.py_files()):
             data = self._rebased(data)
@@ -3079,6 +3081,39 @@ class Manimble:
                         links[k].append([v[1] / pw, v[3] / pw, v[2] / ph, v[4] / ph, urls[oid]])
         return {"scene": name, "pages": [base + st["png"] for st in data["stops"]], "notes": self._notes_of(name),
                 "buildNotes": self._build_notes_of(name, data["stops"]), "links": links}
+
+    def _write_pics(self, name: str, rec: dict):
+        """pics.json beside a render's frames: where the inserted pictures sit on each build's frame (and on the
+        thumbnail, which is the last build), as [x0, y0, x1, y1] fractions of the slide, y from the top. The app's dark mode and inverted colours put the original pixels back there, so a picture keeps its
+        own colours in the navigator, slideshow and Presenter View as it does on the canvas."""
+        d = self.cache_dir / name / rec["dir"]
+        done = getattr(self, "_pics_done", None)
+        if done is None:
+            done = self._pics_done = set()
+        if str(d) in done:
+            return
+        try:
+            data = rec["data"]
+            pw, ph = data["size"]
+            objs = data.get("objects") or {}
+            pages: dict = {}
+            for st in data["stops"]:
+                if not st.get("png"):
+                    continue
+                pages[st["png"]] = [[round(v[1] / pw, 5), round(v[2] / ph, 5), round(v[3] / pw, 5), round(v[4] / ph, 5)]
+                                    for v in st.get("visible", [])
+                                    if (objs.get(str(int(v[0]))) or {}).get("kind") == "image"]
+            last = next((st["png"] for st in reversed(data["stops"]) if st.get("png")), None)
+            if last:
+                pages["thumb.jpg"] = pages[last]
+            f = d / "pics.json"
+            if d.is_dir():
+                body = json.dumps({"pages": pages})
+                if not f.exists() or f.read_text() != body:
+                    f.write_text(body)
+            done.add(str(d))
+        except (OSError, KeyError, TypeError, ValueError, IndexError):
+            pass
 
     @staticmethod
     def _stop_links(sc: dict, stop: dict, with_oid: bool = False) -> list:

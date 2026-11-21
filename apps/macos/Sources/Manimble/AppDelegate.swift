@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a deck given at launch wins over the last one; the engine opens it once it is running
         for u in launchURLs + commandLineDecks() { c.openProject(at: u) }
         c.start()
+        Updates.checkInBackground()
     }
 
     /// Open a deck in `c`'s window if it is empty; else bring forward the window already showing that deck, or
@@ -137,6 +138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @MainActor @objc func checkForUpdates(_ sender: Any?) { Updates.check(userInitiated: true) }
+
     private func item(_ title: String, _ sel: Selector, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
         i.keyEquivalentModifierMask = mods
@@ -153,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         add("Manimble", [
             item("About Manimble", #selector(showAbout)),
+            item("Check for Updates…", #selector(checkForUpdates)),
             .separator(),
             item("Install Dependencies…", #selector(MainController.installDependencies), ""),
             item("Choose Python…", #selector(MainController.choosePython), ""),

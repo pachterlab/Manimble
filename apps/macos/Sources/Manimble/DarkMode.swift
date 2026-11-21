@@ -86,7 +86,43 @@ enum DarkMode {
     static func cgImage(path: String) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
-        return isOn ? (apply(img) ?? img) : img
+        guard isOn, let mapped = apply(img) else { return img }
+        return images ? mapped : keepingPictures(mapped, original: img, path: path)
+    }
+
+    /// Where the inserted pictures sit on a rendered frame, from the engine's pics.json beside it ([x0, y0, x1, y1]
+    /// fractions, y from the top). Render folders are never rewritten, so a found entry is kept.
+    private static var picsByDir: [String: [String: [[Double]]]] = [:]
+    private static let picsLock = NSLock()
+    static func pictureBoxes(path: String) -> [[Double]] {
+        let url = URL(fileURLWithPath: path), dir = url.deletingLastPathComponent().path
+        picsLock.lock(); defer { picsLock.unlock() }
+        if picsByDir[dir] == nil {
+            struct Pics: Decodable { var pages: [String: [[Double]]] }
+            guard let d = try? Data(contentsOf: URL(fileURLWithPath: dir + "/pics.json")),
+                  let p = try? JSONDecoder().decode(Pics.self, from: d) else { return [] }
+            picsByDir[dir] = p.pages
+        }
+        return picsByDir[dir]?[url.lastPathComponent] ?? []
+    }
+
+    /// A mapped frame with the pictures' own pixels put back, as the canvas draws it (View ▸ Recolor Images Too off).
+    static func keepingPictures(_ mapped: CGImage, original: CGImage, path: String) -> CGImage {
+        let boxes = pictureBoxes(path: path).filter { $0.count == 4 }
+        guard !boxes.isEmpty else { return mapped }
+        let w = mapped.width, h = mapped.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return mapped }
+        let all = CGRect(x: 0, y: 0, width: w, height: h)
+        ctx.draw(mapped, in: all)
+        ctx.addRects(boxes.map { b in
+            CGRect(x: b[0] * Double(w), y: (1 - b[3]) * Double(h), width: (b[2] - b[0]) * Double(w), height: (b[3] - b[1]) * Double(h))
+        })
+        ctx.clip()
+        ctx.clear(all)
+        ctx.draw(original, in: all)
+        return ctx.makeImage() ?? mapped
     }
 
     static func image(path: String) -> NSImage? {
@@ -106,6 +142,8 @@ extension MainController {
         DarkMode.images.toggle()
         UserDefaults.standard.set(DarkMode.images, forKey: "darkModeImages")
         canvas.darkImages = DarkMode.images
+        if DarkMode.isOn { suppressTable = true; table.reloadData(); suppressTable = false
+            if let n = sceneName, let i = state?.scenes.firstIndex(where: { $0.name == n }) { selectRow(i) } }
     }
 
     func setColorView(_ m: ColorView) {

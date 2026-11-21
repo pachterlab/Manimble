@@ -495,7 +495,14 @@ public sealed partial class SlideCanvas : Border
     }
 
     bool Compositing => mode is Mode.Move or Mode.Resize or Mode.Endpoint || Overrides.Count > 0 || LineOverrides.Count > 0
-                        || Scene?.Optimistic == true;
+                        || Scene?.Optimistic == true || KeepsPictures(Stop);
+
+    /// Whether a picture on this build keeps its own colours in dark mode / inverted colours: the frame is then drawn
+    /// layer by layer (as the Mac does), so the zoom tile of the whole frame, mapped as one, isn't used.
+    bool KeepsPictures(StopInfo? st) => st != null && Images.View != ColorView.Normal && !Images.RecolorImages
+                                        && st.Sprites.Any(sp => IsPicture(sp.Oid));
+
+    bool IsPicture(int oid) => Scene?.Obj(oid)?.Kind == "image";
 
     public void Redraw()
     {
@@ -518,7 +525,7 @@ public sealed partial class SlideCanvas : Border
                     AddLinePreview(sp.Oid);
                     continue;
                 }
-                var img = new Image { Source = Images.Load(sp.File), Width = sp.W, Height = sp.H, Stretch = Stretch.Fill };
+                var img = new Image { Source = Images.Load(sp.File, map: Images.RecolorImages || !IsPicture(sp.Oid)), Width = sp.W, Height = sp.H, Stretch = Stretch.Fill };
                 var pv = PreviewOf(sp.Oid);
                 if (Scene?.Optimistic == true && st.Xforms != null && st.Xforms.TryGetValue(sp.Oid.ToString(), out var x) && x.Length == 6)
                 {

@@ -153,6 +153,8 @@ public sealed class Settings
     public Dictionary<string, List<double[]>> Guides { get; set; } = new();
     /// How slides are shown (View > Dark Mode / Invert Colors, the toolbar's Dark Mode): Normal, Dark or Invert.
     public string? ColorView { get; set; }
+    /// View > Recolor Images Too: inserted pictures are mapped in dark mode and inverted colours as well.
+    public bool RecolorImages { get; set; }
 
     static Settings? current;
     public static Settings Current => current ??= Load();

@@ -178,6 +178,8 @@
                   ToolTip="Show slides with whites and blacks swapped (nothing is written to the deck)"/>
         <MenuItem Header="_Invert Colors" IsCheckable="True" x:Name="InvertColorsItem" Click="InvertColorsItem_Click"
                   ToolTip="Show every colour as its complement (nothing is written to the deck)"/>
+        <MenuItem Header="_Recolor Images Too" IsCheckable="True" x:Name="RecolorImagesItem" Click="RecolorImagesItem_Click"
+                  ToolTip="Map inserted pictures in dark mode and inverted colours as well (off: they keep their own colours)"/>
         <Separator/>
         <MenuItem Header="Zoom _In" InputGestureText="Ctrl+=" Click="ZoomIn_Click"/>
         <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Click="ZoomOut_Click"/>

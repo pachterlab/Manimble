@@ -44,7 +44,7 @@ public sealed record HiresWant(string Png, double Scale, double X0, double Y0, d
 public sealed partial class SlideCanvas
 {
     sealed record HiresTex(BitmapSource Img, Rect Box);
-    sealed record HiresSet(string Png, ColorView View, double Scale, Rect Region, HiresTex? Full, HiresTex? Bg, Dictionary<int, HiresTex> Sprites);
+    sealed record HiresSet(string Png, ColorView View, bool Recolor, double Scale, Rect Region, HiresTex? Full, HiresTex? Bg, Dictionary<int, HiresTex> Sprites);
 
     /// Below this many device pixels per frame pixel the render's own bitmaps are sharp enough.
     const double HiresThreshold = 1.1;
@@ -58,7 +58,7 @@ public sealed partial class SlideCanvas
     DispatcherTimer? hiresTimer;
 
     /// Tiles usable for the stop on screen right now (null when they belong to another render, build or view).
-    HiresSet? LiveHires => hires is { } h && Stop is { } s && h.Png == s.Png && h.View == Images.View && Scene?.Optimistic != true ? h : null;
+    HiresSet? LiveHires => hires is { } h && Stop is { } s && h.Png == s.Png && h.View == Images.View && h.Recolor == Images.RecolorImages && Scene?.Optimistic != true ? h : null;
 
     double DeviceScale => Scale * VisualTreeHelper.GetDpi(this).DpiScaleX;
 
@@ -82,7 +82,7 @@ public sealed partial class SlideCanvas
     /// Whether the tiles in hand already show `w`'s region at least as sharply (and not wastefully finer).
     static bool Covers(HiresSet h, HiresWant w)
     {
-        if (h.Png != w.Png || h.View != Images.View || h.Scale + 0.01 < w.Scale || h.Scale > w.Scale * 2.5) return false;
+        if (h.Png != w.Png || h.View != Images.View || h.Recolor != Images.RecolorImages || h.Scale + 0.01 < w.Scale || h.Scale > w.Scale * 2.5) return false;
         // the margin is slack: the visible part (the region less its margin) has to be inside
         double mx = (w.X1 - w.X0) * 0.15 / 1.3, my = (w.Y1 - w.Y0) * 0.15 / 1.3;
         return h.Region.Left <= w.X0 + mx + 1 && h.Region.Top <= w.Y0 + my + 1
@@ -138,10 +138,11 @@ public sealed partial class SlideCanvas
         }
         var view = Images.View;
         HiresTex? Load(HiresTile? t) =>
-            t != null && Images.LoadUncached(t.File) is { } img ? new HiresTex(img, new Rect(t.X, t.Y, t.W, t.H)) : null;
+            t != null && Images.LoadUncached(t.File, map: Images.RecolorImages || t.Oid is not int o || Scene?.Obj(o)?.Kind != "image") is { } img
+                ? new HiresTex(img, new Rect(t.X, t.Y, t.W, t.H)) : null;
         var sprites = new Dictionary<int, HiresTex>();
         foreach (var t in r.Sprites ?? new()) if (t.Oid is int oid && Load(t) is { } x) sprites[oid] = x;
-        hires = new HiresSet(w.Png, view, scale, new Rect(new Point(w.X0, w.Y0), new Point(w.X1, w.Y1)), Load(r.Full), Load(r.Bg), sprites);
+        hires = new HiresSet(w.Png, view, Images.RecolorImages, scale, new Rect(new Point(w.X0, w.Y0), new Point(w.X1, w.Y1)), Load(r.Full), Load(r.Bg), sprites);
         Redraw();
     }
 
