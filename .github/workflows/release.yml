@@ -23,7 +23,8 @@
 # Manimble-Windows.msix (the workflow artifact "Manimble-Windows-Store"); upload it to Partner Center for each release
 # (apps/windows/STORE.md). Its identity comes from these repository *variables* (Settings -> Secrets and variables ->
 # Actions -> Variables; they are public in the package anyway), copied from Partner Center's Product identity page:
-# MANIMBLE_STORE_NAME, MANIMBLE_STORE_PUBLISHER, MANIMBLE_STORE_PUBLISHER_NAME. A tag refuses to build without them.
+# MANIMBLE_STORE_NAME, MANIMBLE_STORE_PUBLISHER, MANIMBLE_STORE_PUBLISHER_NAME. Without them a tag still releases (the
+# Mac app and the runtimes) with a warning, and the package gets a local identity the Store will refuse.
 # The zip and the installer (Manimble-Windows.zip, Manimble-Windows-Setup.exe) are attached to the GitHub Release only
 # when they are signed (secrets WINDOWS_CERTIFICATE, a base64 .pfx, and WINDOWS_CERTIFICATE_PASSWORD), so a tag never
 # publishes unsigned Windows binaries; a dry run still builds them as a workflow artifact.
@@ -67,12 +68,12 @@ jobs:
       MANIMBLE_STORE_PUBLISHER: ${{ vars.MANIMBLE_STORE_PUBLISHER }}
       MANIMBLE_STORE_PUBLISHER_NAME: ${{ vars.MANIMBLE_STORE_PUBLISHER_NAME }}
     steps:
-      - name: Check a tagged release has the Store identity
+      - name: Say when a tagged release has no Store identity
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           [ -n "$MANIMBLE_STORE_NAME" ] && [ -n "$MANIMBLE_STORE_PUBLISHER" ] && [ -n "$MANIMBLE_STORE_PUBLISHER_NAME" ] \
-            || { echo "::error::a release needs the MANIMBLE_STORE_* repository variables (see the top of release.yml)"; exit 1; }
+            || echo "::warning::no MANIMBLE_STORE_* repository variables (see the top of release.yml): the Store package has a local identity the Store will refuse"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
