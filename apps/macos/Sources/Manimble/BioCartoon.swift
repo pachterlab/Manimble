@@ -1112,6 +1112,44 @@ struct BCFilter: Equatable {
 }
 
 /// A dropdown whose entries tick on and off, titled with what is picked ("Any" when nothing is).
+/// A toggle drawn like the BioCartoon editor's buttons: a rounded outline with a symbol, filled with a dark accent while on.
+final class BCToggleButton: NSButton {
+    convenience init(title: String, symbol: String) {
+        self.init(frame: .zero)
+        setButtonType(.pushOnPushOff)
+        isBordered = false
+        self.title = title
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        imagePosition = .imageLeading
+        imageHugsTitle = true
+        font = Theme.font(12)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.borderWidth = 1
+        refresh()
+    }
+
+    override var state: NSControl.StateValue { didSet { refresh() } }
+    override var font: NSFont? { didSet { refresh() } }
+    override func mouseDown(with event: NSEvent) { super.mouseDown(with: event); refresh() }   // a click flips state in the cell
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); refresh() }
+    override var intrinsicContentSize: NSSize {
+        let s = super.intrinsicContentSize
+        return NSSize(width: s.width + 18, height: max(s.height + 8, 24))
+    }
+
+    private func refresh() {
+        let on = state == .on
+        let text: NSColor = on ? .white : .labelColor
+        contentTintColor = text
+        attributedTitle = NSAttributedString(string: title, attributes: [.font: font ?? Theme.font(12), .foregroundColor: text])
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = on ? Theme.accent.blended(withFraction: 0.45, of: .black)?.cgColor : NSColor.clear.cgColor
+            layer?.borderColor = (on ? Theme.accent.blended(withFraction: 0.2, of: .black) ?? Theme.accent : NSColor.separatorColor).cgColor
+        }
+    }
+}
+
 final class BCMultiPopup: NSPopUpButton {
     private(set) var picked: Set<String> = []
     private var names: [String: String] = [:]
@@ -1193,8 +1231,10 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     private let licensePopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let fileTypePopup = BCMultiPopup(frame: .zero, pullsDown: true)
     private let tagsField = NSTextField()
-    private let favoritesBox = NSButton(checkboxWithTitle: "Favorites", target: nil, action: nil)
-    private let downloadsBox = NSButton(checkboxWithTitle: "Downloads", target: nil, action: nil)
+    private let favoritesBox = BCToggleButton(title: "Favorites", symbol: "star")
+    private let downloadsBox = BCToggleButton(title: "Downloads", symbol: "tray.and.arrow.down")
+    /// Below the search, as in the BioCartoon editor: shows and hides the filters (lit while shown or set).
+    private let filtersButton = BCToggleButton(title: "Filters", symbol: "line.3.horizontal.decrease")
     private let clearButton = NSButton(title: "Clear filters", target: nil, action: nil)
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let status = NSTextField(labelWithString: "")
@@ -1268,28 +1308,52 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         // the filters, laid out like the BioCartoon editor's: a label and a dropdown per row
         for p in [dbPopup, subPopup, dbCatPopup, licensePopup, fileTypePopup] { p.onChange = { [weak self] in self?.filtersEdited() } }
         catPopup.onChange = { [weak self] in self?.categoriesEdited() }
-        authorField.placeholderString = "Any (commas for several)"
-        authorField.font = Theme.font(11); authorField.controlSize = .small
-        authorField.delegate = self
-        tagsField.placeholderString = "Any (commas for several)"
-        tagsField.font = Theme.font(11); tagsField.controlSize = .small
-        tagsField.delegate = self
-        let tagsLabel = fieldLabel("Tags")
-        tagsLabel.toolTip = "Icons with one of these as a whole tag, any case"
-        let dbCatLabel = fieldLabel("Database category")
-        dbCatLabel.toolTip = "A database's own categories, by its code (BA: NIAID NIH BioArt, …)"
-        let rows: [[NSView]] = [[fieldLabel("Database"), dbPopup], [fieldLabel("Author"), authorField], [fieldLabel("Category"), catPopup],
-                                [fieldLabel("Subcategory"), subPopup], [dbCatLabel, dbCatPopup], [fieldLabel("License"), licensePopup],
-                                [fieldLabel("File type"), fileTypePopup], [tagsLabel, tagsField],
-                                [NSGridCell.emptyContentView, favoritesBox], [NSGridCell.emptyContentView, downloadsBox]]
+        // dropdowns are plain "Any ▾" text and the text fields dark wells, as in the BioCartoon editor
+        for p in [dbPopup, catPopup, subPopup, dbCatPopup, licensePopup, fileTypePopup] { p.isBordered = false; p.font = Theme.font(12) }
+        for f in [authorField, tagsField] {
+            f.placeholderString = "Any (commas for several)"
+            f.font = Theme.font(12)
+            f.isBezeled = false; f.isBordered = false; f.drawsBackground = false
+            f.focusRingType = .none
+            f.setContentHuggingPriority(.init(1), for: .horizontal)
+            f.delegate = self
+        }
+        func well(_ f: NSTextField) -> NSView {
+            let b = NSBox()
+            b.boxType = .custom; b.cornerRadius = 5; b.borderWidth = 0
+            b.fillColor = .textBackgroundColor
+            b.contentViewMargins = .zero
+            f.translatesAutoresizingMaskIntoConstraints = false
+            b.contentView?.addSubview(f)
+            if let cv = b.contentView {
+                NSLayoutConstraint.activate([
+                    f.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 6), f.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -6),
+                    f.centerYAnchor.constraint(equalTo: cv.centerYAnchor), b.heightAnchor.constraint(equalToConstant: 22),
+                ])
+            }
+            return b
+        }
+        func rowLabel(_ s: String, _ tip: String? = nil) -> NSTextField {
+            let l = NSTextField(labelWithString: s)
+            l.font = Theme.font(12); l.textColor = .labelColor; l.toolTip = tip
+            return l
+        }
         for (b, tip) in [(favoritesBox, "Only icons you starred"), (downloadsBox, "Only icons you placed on a slide (or downloaded in the BioCartoon editor)")] {
-            b.font = Theme.font(11); b.controlSize = .small; b.toolTip = tip
+            b.toolTip = tip
             b.target = self; b.action = #selector(checkboxToggled)
         }
-        for r in rows { r[1].setContentHuggingPriority(.init(1), for: .horizontal) }
+        let showOnly = NSStackView(views: [favoritesBox, downloadsBox]); showOnly.spacing = 6
+        showOnly.setHuggingPriority(.init(1), for: .horizontal)
+        let rows: [[NSView]] = [[rowLabel("Database"), dbPopup], [rowLabel("Author"), well(authorField)], [rowLabel("Category"), catPopup],
+                                [rowLabel("Subcategory"), subPopup],
+                                [rowLabel("Database category", "A database's own categories, by its code (BA: NIAID NIH BioArt, …)"), dbCatPopup],
+                                [rowLabel("License"), licensePopup], [rowLabel("File type"), fileTypePopup],
+                                [rowLabel("Tags", "Icons with one of these as a whole tag, any case"), well(tagsField)],
+                                [rowLabel("Show only"), showOnly]]
+        for r in rows.dropLast() { r[1].setContentHuggingPriority(.init(1), for: .horizontal) }
         let table = NSGridView(views: rows)
         table.rowSpacing = 6; table.columnSpacing = 8
-        table.column(at: 0).width = 104
+        table.column(at: 0).width = 112
         table.column(at: 1).xPlacement = .fill
         table.rowAlignment = .none
         for r in 0..<table.numberOfRows { table.row(at: r).yPlacement = .center }
@@ -1314,15 +1378,32 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         filterBox.isHidden = true
         setSources([]); setCategories([]); setLicenses([]); setDbCategories([]); refreshFileTypes()
 
-        sortPopup.controlSize = .small
-        sortPopup.font = Theme.font(11)
+        sortPopup.isBordered = false
+        sortPopup.font = Theme.font(13)
         sortPopup.addItems(withTitles: Self.sorts.map { $0.0 })
         followSearch()
         sortPopup.target = self; sortPopup.action = #selector(sortChanged)
+        let sortWell = NSBox()
+        sortWell.boxType = .custom; sortWell.cornerRadius = 6; sortWell.borderWidth = 0
+        sortWell.fillColor = .quaternaryLabelColor
+        sortWell.contentViewMargins = .zero
+        sortPopup.translatesAutoresizingMaskIntoConstraints = false
+        if let cv = sortWell.contentView {
+            cv.addSubview(sortPopup)
+            NSLayoutConstraint.activate([
+                sortPopup.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 4), sortPopup.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -2),
+                sortPopup.centerYAnchor.constraint(equalTo: cv.centerYAnchor), sortWell.heightAnchor.constraint(equalToConstant: 26),
+            ])
+        }
+        filtersButton.font = Theme.font(13)
+        filtersButton.target = self; filtersButton.action = #selector(funnelPressed)
+        let sortSpacer = NSView()
+        sortSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let sortRow = NSStackView(views: [filtersButton, sortSpacer, fieldLabel("Sort"), sortWell]); sortRow.spacing = 6
         status.font = Theme.font(11); status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let sortRow = NSStackView(views: [fieldLabel("Sort"), sortPopup, status]); sortRow.spacing = 6
+        status.setContentHuggingPriority(.init(1), for: .horizontal)   // on its own line now: it stretches, never holds the pane's width
 
         installButton.target = self; installButton.action = #selector(installPressed)
         installButton.bezelColor = Theme.accent
@@ -1358,11 +1439,11 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         creditBox.isHidden = true
         self.creditBox = creditBox
 
-        let stack = NSStackView(views: [head, searchRow, summary, filterBox, sortRow, installButton, scroll, creditBox])
+        let stack = NSStackView(views: [head, searchRow, sortRow, summary, filterBox, status, installButton, scroll, creditBox])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for v in [head, searchRow, summary, filterBox, sortRow, scroll, creditBox] as [NSView] {
+        for v in [head, searchRow, sortRow, summary, filterBox, status, scroll, creditBox] as [NSView] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -28).isActive = true
         }
         creditLabel.preferredMaxLayoutWidth = 300
@@ -1598,7 +1679,9 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
     // MARK: filter changes
 
     @objc private func closePressed() { onClose?() }
-    @objc private func funnelPressed() { filterBox.isHidden.toggle(); refreshFilterChrome() }
+    @objc private func funnelPressed() { toggleFilters() }
+    var filtersShown: Bool { !filterBox.isHidden }
+    func toggleFilters() { filterBox.isHidden.toggle(); refreshFilterChrome() }
 
     @objc private func clearFilters() {
         filter = BCFilter()
@@ -1658,6 +1741,8 @@ final class BioCartoonPane: NSObject, NSCollectionViewDataSource, NSCollectionVi
         let active = !filter.isEmpty
         funnel.contentTintColor = active || !filterBox.isHidden ? Theme.accent : .secondaryLabelColor
         funnel.toolTip = filterBox.isHidden ? "Filter by database, author, category, license, file type, tags, favorites or downloads" : "Hide the filters"
+        filtersButton.state = active || !filterBox.isHidden ? .on : .off
+        filtersButton.toolTip = funnel.toolTip
         clearButton.isHidden = !active
         summary.stringValue = summaryText()
         summary.isHidden = !(active && filterBox.isHidden)
@@ -2043,6 +2128,21 @@ extension MainController {
             log("popular: " + p.allResults.prefix(8).map { "\($0.id) \(stars.count($0))\(stars.isStarred($0) ? "*" : "")" }.joined(separator: ", "))
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             shot(p.view, "biocartoon_stars.png")
+            // the pane widens when its divider is dragged left (nothing in it may hold its width), with filters shown or not
+            if let split = mainSplit, split.subviews.count > 1 {
+                for open in [false, true] {
+                    if p.filtersShown != open { p.toggleFilters() }
+                    let i = split.subviews.count - 2
+                    split.setPosition(split.subviews[i].frame.maxX + 160, ofDividerAt: i)      // narrower first: it may start at its widest
+                    split.layoutSubtreeIfNeeded()
+                    let before = p.view.frame.width
+                    split.setPosition(split.subviews[i].frame.maxX - 160, ofDividerAt: i)
+                    split.layoutSubtreeIfNeeded()
+                    let wide = p.view.frame.width
+                    log("widen (filters \(open ? "shown" : "hidden")): \(Int(before)) → \(Int(wide)) \(wide > before + 100 ? "ok" : "STUCK")")
+                }
+                if p.filtersShown { p.toggleFilters() }
+            }
             p.type("mitochondria")
             try? await Task.sleep(nanoseconds: 300_000_000)
             await wait("search") { p.resultCount > 0 && p.firstResult?.title.lowercased().contains("mito") == true }

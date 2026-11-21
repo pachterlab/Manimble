@@ -97,6 +97,7 @@ struct ObjInfo: Decodable {
     var shared: SharedInfo?
     var image: String?
     var imagePath: String?           // absolute path of the picture file (images)
+    var border: String?              // a picture's border colour (#RRGGBB), nil without one
     var shape: String?
     var rotation: Double?            // degrees, from the object's own rotate() calls
     var dims: [Double]?              // manim width/height in frame pixels
@@ -191,6 +192,12 @@ struct UndoResult: Decodable {
     var ok: Bool?
     var label: String?
     var error: String?
+    /// undo / redo: the slide the step changed, brought back or moved (nil: it only removed slides, or changed
+    /// shared code), the slides it added and removed, and the navigator position of the first removed one.
+    var scene: String?
+    var added: [String]?
+    var removed: [String]?
+    var index: Int?
 }
 
 /// Axis-aligned box in frame pixels.

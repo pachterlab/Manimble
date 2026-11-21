@@ -12,6 +12,17 @@ See [Paste from other apps](inserting.md#paste-from-other-apps).
 Select a picture to move and resize it. Its file name is shown in the inspector. To stretch a picture, turn off
 **Keep aspect ratio** in the inspector and change its width or height.
 
+### Give a picture a border
+
+Click **Border** in the inspector and pick a colour, or choose **More Colours…** for any colour. **No Border**
+takes it away. Manimble writes the border as a rectangle attached to the picture
+(`image1.add(border(image1, color="#FFFFFF", stroke_width=4))  # manimble border`, with `border` in
+`manimble_helpers.py`), so it moves, resizes and fades in and out with the picture. With several pictures selected,
+they all get the same border.
+
+To centre a picture on the slide, or line it up with an edge, use the **On slide** buttons in the inspector or
+**Arrange ▸ Align to Slide**. See [Align to the slide](arranging.md#align-to-the-slide).
+
 ## Extract elements from a picture
 
 **Insert ▸ Extract Elements from Image…** splits a picture into its separate subjects (the people in a photo, the

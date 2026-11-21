@@ -3270,12 +3270,8 @@ def find_tool(name: str) -> str | None:
     hit = shutil.which(name)
     if hit:
         return hit
-    for d in ("/Library/TeX/texbin", str(Path.home() / "Library/TinyTeX/bin/universal-darwin"),
-              "/opt/homebrew/bin", "/usr/local/bin"):
-        p = Path(d) / name
-        if p.exists():
-            return str(p)
-    return None
+    from .hostpaths import find_in, tex_dirs
+    return find_in(tex_dirs(), name)
 
 
 def import_beamer(src: str, dest: str, progress=None) -> dict:

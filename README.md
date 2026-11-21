@@ -13,8 +13,8 @@ everything Manimble does, from a first deck to presenting, with a chapter on
 
 ## Installation
 
-Manimble runs on macOS 13 or later, on both Apple Silicon and Intel Macs (the app is a universal binary). Windows and
-Linux versions are planned.
+Manimble runs on macOS 13 or later, on both Apple Silicon and Intel Macs (the app is a universal binary). A Windows
+version (Windows 10 or 11, x64) is in preview: see [apps/windows](apps/windows/README.md). A Linux version is planned.
 
 ### Precompiled binary
 

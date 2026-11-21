@@ -39,6 +39,29 @@ enum SlidePaste {
         return .text(text, styles: [:])
     }
 
+    /// The pictures a drag carries, or nil: image files, else the images a dragged web page fragment shows, else a
+    /// dragged link to an image, else the picture itself. `peek`: only say whether there are any (no data is read).
+    @MainActor static func droppedPictures(_ pb: NSPasteboard, peek: Bool = false) -> [Picture]? {
+        func isPicture(_ ext: String) -> Bool {
+            UTType(filenameExtension: ext).map { t in pictureTypes.contains { t.conforms(to: $0) } } ?? false
+        }
+        let files = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .filter { isPicture($0.pathExtension) }
+        if !files.isEmpty { return files.map { .file($0) } }
+        if let html = pb.string(forType: .html) {
+            let srcs = imageSources(html)
+            if !srcs.isEmpty { return srcs.map { .remote($0) } }
+        }
+        if let u = NSURL(from: pb) as URL?, ["http", "https"].contains(u.scheme?.lowercased() ?? ""), isPicture(u.pathExtension) {
+            return [.remote(u)]
+        }
+        if pb.availableType(from: [.png, .tiff]) != nil {
+            if peek { return [] }
+            return pngData(pb).map { [.data($0)] }
+        }
+        return nil
+    }
+
     /// The pictures an HTML fragment shows (`<img src=...>`): web addresses, and pictures written into it (data: URLs).
     static func imageSources(_ html: String) -> [URL] {
         guard let re = try? NSRegularExpression(pattern: #"<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']"#, options: [.caseInsensitive]) else { return [] }
@@ -147,6 +170,15 @@ struct CopiedObjects: Codable {
     var items: [Item]
 }
 
+/// What Copy puts on the clipboard when a slide, or one of its builds, is selected in the navigator; Paste makes a
+/// duplicate of it (a slide after the selected slide, a build right after the build it copies).
+struct CopiedSlide: Codable {
+    static let type = NSPasteboard.PasteboardType("com.manimble.slide")
+    var deck: String                     // the original deck folder it was copied from
+    var scene: String
+    var build: Int?                      // nil: the whole slide
+}
+
 /// The engine's answer to `copy` (copy_objects).
 private struct CopyResult: Decodable {
     struct Picture: Decodable { var png: String; var box: [Double] }
@@ -159,7 +191,36 @@ private struct CopyResult: Decodable {
 extension MainController {
     // MARK: copying objects between slides
 
-    @objc func copy(_ sender: Any?) { copySelection(then: nil) }
+    @objc func copy(_ sender: Any?) {
+        if navigatorFocused { copySlide(); return }
+        copySelection(then: nil)
+    }
+
+    /// Key focus is on the slide navigator (a slide or build was clicked there last), so Copy copies that slide or build.
+    var navigatorFocused: Bool { window.firstResponder === table && sceneName != nil && player == nil }
+
+    /// ⌘C in the navigator: the selected slide, or the build clicked under it, onto the clipboard.
+    func copySlide(to pb: NSPasteboard = .general) {
+        guard let ws = workspace, let name = sceneName else { return }
+        let build: Int? = table.buildFocused && scene?.name == name && (scene?.stops?.count ?? 0) > 1 ? stopIndex : nil
+        let c = CopiedSlide(deck: ws.original.path, scene: name, build: build)
+        guard let d = try? JSONEncoder().encode(c) else { return }
+        pb.clearContents()
+        pb.setData(d, forType: CopiedSlide.type)
+        toast(build.map { "Copied build \($0 + 1) of \(name) — ⌘V to paste a duplicate" } ?? "Copied slide \(name) — ⌘V to paste a duplicate")
+    }
+
+    /// Paste a copied slide (a duplicate after the selected slide) or build (a duplicate right after it).
+    func pasteSlide(_ c: CopiedSlide, into ws: Workspace) {
+        guard URL(fileURLWithPath: c.deck).standardizedFileURL.path == ws.original.standardizedFileURL.path else {
+            toast("Slides paste only into the deck they were copied from", error: true); return
+        }
+        guard navigatorScenes.contains(where: { $0.name == c.scene }) || state?.scenes.contains(where: { $0.name == c.scene }) == true else {
+            toast("The copied slide \(c.scene) is no longer in this deck", error: true); return
+        }
+        if let b = c.build { addBuild(copy: true, scene: c.scene, stop: b) }
+        else { slideOp("duplicate", sceneOverride: c.scene, after: sceneName) }
+    }
     @objc func cut(_ sender: Any?) { copySelection { [weak self] in self?.canvas.deleteSelection() } }
 
     /// Edit ▸ Copy (⌘C) on the slide: the selected objects onto the clipboard as Manimble objects, and as a picture
@@ -230,6 +291,9 @@ extension MainController {
 
     func pasteOnSlide(from pb: NSPasteboard) {
         guard let ws = workspace, sceneName != nil else { return }
+        if let d = pb.data(forType: CopiedSlide.type), let c = try? JSONDecoder().decode(CopiedSlide.self, from: d) {
+            pasteSlide(c, into: ws); return
+        }
         guard let what = SlidePaste.read(pb) else {
             toast("Nothing on the clipboard can go on a slide: copy a picture or some text", error: true); return
         }
@@ -259,6 +323,30 @@ extension MainController {
                 }
             }
         }
+    }
+
+    /// Whether a drag over the slide carries pictures (checked as it moves, so nothing is read or downloaded).
+    func canDropPictures(_ pb: NSPasteboard) -> Bool {
+        guard sceneName != nil, player == nil else { return false }
+        return SlidePaste.droppedPictures(pb, peek: true) != nil
+    }
+
+    /// Pictures dragged onto the slide (image files from Finder, an image from a browser or another app), each
+    /// centred where it was dropped, the next ones a little below and right of it.
+    func picturesDropped(_ pb: NSPasteboard, at p: CGPoint) -> Bool {
+        guard let ws = workspace, sceneName != nil, player == nil, let pics = SlidePaste.droppedPictures(pb) else { return false }
+        Task { @MainActor in
+            var k = 0.0
+            for pic in pics {
+                guard let name = await pastedPicture(pic, into: ws.work) else { continue }
+                let d = k * 0.04 * Double(canvas.frameSize.width); k += 1
+                let (cx, cy) = (Double(p.x) + d, Double(p.y) + d)
+                let half = 2 * Double(canvas.unitPx)
+                insert(kind: "image", extra: ["file": name, "path": ws.work.appendingPathComponent(name).path,
+                                              "sx": cx - half, "sy": cy, "ex": cx + half, "ey": cy])
+            }
+        }
+        return true
     }
 
     /// A pasted picture's file in the deck folder: copied, written, or downloaded (and made a PNG when it is not one
@@ -292,6 +380,6 @@ extension MainController {
     var canPasteOnSlide: Bool {
         guard sceneName != nil, player == nil else { return false }
         let pb = NSPasteboard.general
-        return pb.availableType(from: [CopiedObjects.type, .fileURL, .string, .html, .png, .tiff, .pdf]) != nil
+        return pb.availableType(from: [CopiedSlide.type, CopiedObjects.type, .fileURL, .string, .html, .png, .tiff, .pdf]) != nil
     }
 }

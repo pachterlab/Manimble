@@ -74,3 +74,37 @@ extension MainController {
         }
     }
 }
+
+/// MANIMBLE_TEST_UNDOJUMP: undo and redo take the user to the slide they changed: an edit on Shapes undone from
+/// Welcome, a deleted slide brought back and removed again. undojump.log in MANIMBLE_TEST_OUT.
+extension MainController {
+    func undoJumpTest() {
+        let dir = (ProcessInfo.processInfo.environment["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        try? "".write(toFile: dir + "undojump.log", atomically: true, encoding: .utf8)
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "undojump.log") }
+        func settle() async { await queueTail?.value; try? await Task.sleep(nanoseconds: 800_000_000) }
+        func here() -> String { "on=\(sceneName ?? "-") toast='\(toastPill.label.stringValue)'" }
+        Task { @MainActor in
+            await selectScene("Shapes"); await settle()
+            guard let oid = scene?.objects?.first(where: { $0.value.value == "drag, resize, retype" }).flatMap({ Int($0.key) }) else {
+                log("no caption"); exit(1)
+            }
+            commitText(oid, "undo me", shared: false); await settle()
+            await selectScene("Welcome"); await settle()
+            window.makeFirstResponder(canvas)
+            doUndo(redo: false); await settle(); log("undo text edit from Welcome: \(here())")
+            await selectScene("Welcome"); await settle()
+            doUndo(redo: true); await settle(); log("redo text edit from Welcome: \(here())")
+            doUndo(redo: false); await settle()
+
+            await selectScene("Shapes"); await settle()
+            slideOp("delete"); await settle(); log("deleted Shapes: \(here())")
+            await selectScene(navigatorScenes.last?.name ?? "Welcome"); await settle()
+            doUndo(redo: false); await settle(); log("undo delete: \(here())")
+            doUndo(redo: true); await settle(); log("redo delete: \(here())")
+            doUndo(redo: false); await settle()
+            log("done")
+            exit(0)
+        }
+    }
+}

@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- the Windows SDK version brings the WinRT share sheet (Share in the toolbar); Windows 10 1809 is still enough -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Manimble</AssemblyName>
+    <RootNamespace>Manimble</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Manimble.ico</ApplicationIcon>
+    <!-- the version comes from the repository's VERSION file, shared with the macOS app -->
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\..\VERSION').Trim())</Version>
+    <Product>Manimble</Product>
+    <Company>Pachter Lab</Company>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- Application.ThemeMode (Windows 11 Fluent look, light or dark with the system) is marked experimental -->
+    <NoWarn>$(NoWarn);WPF0001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AvalonEdit" Version="6.3.0.90" />
+    <PackageReference Include="System.Speech" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+  <!-- the shared engine ships next to Manimble.exe, as engine\manimble -->
+  <ItemGroup>
+    <None Include="..\..\..\engine\manimble\**\*.py" Exclude="..\..\..\engine\**\__pycache__\**"
+          Link="engine\manimble\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\engine\manimble\**\*.md"
+          Link="engine\manimble\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\..\engine\requirements.txt" Link="engine\requirements.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the first-launch setup runs it (SetupWindow.cs) -->
+    <None Include="..\install_dependencies.ps1" Link="install_dependencies.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the terminal page: xterm.js (MIT, see Terminal\LICENSE-xterm.txt) -->
+    <None Include="Terminal\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the icon Explorer shows for .manimble packages (file association) -->
+    <None Remove="Assets\ManimbleDocument.ico" />
+    <Content Include="Assets\ManimbleDocument.ico" Link="ManimbleDocument.ico" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the black-and-white BioCartoon logo for the toolbar button, shared with the macOS app -->
+    <Resource Include="..\..\macos\assets\biocartoon-mono.png" Link="Assets\biocartoon-mono.png" />
+  </ItemGroup>
+
+</Project>

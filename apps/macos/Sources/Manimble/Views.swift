@@ -304,6 +304,8 @@ final class SlideCell: NSTableCellView {
     /// Nested list of the slide's builds, shown under the selected slide only.
     private let builds = NSStackView()
     var onBuild: ((Int) -> Void)?
+    /// A hidden slide: its thumbnail and its builds are dimmed.
+    private var dimmed = false
 
     /// Horizontal space around the thumbnail (number column + margins) and the extra indent of the builds list.
     static let thumbInset: CGFloat = 2 + 20 + 8 + 12
@@ -373,6 +375,7 @@ final class SlideCell: NSTableCellView {
         name.stringValue = status == "error" ? "\(n) — error" : n
         name.textColor = status == "error" ? .systemRed : (active ? .labelColor : .secondaryLabelColor)
         thumb.image = image
+        dimmed = hidden && !unused
         thumb.alphaValue = hidden ? 0.4 : 1
         let chevron = expanded.map { $0 ? " ▾" : " ▸" } ?? ""
         badge.stringValue = unused ? "unused" : hidden ? "hidden" : (stops > 1 ? "\(stops) builds" + chevron : (image == nil && status != "error" ? "…" : ""))
@@ -385,7 +388,7 @@ final class SlideCell: NSTableCellView {
         builds.arrangedSubviews.forEach { $0.removeFromSuperview() }
         builds.isHidden = images.isEmpty
         for (i, img) in images.enumerated() {
-            let panel = BuildPanel(image: img, index: i, active: i == active) { [weak self] in self?.onBuild?(i) }
+            let panel = BuildPanel(image: img, index: i, active: i == active, dimmed: dimmed) { [weak self] in self?.onBuild?(i) }
             builds.addArrangedSubview(panel)
             panel.widthAnchor.constraint(equalTo: builds.widthAnchor).isActive = true
         }
@@ -402,7 +405,7 @@ final class SlideCell: NSTableCellView {
 /// One build of the selected slide, nested under it in the navigator: a smaller 16:9 panel with its number.
 final class BuildPanel: NSView {
     private let handler: () -> Void
-    init(image: NSImage?, index: Int, active: Bool, handler: @escaping () -> Void) {
+    init(image: NSImage?, index: Int, active: Bool, dimmed: Bool = false, handler: @escaping () -> Void) {
         self.handler = handler
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -413,7 +416,7 @@ final class BuildPanel: NSView {
         layer?.borderColor = (active ? Theme.accent : NSColor.tertiaryLabelColor.withAlphaComponent(0.35)).cgColor
         let iv = NSImageView(image: image ?? NSImage())
         iv.imageScaling = .scaleProportionallyUpOrDown
-        iv.alphaValue = active ? 1 : 0.72
+        iv.alphaValue = (active ? 1 : 0.72) * (dimmed ? 0.4 : 1)     // a hidden slide's builds gray out like its thumbnail
         iv.translatesAutoresizingMaskIntoConstraints = false
         addSubview(iv)
         let l = NSTextField(labelWithString: String(index + 1)); l.font = Theme.font(9, .bold); l.textColor = .white; l.alignment = .center
@@ -435,6 +438,8 @@ final class BuildPanel: NSView {
     override var acceptsFirstResponder: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { super.hitTest(point) == nil ? nil : self }
     override func mouseDown(with event: NSEvent) { handler() }
+    /// Right-click goes to this build first, so the navigator menu's Duplicate Build copies the build clicked.
+    override func rightMouseDown(with event: NSEvent) { handler(); super.rightMouseDown(with: event) }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 

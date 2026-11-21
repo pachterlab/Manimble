@@ -31,15 +31,17 @@ import types
 import functools
 import time
 import shutil
+import tempfile
 
 DECK = os.path.realpath(sys.argv[1])
 os.chdir(DECK)
 sys.path.insert(0, DECK)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # manimble.darkmode, for theme previews
+from manimble.hostpaths import system_roots  # noqa: E402
 # Always compile the deck from source: Python validates cached bytecode by mtime (seconds) and size, so an edit that
 # keeps a file's length (e.g. one digit in a coordinate) within the same second would otherwise run the old code.
 sys.dont_write_bytecode = True
-sys.pycache_prefix = os.path.join(os.environ.get("TMPDIR", "/tmp"), "manimble-no-pycache")
+sys.pycache_prefix = os.path.join(tempfile.gettempdir(), "manimble-no-pycache")
 MEDIA_DIR = os.path.abspath(os.environ.get("MANIMBLE_MEDIA_DIR", os.path.join(DECK, "..", "media")))
 MEDIA_DIR_REAL = os.path.realpath(MEDIA_DIR)
 DEPENDENCIES: set[str] = set()
@@ -50,6 +52,9 @@ sys.stdout = sys.stderr
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
+from manimble import pilcompat  # noqa: E402
+
+pilcompat.install()          # pictures under Pillow 13 with manim 0.21
 
 from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Camera, ORIGIN  # noqa: E402
 from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor, Group, SVGMobject  # noqa: E402
@@ -174,7 +179,7 @@ def _track_project_reads(event, args):
            for media_root in {MEDIA_DIR, MEDIA_DIR_REAL, _POOL, os.path.realpath(_POOL),
                               sys.pycache_prefix, os.path.realpath(sys.pycache_prefix)}):
         return
-    trusted_roots = (sys.prefix, sys.base_prefix, "/System", "/Library", "/usr", "/opt/homebrew", "/Applications")
+    trusted_roots = (sys.prefix, sys.base_prefix) + system_roots()
     if any(path == root or path.startswith(root.rstrip(os.sep) + os.sep) for root in trusted_roots):
         return
 

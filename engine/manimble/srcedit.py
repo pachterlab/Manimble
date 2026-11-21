@@ -144,6 +144,16 @@ class Src:
     def off(self, line: int, col: int) -> int:
         return self.line_starts[line - 1] + col
 
+    def line_end(self, line: int) -> int:
+        """Byte offset where line `line` (1-based) ends, before its "\n" or Windows "\r\n"."""
+        b = self.line_starts[line] - 1 if line < len(self.line_starts) else len(self.data)
+        return b - 1 if b > self.line_starts[line - 1] and self.data[b - 1:b] == b"\r" else b
+
+    @property
+    def newline(self) -> str:
+        """The file's line break, so added lines match it."""
+        return "\r\n" if b"\r\n" in self.data else "\n"
+
     def span(self, node) -> tuple[int, int]:
         return self.off(node.lineno, node.col_offset), self.off(node.end_lineno, node.end_col_offset)
 
@@ -548,7 +558,9 @@ class Planner:
         edits = [Edit(src.rel, a, b, lit)] if not styles or new != getattr(node, "value", None) else []
         call = src.parent.get(node)
         if obj["kind"] == "text" and isinstance(call, ast.Call) and call.args and call.args[0] is node:
-            edits += _shift_text_ranges(src, call, node.value, new, skip=_t2_keys(styles))
+            # the string as written, or (a shared constant's name being replaced on this slide) the text it held
+            old = node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else obj["value"]
+            edits += _shift_text_ranges(src, call, old, new, skip=_t2_keys(styles))
             edits += _set_t2(src, call, new, styles, obj)
         elif _t2_keys(styles):
             raise EditError("part of a text can only be formatted when its string is written in its Text(...) call")
@@ -593,7 +605,7 @@ class Planner:
         """Write the text's `# manimble box` comment with these fields changed (the rest kept)."""
         src, ln = self._box_line(obj)
         a = src.line_starts[ln - 1]
-        b = src.line_starts[ln] - 1 if ln < len(src.line_starts) else len(src.data)
+        b = src.line_end(ln)
         line = src.data[a:b].decode("utf-8")
         merged = dict(parse_box_tag(line) or {})
         merged.update({k: v for k, v in fields.items() if v is not None})
@@ -944,6 +956,59 @@ class Planner:
         return [(f"moved it in every build ({how})", edits + plan)
                 for how, plan in self.plan_move(own, x, y) if plan]
 
+    def one_build_shift(self, scene: dict, obj: dict, stops: list, stop: int) -> tuple[float, float]:
+        """(x, y) of the one-build move `plan_build_move` made at `stop`, or EditError when there is none."""
+        src, var, pre, made, before, after = self._build_context(scene, obj, stops, stop)
+        start = before if before is not None and before.lineno > made.end_lineno else made
+        found = None if pre else self._marked(src, start, var, self.BUILD_MARK)
+        if found is None:
+            raise EditError("this element was not moved in this build alone")
+        return _shift_of(found)
+
+    def plan_match_build_move(self, scene: dict, obj: dict, stops: list, stop: int, builds: set
+                              ) -> list[tuple[str, list[Edit]]]:
+        """Turn the one-build move of `plan_build_move` at `stop` into the same move in each build of `builds` (which
+        holds `stop`): every run of consecutive builds gets one marked shift where it starts and the opposite one
+        right after the next_slide() that ends it, so the builds outside keep their positions."""
+        src, var, pre, made, before, after = self._build_context(scene, obj, stops, stop)
+        x, y = self.one_build_shift(scene, obj, stops, stop)
+
+        def start_of(k):
+            _, _, _, mk, bf, _ = self._build_context(scene, obj, stops, k)
+            return bf if bf is not None and bf.lineno > mk.end_lineno else mk
+
+        net: dict = {}                       # (anchor line, mark) -> [anchor, dx, dy]
+
+        def add(anchor, mark, dx, dy):
+            if anchor is None:
+                return
+            e = net.setdefault((anchor.lineno, mark), [anchor, 0.0, 0.0])
+            e[1] += dx
+            e[2] += dy
+        # the move already made in `stop` alone is taken back first
+        add(start_of(stop), self.BUILD_MARK, -x, -y)
+        add(after, self.BUILD_END_MARK, x, y)
+        ks = sorted(builds)
+        runs, a = [], ks[0]
+        for p, q in zip(ks, ks[1:] + [None]):
+            if q != p + 1:
+                runs.append((a, p))
+                a = q
+        for a, b in runs:
+            add(start_of(a), self.BUILD_MARK, x, y)
+            add(self._build_context(scene, obj, stops, b)[5], self.BUILD_END_MARK, -x, -y)
+        edits, fresh = [], {}
+        for (_, mark), (anchor, dx, dy) in sorted(net.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+            s = self._marked(src, anchor, var, mark)
+            if s is not None:
+                edits.append(self._bump(src, anchor, var, mark, dx, dy))
+            elif abs(dx) > 5e-4 or abs(dy) > 5e-4:
+                fresh.setdefault(anchor.lineno, (anchor, []))[1].append(f"{var}.shift(({fmt(dx)}, {fmt(dy)}, 0))  {mark}")
+        for anchor, lines in fresh.values():   # new lines after one statement go in as one insertion
+            edits.append(_after_stmt(src, anchor, ("\n" + " " * anchor.col_offset).join(lines)))
+        names = ", ".join(str(k + 1) for k in ks)
+        return [(f"moved it in builds {names}", edits)]
+
     def _build_context(self, scene: dict, obj: dict, stops: list, stop: int):
         """(src, var, edits naming the object, its creation statement, the next_slide() statements that start and
         end the build) for a move in one build, or EditError when the slide's code is not laid out for one."""
@@ -1113,8 +1178,8 @@ class Planner:
                 return Edit(src.rel, at, at, " " * stmt.col_offset + line + "\n"), stmt.lineno
         last = fn.body[-1]
         indent = " " * last.col_offset
-        at = src.line_starts[last.end_lineno] - 1 if last.end_lineno < len(src.line_starts) else len(src.data)
-        return Edit(src.rel, at, at, "\n" + indent + line), last.end_lineno + 1
+        at = src.line_end(last.end_lineno)
+        return Edit(src.rel, at, at, src.newline + indent + line), last.end_lineno + 1
 
     def plan_delete_stop(self, scene: dict, site: dict | None) -> list[Edit]:
         """Remove the `self.next_slide()` at `site` (recorded while the scene ran), so the build it ends runs on
@@ -1654,6 +1719,45 @@ class Planner:
             b = src.span(existing)[1]
             return [Edit(src.rel, a, b, f"({args})")]
         return [self._append_chain(obj["frames"], f".add_background_rectangle({args})")]
+
+    def border_of(self, obj: dict) -> str | None:
+        """The colour of a picture's border (`img.add(border(img, color=...))  # manimble border`), if it has one."""
+        try:
+            src, call, top, stmt = self._creation(obj)
+        except EditError:
+            return None
+        var = _assigned_name(stmt, top)
+        s = self._decoration_stmt(src, stmt, var, "border") if var else None
+        if s is None:
+            return None
+        inner = s.value.args[0] if s.value.args else None
+        col = next((k.value for k in inner.keywords if k.arg == "color"), None) if isinstance(inner, ast.Call) else None
+        return col.value if isinstance(col, ast.Constant) and isinstance(col.value, str) else "#FFFFFF"
+
+    def plan_border(self, obj: dict, color: str | None, width: float = 4) -> list[Edit]:
+        """A picture's border: a rectangle the size of the picture attached to it (`img.add(border(img, ...))`), so it
+        moves, scales and fades with it. None removes it."""
+        if obj["kind"] != "image":
+            raise EditError("only pictures can be given a border")
+        src, call, top, stmt = self._creation(obj)
+        var = _assigned_name(stmt, top)
+        existing = self._decoration_stmt(src, stmt, var, "border") if var else None
+        if color is None:
+            if existing is None:
+                return []
+            a, b = _stmt_lines(src, existing)
+            return [Edit(src.rel, a, b, "")]
+        code = f"{var}.add(border({var}, color={py_str(color.upper())}, stroke_width={fmt(width, 1)}))  # manimble border"
+        if existing is not None:
+            a, b = _stmt_lines(src, existing)
+            return [Edit(src.rel, a, b, " " * existing.col_offset + code + "\n")]
+        edits: list[Edit] = []
+        if not var:
+            var, edits = self._ensure_var(obj, src, top, stmt)
+            code = f"{var}.add(border({var}, color={py_str(color.upper())}, stroke_width={fmt(width, 1)}))  # manimble border"
+        edits += ensure_helpers(self.p, src, ["border"])
+        edits.append(_after_stmt(src, stmt, code))
+        return _merge_helper_edits(edits)
 
     def _link_call(self, src: Src, call):
         """The `.set(manimble_link=...)` in the object's method chain, if any."""
@@ -2239,10 +2343,21 @@ def highlight_chars(mobject, chars, opacity=0.6, buff=0.06):
     return out
 '''
 
+BORDER_SOURCE = '''
+
+def border(mobject, color="#FFFFFF", stroke_width=4):
+    """A frame around a picture, its size: added to the picture, it moves, scales and fades with it."""
+    from manim import Rectangle
+    out = Rectangle(width=mobject.width, height=mobject.height, color=color, stroke_width=stroke_width)
+    out.move_to(mobject.get_center())
+    out.manimble_decoration = True
+    return out
+'''
+
 # appended to an existing manimble_helpers.py that lacks them
 HELPER_FUNCS = {"sub_slides": SUB_SLIDES_SOURCE, "underline_chars": CHARS_SOURCE, "strike_chars": CHARS_SOURCE,
-                "highlight_chars": CHARS_SOURCE}
-HELPERS_SOURCE += SUB_SLIDES_SOURCE + CHARS_SOURCE
+                "highlight_chars": CHARS_SOURCE, "border": BORDER_SOURCE}
+HELPERS_SOURCE += SUB_SLIDES_SOURCE + CHARS_SOURCE + BORDER_SOURCE
 
 
 def ensure_helpers(project, src: Src, wanted: list[str]) -> list[Edit]:

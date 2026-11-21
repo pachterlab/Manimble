@@ -1,13 +1,100 @@
 # Manimble for Windows
 
-Not started. A Windows front end would be a second client of the shared Python engine in [`../../engine`](../../engine),
-speaking the JSON protocol described in [`../../docs/developers/protocol.md`](../../docs/developers/protocol.md): a slide list, a canvas that
-draws the frames and per-object images the engine produces, an inspector, a code pane, and a terminal. Everything that
-understands manim, source code and decks lives in the engine, so a new front end is only UI, a working-copy manager
-(see `apps/macos/Sources/Manimble/Workspace.swift`), and platform glue (presenter window, sharing, Python discovery).
+The Windows front end of Manimble. It is a second client of the shared Python engine in [`../../engine`](../../engine),
+speaking the JSON protocol in [`../../docs/developers/protocol.md`](../../docs/developers/protocol.md), so a fix to the
+engine reaches the macOS and the Windows app alike. Everything that understands manim, source code and decks lives in
+the engine. This folder holds only the UI, the working-copy manager and the platform glue. See [PLAN.md](PLAN.md) for
+what is done and what comes next.
 
-Notes for whoever picks this up:
-- The engine is plain Python 3.11+ (it uses `co_positions`) plus manim, Pillow and optionally python-pptx.
-- Keynote import/export (`engine/manimble/export.py`, `importer.py`) uses AppleScript and is macOS-only; PowerPoint
-  import/export is portable.
-- Starting the presenter and the "open in Finder" behaviour use macOS commands today (`engine/manimble/core.py`).
+## Install a release
+
+Install **Manimble** from the Microsoft Store. The Store installs it for your user account and keeps it up to date.
+On first launch a setup window offers to install Python with Manim (and TinyTeX for formulas) for your user account;
+File > Install Dependencies… brings it back. Uninstalling it leaves your Python environment, settings and decks.
+Maintainers: [STORE.md](STORE.md) explains how a release gets to the Store.
+
+When a release is code-signed, its GitHub Release also carries an installer and a zip. Download
+[Manimble-Windows-Setup.exe](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows-Setup.exe)
+and run it. It installs Manimble for your user account only (no administrator rights) in
+`%LOCALAPPDATA%\Programs\Manimble`, with a Start menu shortcut, and makes `.manimble` packages open in Manimble. It
+needs no .NET install. On first launch a setup window offers to install Python with Manim (and TinyTeX for formulas)
+for your user account; File > Install Dependencies… brings it back. Running a newer installer upgrades in place;
+Settings > Apps uninstalls it (your Python environment, settings and decks stay).
+
+An unsigned build (from a workflow run, or one you built yourself) makes Windows SmartScreen say it "protected your
+PC" on first run: click **More info**, then **Run anyway**.
+
+Prefer no installer? [Manimble-Windows.zip](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows.zip)
+holds the same app: unzip it anywhere and run `Manimble.exe`.
+
+Each release lists every file's SHA-256 in `SHA256SUMS`; `Get-FileHash Manimble-Windows-Setup.exe` shows yours.
+
+## Install from a checkout
+
+```powershell
+git clone https://github.com/pachterlab/Manimble.git; cd Manimble
+powershell -ExecutionPolicy Bypass -File apps\windows\install_manimble.ps1 -WithLatex
+```
+
+The script:
+- creates a Python environment with Manim in `%LOCALAPPDATA%\Manimble\python` (using uv when it is installed);
+- with `-WithLatex`, installs TinyTeX (in `%APPDATA%TinyTeX`) and the LaTeX packages Manim uses, or with a TeX
+  already installed (MiKTeX, TeX Live), just the packages (MiKTeX is set to fetch them on its own);
+- builds the app into `%LOCALAPPDATA%\Programs\Manimble` and adds a Start menu shortcut.
+
+No administrator rights are needed. Building needs the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`).
+
+To build the release files yourself (`out\Manimble-Windows.zip`; with `-Installer` the installer, which needs
+Inno Setup 6: `winget install JRSoftware.InnoSetup`; with `-Msix` the Microsoft Store package, which needs the Windows
+SDK, see [STORE.md](STORE.md)):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File apps\windows\build_release.ps1 -Out out -Installer -Msix
+```
+
+With `MANIMBLE_SIGN_PFX` (a `.pfx` code-signing certificate) and `MANIMBLE_SIGN_PASSWORD` set, the app, the installer
+and its uninstaller are signed with signtool and timestamped. The release workflow does this when the repository has
+the `WINDOWS_CERTIFICATE` (the `.pfx`, base64) and `WINDOWS_CERTIFICATE_PASSWORD` secrets, and only then attaches
+the zip and installer to a tagged release. The Store package is never signed here: the Store signs it.
+
+## Develop
+
+```powershell
+cd apps\windows\Manimble
+dotnet build
+.\bin\Debug\net10.0-windows10.0.19041.0\Manimble.exe ..\..\..\examples\hello\deck
+```
+
+A build inside the checkout runs the checkout's `engine` folder directly, so engine changes need no rebuild. A
+published build carries a copy of the engine next to `Manimble.exe`. `MANIMBLE_ENGINE` and `MANIMBLE_PYTHON` override
+both, as on the Mac.
+
+| file | role |
+|---|---|
+| `Engine.cs` | starts `python -m manimble.rpc`, JSON-lines requests, responses and events; a Job object so render workers die with the app |
+| `Tools.cs` | finds Python (`MANIMBLE_PYTHON`, the saved choice, `%LOCALAPPDATA%\Manimble\python`, the checkout `.venv`, `PATH`) and TeX |
+| `PortableProject.cs` | portable projects: Save Project Copy (a folder) and Package for Sharing (`.manimble`), the same format as the Mac app's, and unpacking them |
+| `FileAssociation.cs` | opens `.manimble` packages from Explorer (registered per user by an installed or unzipped copy) |
+| `SetupWindow.cs` | first-launch setup: offers to install a missing Python or LaTeX with `install_dependencies.ps1` (later: File > Install Dependencies…) |
+| `Workspace.cs` | the working copy (a port of `apps/macos/Sources/Manimble/Workspace.swift`; directory junctions instead of symlinks) |
+| `MainWindow.xaml(.cs)` | navigator, canvas, builds, notes, inspector, source pane, menus and shortcuts |
+| `FormatRow.cs` | the toolbar's Theme, Zoom and Dark Mode (view only), and the formatting row laid out as the Mac's format bar; `MANIMBLE_TEST_FORMAT=<dir>` checks it headlessly |
+| `Toolbar.cs` | the rest of the Mac's toolbar: Expand / Collapse All (builds nested under every slide in the navigator), the Shape menu with the draw tools and pen, and Share (a PDF to the Windows share sheet, and the exports) |
+| `Ruler.cs` | the rulers along the canvas, in manim units; drag a guide off them onto the slide |
+| `TableEditing.cs` | table cells: typed into on the slide, or in the inspector's grid (rows and columns added or removed there) |
+| `BioCartoon.cs` | the BioCartoon icon search panel (the `biocartoon` command line) and inserting its icons |
+| `PythonPlot.cs` | Python plots: the plot editor, running the code, and pointing the picture at a new output |
+| `Script.cs`, `ScriptPane.cs` | scripted presentations: the script (`script.json`), its panel, speech and pointer, and the runner on the show |
+| `Feedback.cs`, `FeedbackWiring.cs` | feedback notes (`feedback.json`): the notes layer, the list, Presenter View's Feedback Mode |
+| `SlideCanvas.cs` | the canvas: the exact frame when idle, backdrop and sprites while dragging or while an optimistic edit waits for its render |
+| `SlideshowWindow.cs` | the full-screen show of the exact frames |
+| `Models.cs` | the engine's replies |
+
+Files live in `%LOCALAPPDATA%\Manimble`: `python`, `work` (working copies), `cache` (renders), `manimble.log`,
+`setup.log` (the last install) and `settings.json`.
+
+## Platform notes
+
+- Keynote import and export use AppleScript and stay macOS-only; the engine says so. PowerPoint works everywhere.
+- Platform paths (TeX, fonts, ffmpeg, system folders) are in `engine/manimble/hostpaths.py`.
+- Avoid the Microsoft Store Python for the environment: it redirects writes under `AppData`. The installer skips it.

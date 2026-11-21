@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from .beamer_import import find_tool, strip_comments
+from .hostpaths import WINDOWS
 
 MANIFEST = "latex_pictures.json"          # in a deck's assets: pictures to typeset again and the missing files
 
@@ -102,7 +103,11 @@ def install(files: list[str], progress=None) -> dict:
     # tlmgr refuses to install once CTAN has a newer tlmgr than itself, so it updates itself first
     cmd = f"{shlex.quote(tlmgr)} update --self; {shlex.quote(tlmgr)} install " + " ".join(shlex.quote(p) for p in pkgs)
     try:
-        if root and os.access(os.path.join(root, "tlpkg"), os.W_OK):
+        if WINDOWS:
+            # TinyTeX and TeX Live for one user live in folders the user can write: no administrator needed
+            subprocess.run([tlmgr, "update", "--self"], capture_output=True, text=True, timeout=600)
+            r = subprocess.run([tlmgr, "install", *pkgs], capture_output=True, text=True, timeout=1800)
+        elif root and os.access(os.path.join(root, "tlpkg"), os.W_OK):
             r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, text=True, timeout=1800)
         else:
             # a system TeX lives in a folder only an administrator can change: macOS asks for the password

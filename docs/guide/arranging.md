@@ -6,6 +6,7 @@
 - **Shift-click** more objects to add them to the selection, or **drag a rectangle** on an empty part of the slide to
   select everything inside it. Selected objects move, nudge and delete together.
 - Press <kbd>⌘</kbd><kbd>A</kbd> (**Edit ▸ Select All**) to select every object in the build on screen.
+- Press <kbd>⇥</kbd> to select the next object on the slide, and <kbd>⇧</kbd><kbd>⇥</kbd> the previous one.
 - Click an empty part of the slide, or press <kbd>Esc</kbd>, to deselect.
 - Press <kbd>↩</kbd> to edit the selected object: retype its text, or open its formula.
 
@@ -30,6 +31,13 @@ start of the build and the opposite shift at its end.
 
 To move the object in every build instead, choose **Arrange ▸ Apply Move to All Builds**
 (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>A</kbd>) right after the move.
+
+### Align to the slide
+
+The **On slide** buttons in the inspector, and **Arrange ▸ Align to Slide**, line the selection up with the slide:
+its left edge, centre or right edge across, and its top edge, middle or bottom edge down. Several selected objects
+move together as one block, so their layout is kept. Align it both ways (**Center**, then **Middle**) to put it in
+the centre of the slide.
 
 ## Resize and rotate
 
@@ -74,6 +82,10 @@ nudges, deletes and stacks as one.
 **Arrange ▸ Ungroup** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>G</kbd>) removes the group and leaves its members selected.
 
 ## Copy, cut and paste
+
+To make a copy of the selected objects without using the clipboard, choose **Edit ▸ Duplicate**
+(<kbd>⌘</kbd><kbd>D</kbd>). The copy lands slightly below and to the right of the original. With nothing selected,
+<kbd>⌘</kbd><kbd>D</kbd> duplicates the slide, as in PowerPoint.
 
 Copy (<kbd>⌘</kbd><kbd>C</kbd>), cut (<kbd>⌘</kbd><kbd>X</kbd>) and paste (<kbd>⌘</kbd><kbd>V</kbd>) work on
 selected objects, within a slide, between slides and between decks.
