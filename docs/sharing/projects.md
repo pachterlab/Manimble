@@ -7,7 +7,7 @@
 | **File ▸ Save to Original** | <kbd>⌘</kbd><kbd>S</kbd> | Writes every change in the working copy back to your deck. |
 | **File ▸ Revert to Original…** | | Discards every change since the last save. |
 | **File ▸ Save Project Copy…** | | Writes a complete, editable copy of the project to a new folder. |
-| **File ▸ Package for Sharing…** | | Writes the project as a single `.manimble` file. |
+| **File ▸ Save .manimble…** | | Writes the project as a single `.manimble` file. |
 
 If the original deck was changed by someone else since you opened it (for example by a sync service or another
 editor), Manimble warns you before saving over those changes. If the deck folder was moved, renamed or deleted while
@@ -19,10 +19,11 @@ edits stay unsaved. Open the copy with **File ▸ Open Deck or Project…** to w
 
 ## Share a deck with another Manimble user
 
-**File ▸ Package for Sharing…** creates one `.manimble` file containing everything the deck needs: its code, the
-pictures and other files it uses, and its existing animation builds, so the recipient can present it without
-rendering it again. Send the file by email, a file-sharing service or AirDrop. The recipient opens it with
-**File ▸ Open Deck or Project…**.
+**File ▸ Save .manimble…** (also **Share ▸ Save .manimble…**) creates one `.manimble` file containing everything the
+deck needs: its code, the pictures and other files it uses, and its existing animation builds, so the recipient can
+present it without rendering it again. Send the file by email, a file-sharing service or AirDrop, or choose **Share ▸
+Share .manimble…** to make the package and send it straight from the share menu. The recipient opens it with **File ▸
+Open Deck or Project…**.
 
 **File ▸ Save Project Copy…** writes the same contents as an ordinary folder instead of a single file.
 

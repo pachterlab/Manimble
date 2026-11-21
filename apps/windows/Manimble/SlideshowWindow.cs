@@ -4,11 +4,14 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Shapes;
 
 namespace Manimble;
 
 /// A full-screen slideshow of the deck's exact frames, one per build (deck_pages). The animated show from
-/// `present` clips comes later; this is the static show the Mac app falls back to.
+/// `present` clips comes later; this is the static show the Mac app falls back to. Like the animated show, it has a
+/// slide and build counter and a progress bar along the bottom (Play > Show Slide and Build Numbers; P shows or
+/// hides them).
 public sealed class SlideshowWindow : Window
 {
     static SlideshowWindow? open;
@@ -19,6 +22,13 @@ public sealed class SlideshowWindow : Window
         Foreground = Brushes.Gray, FontSize = 14, Margin = new Thickness(16), HorizontalAlignment = HorizontalAlignment.Right,
         VerticalAlignment = VerticalAlignment.Bottom,
     };
+    readonly Rectangle progress = new() { Height = 3, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom };
+    readonly TextBlock counter = new()
+    {
+        Foreground = new SolidColorBrush(Color.FromArgb(0xcc, 0xff, 0xff, 0xff)), FontSize = 13, Margin = new Thickness(16, 0, 16, 12),
+        HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom,
+    };
+    bool showProgress = Settings.Current.ShowSlideNumbers;
     readonly TextBlock waiting = new()
     {
         Foreground = Brushes.Gray, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
@@ -47,7 +57,11 @@ public sealed class SlideshowWindow : Window
         g.Children.Add(image);
         g.Children.Add(waiting);
         g.Children.Add(info);
+        progress.Fill = (Brush)Application.Current.Resources["SelectionBrush"];
+        g.Children.Add(progress);
+        g.Children.Add(counter);
         Content = g;
+        SizeChanged += (_, _) => UpdateChrome();
         KeyDown += OnKey;
         // a click (or a touch tap) opens the hyperlink under it, else advances; a pinch zooms
         zoom = new ShowZoom(this, image, p => Click(TranslatePoint(p, image)));
@@ -108,7 +122,24 @@ public sealed class SlideshowWindow : Window
             page = Math.Clamp(page, 0, s.Pages.Count - 1);
             image.Source = black ? null : Images.Load(s.Pages[page]);
         }
-        info.Text = $"{slide + 1} / {deck.Count}" + (s.Pages.Count > 1 ? $" · {page + 1}/{s.Pages.Count}" : "");
+        info.Text = "";
+        UpdateChrome();
+    }
+
+    /// Builds a slide has (its pages, or the count the engine expects while it still renders).
+    static int BuildsOf(DeckSlide s) => Math.Max(1, Math.Max(s.Pages.Count, s.Builds ?? 0));
+
+    /// The counter ("slide / slides  ·  build/builds") and the progress bar (builds shown so far over all builds).
+    void UpdateChrome()
+    {
+        var on = showProgress && deck.Count > 0;
+        counter.Visibility = progress.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (!on) return;
+        var s = deck[slide];
+        var builds = BuildsOf(s);
+        counter.Text = $"{slide + 1} / {deck.Count}" + (builds > 1 ? $"  ·  {page + 1}/{builds}" : "");
+        double done = deck.Take(slide).Sum(BuildsOf) + page + 1, total = deck.Sum(BuildsOf);
+        progress.Width = ActualWidth * done / Math.Max(1, total);
     }
 
     void Click(Point p) { if (LinkAt(p) is { } url) Tools.OpenUrl(url); else Step(+1); }
@@ -149,7 +180,8 @@ public sealed class SlideshowWindow : Window
         {
             case Key.Escape: if (zoom.IsZoomed) zoom.Reset(); else Close(); break;
             case Key.Right or Key.Down or Key.Space or Key.PageDown or Key.Enter or Key.N: Step(+1); break;
-            case Key.Left or Key.Up or Key.PageUp or Key.Back or Key.P: Step(-1); break;
+            case Key.Left or Key.Up or Key.PageUp or Key.Back: Step(-1); break;
+            case Key.P: showProgress = !showProgress; UpdateChrome(); break;
             case Key.Home: slide = 0; page = 0; zoom.Reset(); ShowPage(); break;
             case Key.End: slide = deck.Count - 1; page = 0; zoom.Reset(); ShowPage(); break;
             case Key.B or Key.OemPeriod: black = !black; ShowPage(); break;

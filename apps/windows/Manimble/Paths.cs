@@ -138,6 +138,8 @@ public sealed class Settings
     public bool ShowSource { get; set; } = true;
     public bool ShowAnimations { get; set; } = true;
     public int AnimationHeight { get; set; } = 720;
+    /// Play > Show Slide and Build Numbers: a show starts with its counter and progress bar (P toggles them).
+    public bool ShowSlideNumbers { get; set; } = true;
     public double? WindowWidth { get; set; }
     public double? WindowHeight { get; set; }
     public bool WindowMaximized { get; set; }

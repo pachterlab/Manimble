@@ -55,6 +55,27 @@ public static class Images
         }
     }
 
+    /// A picture read once, outside the cache (the editor's large zoom tiles), mapped to the view like the rest.
+    public static BitmapSource? LoadUncached(string path)
+    {
+        try
+        {
+            var bi = new BitmapImage();
+            bi.BeginInit();
+            bi.CacheOption = BitmapCacheOption.OnLoad;
+            bi.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bi.StreamSource = new MemoryStream(File.ReadAllBytes(path));
+            bi.EndInit();
+            bi.Freeze();
+            return View == ColorView.Normal ? bi : Map(bi, View);
+        }
+        catch (Exception e)
+        {
+            Log.Note($"image {path}: {e.Message}");
+            return null;
+        }
+    }
+
     // Chroma (max - min) below Lo is fully flipped, above Hi kept: the Mac's DarkMode.map and engine/manimble/darkmode.py.
     const float Lo = 0.12f, Hi = 0.28f;
 

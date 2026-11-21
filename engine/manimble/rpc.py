@@ -63,6 +63,7 @@ def main():
         "state": lambda a: need().api_state(a.get("current")),
         "dependency_report": lambda a: need().dependency_report(),
         "scene": lambda a: need().api_scene(a["name"]),
+        "hires": lambda a: need().hires(a),
         "edit": lambda a: need().edit(a),
         "resolve_oids": lambda a: need().resolve_oids(a),
         "settle": lambda a: (need()._settle(), {"ok": True})[1],

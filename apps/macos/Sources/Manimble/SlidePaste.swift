@@ -16,7 +16,7 @@ enum SlidePaste {
         case remote(URL)          // a picture a web page (or Google Slides) links to: downloaded when pasted
     }
 
-    static let pictureTypes: [UTType] = [.png, .jpeg, .tiff, .gif, .heic, .bmp, .webP]
+    static let pictureTypes: [UTType] = [.png, .jpeg, .tiff, .gif, .heic, .bmp, .webP, .pdf, .svg]
 
     /// What the clipboard holds that a slide can take, or nil.
     @MainActor static func read(_ pb: NSPasteboard) -> SlidePaste? {
@@ -55,7 +55,7 @@ enum SlidePaste {
         if let u = NSURL(from: pb) as URL?, ["http", "https"].contains(u.scheme?.lowercased() ?? ""), isPicture(u.pathExtension) {
             return [.remote(u)]
         }
-        if pb.availableType(from: [.png, .tiff]) != nil {
+        if pb.availableType(from: [.png, .tiff, .pdf]) != nil {
             if peek { return [] }
             return pngData(pb).map { [.data($0)] }
         }
@@ -73,11 +73,32 @@ enum SlidePaste {
         }
     }
 
-    /// The clipboard's picture as PNG (PNG, TIFF or PDF data, as apps put them there).
+    /// The clipboard's picture as PNG (PNG, TIFF or PDF data, as apps put them there; PDF drawn sharp, not at 72 dpi).
     static func pngData(_ pb: NSPasteboard) -> Data? {
         if let d = pb.data(forType: .png) { return d }
+        if pb.availableType(from: [.tiff]) == nil, let d = pb.data(forType: .pdf), let img = NSImage(data: d) { return rasterized(img) }
         guard pb.availableType(from: [.tiff, .pdf]) != nil, let img = NSImage(pasteboard: pb) else { return nil }
         return png(img)
+    }
+
+    /// A vector picture (a PDF's first page, an SVG) drawn as a PNG `longSide` pixels on its longer side, with its
+    /// transparency kept.
+    static func rasterized(_ img: NSImage, longSide: CGFloat = 2400) -> Data? {
+        let s = img.size
+        guard s.width > 0, s.height > 0 else { return nil }
+        let k = longSide / max(s.width, s.height)
+        let w = max(1, Int((s.width * k).rounded())), h = max(1, Int((s.height * k).rounded()))
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        rep.size = NSSize(width: w, height: h)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .high
+        img.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
     }
 
     static func png(_ img: NSImage) -> Data? {
@@ -357,6 +378,13 @@ extension MainController {
             guard let d = try? Data(contentsOf: u) else { return nil }
             let ext = u.pathExtension.lowercased()
             if ["png", "jpg", "jpeg", "gif"].contains(ext) { return SlidePaste.save(d, ext: ext, into: dir) }
+            if ext == "svg" { return await pastedSVG(u, data: d, into: dir) }
+            if ext == "pdf" {           // its first page, drawn sharp (NSImage alone would give 72 dpi)
+                guard let png = NSImage(data: d).flatMap({ SlidePaste.rasterized($0) }) else {
+                    toast("Could not read \(u.lastPathComponent)", error: true); return nil
+                }
+                return SlidePaste.save(png, ext: "png", into: dir)
+            }
             return NSImage(data: d).flatMap(SlidePaste.png).flatMap { SlidePaste.save($0, ext: "png", into: dir) }
         case .data(let d):
             return SlidePaste.save(d, ext: "png", into: dir)
@@ -371,6 +399,28 @@ extension MainController {
             }
             return SlidePaste.save(png, ext: "png", into: dir)
         }
+    }
+
+    /// An SVG file as a picture: a vector copy (the engine's svg_icon: flattened, holes kept, strokes scaled with it)
+    /// when manim draws it like macOS does, else a PNG of it.
+    private func pastedSVG(_ u: URL, data d: Data, into dir: URL) async -> String? {
+        guard let img = NSImage(data: d), let png = SlidePaste.rasterized(img, longSide: 1600) else {
+            toast("Could not read \(u.lastPathComponent)", error: true); return nil
+        }
+        struct Prepared: Decodable { var ok: Bool; var why: String? }
+        let h = SHA256.hash(data: d).prefix(4).map { String(format: "%02x", $0) }.joined()
+        let name = "pasted_\(h).svg", dest = dir.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: dest.path) { return name }
+        let ref = FileManager.default.temporaryDirectory.appendingPathComponent("svg-ref-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: ref) }
+        busyPill.show("Preparing \(u.lastPathComponent)…", symbol: nil, tint: nil, spinning: true, cancellable: false)
+        defer { busyPill.hide() }
+        if (try? png.write(to: ref)) != nil,
+           let r = try? await engine.call("svg_icon", ["svg": u.path, "png": ref.path, "out": dest.path], as: Prepared.self) {
+            if r.ok { return name }
+            NSLog("Dropped SVG %@ stays a PNG: %@", u.lastPathComponent, r.why ?? "?")
+        }
+        return SlidePaste.save(png, ext: "png", into: dir)
     }
 
     /// How many times something was pasted on each slide (mod 6), to place the next paste.

@@ -18,7 +18,8 @@ enum DarkMode {
     static var mode: ColorView = ColorView(rawValue: UserDefaults.standard.string(forKey: "colorView") ?? "")
         ?? (UserDefaults.standard.bool(forKey: "darkMode") ? .dark : .normal)
     static var isOn: Bool { mode != .normal }
-    static var images = UserDefaults.standard.object(forKey: "darkModeImages") as? Bool ?? true
+    /// Inserted pictures keep their own colours unless View ▸ Recolor Images Too is on (a white icon stays white).
+    static var images = UserDefaults.standard.object(forKey: "darkModeImages") as? Bool ?? false
 
     /// Chroma (max - min) below `lo` is fully flipped, above `hi` kept.
     static let lo: Float = 0.12, hi: Float = 0.28

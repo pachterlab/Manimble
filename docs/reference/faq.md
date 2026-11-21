@@ -89,7 +89,7 @@ transitions, charts and SmartArt are not imported. See [Importing presentations]
 ### Can I share my slides with people who don't have Manimble?
 
 Yes. Export to PowerPoint, Keynote, Beamer, PDF or a movie. To share with a Manimble user, use
-**File ▸ Package for Sharing…**. See [Exporting](../sharing/export.md) and
+**File ▸ Save .manimble…**. See [Exporting](../sharing/export.md) and
 [Projects and packages](../sharing/projects.md).
 
 ### Can I put a Manimble animation into a PowerPoint, Keynote or Google Slides deck?

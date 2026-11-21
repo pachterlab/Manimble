@@ -208,6 +208,12 @@ public sealed class EditResult
     public int? Mark { get; set; }
     public string? Text { get; set; }
     public string? Path { get; set; }
+    /// undo / redo: the slide the step changed, brought back or moved (null: it only removed slides, or changed
+    /// shared code), the slides it added and removed, and the navigator position of the first removed one.
+    public string? Scene { get; set; }
+    public List<string>? Added { get; set; }
+    public List<string>? Removed { get; set; }
+    public int? Index { get; set; }
 }
 
 public sealed class DeckSlide

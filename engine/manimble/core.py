@@ -213,6 +213,7 @@ class Manimble:
         self._settling = False
         self.scene_locks: dict = {}             # one render per scene at a time
         self.edit_worker = WorkerProc(python, self.deck, "interactive", media_root)   # edits never wait behind background renders
+        self.zoom_worker = WorkerProc(python, self.deck, "zoom", media_root)  # sharp tiles of a zoomed slide; starts at first use
         self._cancel = threading.Event()        # set by `cancel`: jobs stop at their next check (see `check_cancel`)
         self._job_procs: set = set()            # subprocesses of cancellable jobs (manim builds, ffmpeg), to kill
         self.scenes: list[dict] = []            # ordered scene descriptors (the slides of the talk)
@@ -241,6 +242,7 @@ class Manimble:
         self.render_worker.close()
         self.aux_worker.close()
         self.edit_worker.close()
+        self.zoom_worker.close()
 
     # -------------------------------------------------------- cancelling
     def cancel(self) -> dict:
@@ -1135,8 +1137,34 @@ class Manimble:
 
     def _restart_workers(self):
         """manim reads manim.cfg once, when a worker imports it."""
-        for w in (self.edit_worker, self.render_worker, self.aux_worker):
+        for w in (self.edit_worker, self.render_worker, self.aux_worker, self.zoom_worker):
             w.restart()
+
+    def hires(self, a: dict) -> dict:
+        """Sharp tiles of the slide the editor shows zoomed in: build `stop` of the render in folder `dir`, drawn
+        again over `rect` (frame px) at `scale` device px per frame px. {"stale": true} when that render is no longer
+        the slide's current one (an edit landed since), so the canvas keeps its own pixels."""
+        name = a["scene"]
+        with self.lock:
+            rec = self.results.get(name)
+        if not rec or "data" not in rec or rec.get("dir") != a.get("dir") or rec.get("optimistic"):
+            return {"stale": True}
+        out = self.cache_dir / name / rec["dir"] / "zoom"
+        res = self.zoom_worker.request({
+            "cmd": "hires", "scene": name, "module": self.scene(name)["module"], "stop": int(a["stop"]),
+            "scale": float(a["scale"]), "rect": [float(v) for v in a["rect"]], "out": str(out),
+            "files": rec["data"].get("files"),
+        })
+        if "error" in res or res.get("stale"):
+            return res
+        base = str(out) + "/"
+        for k in ("full", "bg"):
+            if k in res:
+                res[k]["file"] = base + res[k]["file"]
+        for sp in res["sprites"]:
+            sp["file"] = base + sp["file"]
+        res["dir"] = rec["dir"]
+        return res
 
     def edit(self, req: dict) -> dict:
         with self.edit_lock:

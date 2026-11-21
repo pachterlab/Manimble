@@ -145,6 +145,17 @@ public partial class MainWindow : Window
         canvas.GuidesChanged += SaveGuides;
         canvas.ShowRulers = RulerItem.IsChecked = Settings.Current.ShowRulers;
         canvas.ResizeCommitted += OnResizeCommitted;
+        // sharp tiles of the zoomed-in slide (ZoomTiles.cs), from the engine's zoom worker
+        canvas.WantHires = async w =>
+        {
+            if (canvas.Scene is not { Optimistic: not true } sc || canvas.Stop?.Png != w.Png) return null;
+            var dir = Path.GetFileName(Path.GetDirectoryName(w.Png) ?? "");
+            return await engine.TryCall<HiresResult>("hires", new JsonObject
+            {
+                ["scene"] = sc.Name, ["dir"] = dir, ["stop"] = canvas.StopIndex, ["scale"] = w.Scale,
+                ["rect"] = new JsonArray(w.X0, w.Y0, w.X1, w.Y1),
+            });
+        };
         canvas.WrapCommitted += (oid, width, side) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "wrap", ["width"] = width, ["side"] = side }));
         canvas.EndpointsCommitted += (oid, e) => Submit(() => RunEdit(new JsonObject
             { ["oid"] = oid, ["op"] = "endpoints", ["sx"] = e[0], ["sy"] = e[1], ["ex"] = e[2], ["ey"] = e[3] }));
@@ -497,13 +508,13 @@ public partial class MainWindow : Window
         await SavePortable(dest, archive: false);
     }
 
-    /// Package for Sharing…: the same, zipped as one .manimble file.
+    /// Save .manimble…: the same, zipped as one .manimble file.
     async void PackageProject_Click(object sender, RoutedEventArgs e)
     {
         if (workspace == null) return;
         var dlg = new SaveFileDialog
         {
-            Title = "Package the project for sharing: one .manimble file with the deck and the files its slides use",
+            Title = "Save .manimble: one file with the deck and the files its slides use",
             FileName = workspace.ProjectName, DefaultExt = ".manimble", Filter = "Manimble package (*.manimble)|*.manimble",
         };
         if (dlg.ShowDialog(this) != true) return;
@@ -512,10 +523,11 @@ public partial class MainWindow : Window
         await SavePortable(dest, archive: true);
     }
 
-    async Task SavePortable(string destination, bool archive)
+    /// True once `destination` is written. `quiet` leaves out the "Saved" toast (Share .manimble… shares the file instead).
+    async Task<bool> SavePortable(string destination, bool archive, bool quiet = false)
     {
         var ws = workspace;
-        if (ws == null) return;
+        if (ws == null) return false;
         await FinishEdits();             // the copy holds the last edits, as Save does
         Busy(+1, "Checking slide dependencies (every slide renders once)…");
         try
@@ -525,23 +537,25 @@ public partial class MainWindow : Window
             {
                 MessageBox.Show(this, $"Manimble checked {report.ScannedScenes} of {report.TotalScenes} slides. Please try again.",
                                 "Dependency scan incomplete", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                return false;
             }
             if (report.Failures.Count > 0)
             {
                 var details = string.Join("\n", report.Failures.Take(5).Select(f => $"{f.Scene}: {LastLine(f.Error)}"));
                 if (MessageBox.Show(this, $"Manimble found dependencies in {report.ScannedScenes} slides, but the package may be incomplete.\n\n" +
                                           $"{details}\n\nContinue with the project copy?", "Some slides did not render during the dependency check",
-                                    MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+                                    MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return false;
             }
             Toast(archive ? "Packaging…" : "Copying the project…");
             if (archive) await Task.Run(() => PortableProject.CreateArchive(ws, report.Dependencies, destination));
             else await Task.Run(() => PortableProject.CreateFolder(ws, report.Dependencies, destination));
-            Toast(archive ? "Packaged " + destination : "Saved the project folder " + destination);
+            if (!quiet) Toast(archive ? "Saved " + destination : "Saved the project folder " + destination);
+            return true;
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, "Could not save the portable project", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
         }
         finally { Busy(-1); }
     }
@@ -974,11 +988,60 @@ public partial class MainWindow : Window
         if (workspace == null) return;
         await FinishEdits();
         var r = await engine.TryCall<EditResult>(cmd);
-        if (r?.Ok == true) Toast((cmd == "undo" ? "Undid " : "Redid ") + (r.Label ?? ""));
-        else { Toast(r?.Error ?? "Nothing to " + cmd, error: r?.Error != null); return; }
+        if (r?.Ok != true) { Toast(r?.Error ?? "Nothing to " + cmd, error: r?.Error != null); return; }
         await ReloadState();
-        if (sceneName != null && state?.Scenes.Any(s => s.Name == sceneName) == true) await LoadScene(sceneName, keepStop: true);
-        else if (slides.Count > 0) await SelectScene(slides[0].Name);
+        await ShowUndone(r, redo: cmd == "redo");
+    }
+
+    /// After an undo or redo (as on the Mac): go to the slide it changed (or, when it removed slides, to the one now
+    /// in their place), flash that slide's row in the navigator, and say what happened.
+    async Task ShowUndone(EditResult r, bool redo)
+    {
+        var rows = slides.ToList();
+        var removed = r.Removed ?? new(); var added = r.Added ?? new();
+        var target = r.Scene is { } sc && rows.Any(s => s.Name == sc) ? sc : null;
+        if (target == null && removed.Count > 0 && rows.Count > 0)
+            target = rows[Math.Clamp(r.Index ?? 0, 0, rows.Count - 1)].Name;
+        if (target != null && target != sceneName) await SelectScene(target);
+        else if (sceneName != null && rows.Any(s => s.Name == sceneName)) await LoadScene(sceneName, keepStop: true);
+        else if (rows.Count > 0) { target = rows[0].Name; await SelectScene(target); }
+        string Number(string n) => rows.FirstOrDefault(s => s.Name == n) is { Unused: false } s ? $"slide {s.Number}" : "an unused slide";
+        string Names(List<string> ns) => ns.Count == 1 ? $"“{ns[0]}”" : $"{ns.Count} slides";
+        var msg = (redo ? "Redid " : "Undid ") + (r.Label ?? "the last change");
+        if (added.Count > 0) msg += " · brought back " + Names(added) + (added.Count == 1 ? $" ({Number(added[0])})" : "");
+        else if (removed.Count > 0) msg += " · removed " + Names(removed);
+        else if (r.Scene is { } t) msg += " · on " + Number(t);
+        Toast(msg);
+        if (target != null) FlashRow(target);
+    }
+
+    /// A short accent-coloured pulse over a navigator row: where an undo or redo just happened.
+    void FlashRow(string name)
+    {
+        if (slides.FirstOrDefault(s => s.Name == name) is not { } item) return;
+        SlideList.ScrollIntoView(item);
+        SlideList.UpdateLayout();
+        if (SlideList.ItemContainerGenerator.ContainerFromItem(item) is not ListBoxItem row
+            || System.Windows.Documents.AdornerLayer.GetAdornerLayer(row) is not { } layer) return;
+        var glow = new FlashAdorner(row);
+        layer.Add(glow);
+        var fade = new System.Windows.Media.Animation.DoubleAnimation(1, 0, TimeSpan.FromSeconds(1.2))
+        {
+            EasingFunction = new System.Windows.Media.Animation.QuadraticEase { EasingMode = System.Windows.Media.Animation.EasingMode.EaseIn },
+        };
+        fade.Completed += (_, _) => layer.Remove(glow);
+        glow.BeginAnimation(OpacityProperty, fade);
+    }
+
+    sealed class FlashAdorner : System.Windows.Documents.Adorner
+    {
+        public FlashAdorner(UIElement e) : base(e) { IsHitTestVisible = false; }
+        protected override void OnRender(DrawingContext dc)
+        {
+            var c = ((SolidColorBrush)Application.Current.Resources["SelectionBrush"]).Color;
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(90, c.R, c.G, c.B)), null,
+                new Rect(AdornedElement.RenderSize), 6, 6);
+        }
     }
 
     void Delete_Click(object sender, RoutedEventArgs e) => DeleteSelection();
@@ -2068,6 +2131,12 @@ public partial class MainWindow : Window
         Settings.Current.Save();
     }
 
+    void ShowSlideNumbers_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.Current.ShowSlideNumbers = ShowSlideNumbersItem.IsChecked;
+        Settings.Current.Save();
+    }
+
     void Resolution_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as MenuItem)?.Tag is string t && int.TryParse(t, out var h)) { Settings.Current.AnimationHeight = h; Settings.Current.Save(); }
@@ -2077,6 +2146,7 @@ public partial class MainWindow : Window
     void SyncPlayMenu()
     {
         ShowAnimationsItem.IsChecked = Settings.Current.ShowAnimations;
+        ShowSlideNumbersItem.IsChecked = Settings.Current.ShowSlideNumbers;
         foreach (var mi in ResolutionMenu.Items.OfType<MenuItem>()) mi.IsChecked = (string)mi.Tag == Settings.Current.AnimationHeight.ToString();
     }
 

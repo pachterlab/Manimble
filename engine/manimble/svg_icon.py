@@ -203,7 +203,8 @@ def compare(svg: str, png: str, side: int = 200) -> dict:
 
 
 def prepare(req: dict) -> dict:
-    """{svg, png, out}: write the manim-ready copy of `svg` to `out` when it draws like `png`.
+    """{svg, png, out}: write the manim-ready copy of `svg` to `out` when it draws like `png` (no `png`: when nothing
+    in it is out of manim's reach, for a picture with no drawing of its own to compare with).
     Returns {ok, width, height} or {ok: False, why}."""
     try:
         with open(req["svg"], encoding="utf-8", errors="replace") as fh:
@@ -211,7 +212,7 @@ def prepare(req: dict) -> dict:
         if why:
             return {"ok": False, "why": why}
         size = normalize(req["svg"], req["out"])
-        res = compare(req["out"], req["png"])
+        res = compare(req["out"], req["png"]) if req.get("png") else {"ok": True}
     except Exception as exc:  # noqa: BLE001  any SVG manim or svgelements chokes on stays a PNG
         res = {"ok": False, "why": f"{type(exc).__name__}: {exc}"}
     if not res["ok"]:

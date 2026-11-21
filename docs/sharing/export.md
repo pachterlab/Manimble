@@ -74,5 +74,5 @@ the movie into that deck.
 inlined, the slides in show order, and a `SLIDES` list at the end. It is a convenient one-file copy for sharing code.
 Save it in the deck folder so relative paths, such as those of pictures, still work.
 
-To share a deck with someone who uses Manimble, use **File ▸ Package for Sharing…** instead. See
+To share a deck with someone who uses Manimble, use **File ▸ Save .manimble…** or **Share ▸ Share .manimble…** instead. See
 [Projects and packages](projects.md).

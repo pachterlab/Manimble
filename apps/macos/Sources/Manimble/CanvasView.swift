@@ -201,6 +201,13 @@ final class CanvasView: MTKView {
     private var shadowPipe: MTLRenderPipelineState!
     private var discPipe: MTLRenderPipelineState!
     private var cache: [String: MTLTexture] = [:]
+    /// Sharp tiles of the zoomed-in view and the request for them (ZoomTiles.swift).
+    var hires: HiresSet? { didSet { setNeedsDisplay(bounds) } }
+    var onWantHires: ((HiresWant) -> Void)?
+    var hiresTimer: Timer?
+    var hiresAsked: HiresWant?
+    var hiresInFlight = false
+    var hiresQueued = false
     private var cacheOrder: [String] = []
     private let loader: MTKTextureLoader
 
@@ -279,7 +286,7 @@ final class CanvasView: MTKView {
     var showObjects = false { didSet { needsDisplay2() } }
     /// Dark mode / inverted colours (nothing is written): the slide is composited from backdrop + sprites, each colour-mapped.
     var colorView = ColorView.normal { didSet { needsDisplay2() } }
-    var darkImages = true { didSet { needsDisplay2() } }
+    var darkImages = false { didSet { needsDisplay2() } }
     /// Live endpoint edits of lines/arrows: oid -> (sx, sy, ex, ey) in frame px.
     var lineOverrides: [Int: [Double]] = [:] { didSet { needsDisplay2() } }
     /// A just-inserted element shown at once, before the real render arrives.
@@ -615,6 +622,18 @@ final class CanvasView: MTKView {
     func texture(path: String) -> MTLTexture? {
         let key = CanvasView.textureKey(path)
         if let t = cache[key] { return t }
+        guard let t = makeTexture(path: path) else { return nil }
+        cache[key] = t
+        cacheOrder.append(key)
+        if cacheOrder.count > 160 {            // bound memory: drop oldest
+            for old in cacheOrder.prefix(40) { cache.removeValue(forKey: old) }
+            cacheOrder.removeFirst(40)
+        }
+        return t
+    }
+
+    /// Decode a PNG/JPEG into a premultiplied RGBA8 Metal texture (not cached).
+    func makeTexture(path: String) -> MTLTexture? {
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return textureFailed(path, "the image could not be read") }
         let w = img.width, h = img.height
@@ -634,12 +653,6 @@ final class CanvasView: MTKView {
             return true
         }
         guard drawn else { return textureFailed(path, "the image could not be decoded") }
-        cache[key] = t
-        cacheOrder.append(key)
-        if cacheOrder.count > 160 {            // bound memory: drop oldest
-            for old in cacheOrder.prefix(40) { cache.removeValue(forKey: old) }
-            cacheOrder.removeFirst(40)
-        }
         return t
     }
 
@@ -672,6 +685,7 @@ final class CanvasView: MTKView {
     func dropTextures() {
         for k in cacheOrder where !k.hasPrefix("sp_") { cache.removeValue(forKey: k) }
         cacheOrder.removeAll { !$0.hasPrefix("sp_") }
+        hires = nil; hiresAsked = nil
     }
 
     // MARK: geometry
@@ -860,6 +874,7 @@ final class CanvasView: MTKView {
         enc.endEncoding()
         cb.present(drawable)
         cb.commit()
+        hiresCheck()
     }
 
     /// The whole view (backdrop, shadow, slide, selection) rendered offscreen; used by --selftest.
@@ -1013,10 +1028,13 @@ final class CanvasView: MTKView {
             // the exact frame has object edges blended into the background, so dark mode maps each layer on its own
             // (inverting is linear, but the same path keeps "leave images alone" working)
             let slide = layers.contains(.slide)
+            let sharp = liveHires                 // the zoomed-in view drawn again at the screen's density
             if slide && overrides.isEmpty && lineOverrides.isEmpty && !dark && inline == nil && !optimistic {
                 if let t = texture(path: stop.png) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
+                if let f = sharp?.full { drawTex(f.tex, f.box.x0, f.box.y0, f.box.w, f.box.h) }
             } else {
                 if slide, let t = texture(path: stop.bg) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
+                if slide, let b = sharp?.bg { drawTex(b.tex, b.box.x0, b.box.y0, b.box.w, b.box.h) }
                 for sp in stop.sprites {
                     if lineOverrides[sp.oid] != nil || sp.oid == inline?.oid && inline?.cell == nil { continue }
                     let hole = sp.oid == inline?.oid ? inline?.cell?.area : nil
@@ -1046,6 +1064,10 @@ final class CanvasView: MTKView {
                         let cx = b.cx, cy = b.cy
                         let nx = cx + o.dx + (sp.x - cx) * o.kx, ny = cy + o.dy + (sp.y - cy) * o.ky
                         drawTex(t, nx, ny, sp.w * o.kx, sp.h * o.ky, map: map)
+                    } else if hole == nil, let tile = sharp?.sprites[sp.oid] {
+                        // the low-res sprite only where the sharp tile (cut to the view) doesn't reach
+                        drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map, hole: tile.box)
+                        drawTex(tile.tex, tile.box.x0, tile.box.y0, tile.box.w, tile.box.h, map: map)
                     } else {
                         drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map, hole: hole)
                     }

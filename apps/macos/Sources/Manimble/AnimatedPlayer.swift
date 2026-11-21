@@ -82,7 +82,7 @@ final class AnimatedPlayer: NSObject {
     private var generation = 0
     private var finished = false
     private var blackedOut = false
-    private var showProgress = true
+    private var showProgress = UserDefaults.standard.bool(forKey: "showSlideNumbers")
     private var hideWork: DispatchWorkItem?
     private var savedOptions: NSApplication.PresentationOptions = []
     private var shown = true

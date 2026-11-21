@@ -70,7 +70,7 @@ public sealed class AnimatedShowWindow : Window
     int index;
     int generation;
     bool finished;
-    bool showProgress = true;
+    bool showProgress = Settings.Current.ShowSlideNumbers;
     Mode mode;
     readonly ShowZoom zoom;
 

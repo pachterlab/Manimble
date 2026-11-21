@@ -172,12 +172,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.toolbar = makeToolbar()
         window.toolbarStyle = .unified
         canvas.onZoomChange = { [weak self] in self?.syncZoomPopup() }
+        canvas.onWantHires = { [weak self] w in self?.fetchHires(w) }
         canvas.onDelete = { [weak self] oid in self?.deleteSelected(oid) }
         canvas.onContextMenu = { [weak self] in self?.canvasMenu() }
         canvas.colorView = DarkMode.mode; canvas.darkImages = DarkMode.images
         canvas.onDraw = { [weak self] kind, sx, sy, ex, ey, anchors in self?.drawFinished(kind, sx, sy, ex, ey, anchors: anchors) }
         canvas.onPen = { [weak self] pts in self?.penFinished(pts) }
-        canvas.registerForDraggedTypes([BioCartoonPane.dragType, .fileURL, .URL, .png, .tiff, .html])
+        canvas.registerForDraggedTypes([BioCartoonPane.dragType, .fileURL, .URL, .png, .tiff, .pdf, .html])
         canvas.canDropPictures = { [weak self] pb in self?.canDropPictures(pb) ?? false }
         canvas.onPictureDrop = { [weak self] pb, p in self?.picturesDropped(pb, at: p) ?? false }
         canvas.onIconDrop = { [weak self] data, p in self?.biocartoonDropped(data, at: p) ?? false }
@@ -693,7 +694,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func packageProjectPressed() {
         guard let ws = workspace else { return }
         let panel = NSSavePanel()
-        panel.title = "Package Project for Sharing"
+        panel.title = "Save .manimble"
         panel.message = "Create one portable .manimble file that includes the deck and its checked dependencies."
         panel.nameFieldStringValue = ws.projectName
         if let projectType = UTType(filenameExtension: "manimble") { panel.allowedContentTypes = [projectType] }
@@ -703,7 +704,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         savePortableProject(workspace: ws, destination: destination, archive: true)
     }
 
-    func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool) {
+    /// `then` runs with `destination` once it is written (Share .manimble… hands it to the sharing picker).
+    func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool, then: ((URL) -> Void)? = nil) {
         Task { @MainActor in
             if sourceDraft != nil { window.makeFirstResponder(canvas) }     // applies the code being typed
             await finishEdits()                      // the copy holds the last edits, as Save does
@@ -735,7 +737,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 } else {
                     try PortableProject.createFolder(workspace: ws, dependencies: report.dependencies, at: destination)
                 }
-                toast(archive ? "Packaged \(destination.lastPathComponent)" : "Saved project folder \(destination.lastPathComponent)")
+                if let then = then { then(destination) }
+                else { toast(archive ? "Saved \(destination.lastPathComponent)" : "Saved project folder \(destination.lastPathComponent)") }
             } catch { alert("Could not save portable project", "\(error.localizedDescription)") }
         }
     }
@@ -1296,6 +1299,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLOT"] != nil, !testRan { testRan = true; plotTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_SCRIPT"] != nil, !testRan { testRan = true; scriptTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_CANCEL"] != nil, !testRan { testRan = true; cancelTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ZOOM"] != nil, !testRan { testRan = true; zoomTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -3043,6 +3047,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         toast(h == 720 ? "Animations build at 720p" : "Animations build at \(h == 2160 ? "4K" : "\(h)p") from the next show (slides rebuild once)")
     }
 
+    /// Play ▸ Show Slide and Build Numbers: whether a show starts with its counter and progress bar (P toggles them in the show).
+    @objc func toggleShowSlideNumbers() {
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "showSlideNumbers"), forKey: "showSlideNumbers")
+    }
+
     /// Play menu: whether Play and Presenter View run the animated show (manim clips) or the stills slideshow.
     var showAnimations: Bool { UserDefaults.standard.bool(forKey: "playShowAnimations") }
     @objc func toggleShowAnimations() {
@@ -3517,6 +3526,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presentFromCurrent) : #selector(playFromCurrent), keyEquivalent: ""))
         case #selector(playMenuPresenter):
             return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presenterViewAnimated) : #selector(presenterView), keyEquivalent: ""))
+        case #selector(toggleShowSlideNumbers):
+            item.state = UserDefaults.standard.bool(forKey: "showSlideNumbers") ? .on : .off; return true
         case #selector(animationResolutionChosen(_:)):
             item.state = (item.representedObject as? Int) == animationHeight ? .on : .off
             return previewScene == nil && player == nil && presenter == nil && animatedPlayer == nil
