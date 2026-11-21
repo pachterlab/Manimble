@@ -67,7 +67,7 @@ PIP=("$PY" -m pip --disable-pip-version-check -q)
 PKG_CONFIG="$CF/bin/pkg-config" PKG_CONFIG_PATH="$CF/lib/pkgconfig" PKG_CONFIG_LIBDIR="$CF/lib/pkgconfig" \
   LDFLAGS="-Wl,-rpath,$CF/lib" MACOSX_DEPLOYMENT_TARGET=13.0 PIP_NO_CACHE_DIR=1 \
   "${PIP[@]}" wheel -w "$WORK/built" -r "$REQ"
-"${PIP[@]}" download --only-binary=:all: --platform "macosx_13_0_$ARCH" --python-version 3.11 --implementation cp \
+"${PIP[@]}" download --only-binary=:all: --platform "macosx_13_0_$ARCH" --python-version "$PY_VERSION" --implementation cp \
   --find-links "$WORK/built" -d "$WORK/wheels" -r "$REQ"
 "${PIP[@]}" install --no-warn-script-location --no-index --find-links "$WORK/wheels" -r "$REQ"
 rm -rf "$WORK/built" "$WORK/wheels"
