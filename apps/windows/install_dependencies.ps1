@@ -1,17 +1,21 @@
 <#
 .SYNOPSIS
   Installs what Manimble for Windows needs, for the current user only (no administrator rights):
-  a Python environment with Manim in %LOCALAPPDATA%\Manimble\python, and with -WithLatex, MiKTeX for formulas.
+  a Python environment with Manim in %LOCALAPPDATA%\Manimble\python, and with -WithLatex, LaTeX for formulas.
   The app's first-launch setup runs this (it ships next to Manimble.exe); install_manimble.ps1 runs it from a checkout.
+  LaTeX follows install_dependencies.sh on the Mac: with no TeX on the PC, TinyTeX in %APPDATA%\TinyTeX plus the
+  packages Manim uses; with a TeX that lacks them, just the packages (MiKTeX: it may fetch them by itself).
 
-.PARAMETER Requirements   the engine's requirements.txt
-.PARAMETER WithLatex      also install MiKTeX (formulas: MathTex, Tex) and let it fetch missing packages by itself
+.PARAMETER Requirements   the engine's requirements.txt (needed unless -SkipPython or -CheckTex)
+.PARAMETER WithLatex      also install LaTeX (formulas: MathTex, Tex), or the packages Manim uses into the TeX found
 .PARAMETER SkipPython     only LaTeX
+.PARAMETER CheckTex       only print ok, missing, or packages (TeX present, Manim's packages not), and exit
 #>
 param(
-    [Parameter(Mandatory = $true)][string]$Requirements,
+    [string]$Requirements,
     [switch]$WithLatex,
-    [switch]$SkipPython
+    [switch]$SkipPython,
+    [switch]$CheckTex
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -41,7 +45,115 @@ function Refresh-Path {
     $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'User') + ';' + [Environment]::GetEnvironmentVariable('PATH', 'Machine')
 }
 
+# TinyTeX's own rule: %APPDATA%, unless its path has spaces or non-ASCII characters (TeX Live dislikes them)
+$TinyTeXParent = if ($env:APPDATA -match '^[!-~]+$') { $env:APPDATA } else { $env:ProgramData }
+$TinyTeX = Join-Path $TinyTeXParent 'TinyTeX'
+$TinyTeXBin = Join-Path $TinyTeX 'bin\windows'
+
+# Where TeX installations put their programs, TinyTeX first, as install_dependencies.sh does on the Mac
+# (the app's own PATH, in Tools.cs, puts the TeX installed for the whole PC first).
+$texDirs = @($TinyTeXBin, "$env:LOCALAPPDATA\Programs\MiKTeX\miktex\bin\x64", "$env:ProgramFiles\MiKTeX\miktex\bin\x64") +
+    (2031..2020 | ForEach-Object { "C:\texlive\$_\bin\windows" })
+$env:PATH = (@($texDirs | Where-Object { Test-Path $_ }) + @($env:PATH)) -join ';'
+
+# What manim's TeX templates use (its Chinese `ctex` template excepted): the same list as install_dependencies.sh.
+$TexPackages = @('latex-bin', 'dvisvgm', 'standalone', 'preview', 'babel-english', 'doublestroke', 'everysel',
+    'fundus-calligra', 'mathastext', 'physics', 'ragged2e', 'relsize', 'rsfs', 'setspace', 'tipa', 'wasy', 'wasysym',
+    'xcolor', 'xkeyval', 'cbfonts-fd', 'jknapltx', 'microtype', 'multitoc', 'prelim2e', 'count1to', 'frcursive',
+    'amsfonts', 'amsmath')
+
+function Find-Tool($name) { (Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+
+# MiKTeX's configuration tool, when the LaTeX found is MiKTeX's
+function Find-Initexmf {
+    $latex = Find-Tool 'latex'
+    if (-not $latex) { return $null }
+    $p = Join-Path (Split-Path $latex) 'initexmf.exe'
+    if (Test-Path $p) { return $p } else { return $null }
+}
+
+# ok, missing, or packages (TeX present, manim's packages not)
+function Test-Tex {
+    if (-not (Find-Tool 'latex')) { return 'missing' }
+    if (-not (Find-Tool 'dvisvgm')) { return 'packages' }
+    # MiKTeX fetches what a formula uses the first time it is needed, once it may do so without asking
+    $initexmf = Find-Initexmf
+    if ($initexmf -and ((& $initexmf --show-config-value '[MPM]AutoInstall' 2>$null) -join '').Trim() -eq '1') { return 'ok' }
+    $kpsewhich = Find-Tool 'kpsewhich'
+    if (-not $kpsewhich) { return 'packages' }
+    $files = @('standalone.cls', 'preview.sty', 'english.ldf', 'dsfont.sty', 'relsize.sty')
+    $found = @(& $kpsewhich @files 2>$null | Where-Object { $_ })
+    if ($found.Count -eq $files.Count) { return 'ok' } else { return 'packages' }
+}
+
+function Install-Tex {
+    if (-not (Test-Path (Join-Path $TinyTeXBin 'tlmgr.bat'))) {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("manimble-tinytex-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force $tmp | Out-Null
+        try {
+            # the newest TinyTeX: tlmgr only installs packages while its TeX Live year matches CTAN's
+            $rel = Invoke-RestMethod -Headers @{ Accept = 'application/vnd.github+json' } 'https://api.github.com/repos/rstudio/tinytex-releases/releases/latest'
+            $tag = $rel.tag_name
+            $name = "TinyTeX-1-windows-$tag.exe"
+            $asset = $rel.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+            if (-not $asset) { throw "The latest TinyTeX release ($tag) has no $name" }
+            $expected = "$($asset.digest)" -replace '^sha256:', ''
+            if (-not $expected) { throw "Could not get the checksum to verify TinyTeX $tag with" }
+            Step "Downloading LaTeX (TinyTeX $tag, about 75 MB)"
+            $exe = Join-Path $tmp $name
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $exe
+            # checked against the SHA-256 GitHub recorded for the release file before it is run
+            $got = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+            if ($got -ne $expected.ToLowerInvariant()) { throw "TinyTeX $tag failed its checksum (expected $expected, got $got)" }
+            Step "Unpacking LaTeX"
+            # a self-extracting archive: -y unpacks TinyTeX\ into the current folder without asking
+            Push-Location $tmp
+            try { & $exe -y | Out-Null; if ($LASTEXITCODE -ne 0) { throw "Unpacking TinyTeX failed (exit code $LASTEXITCODE)" } }
+            finally { Pop-Location }
+            if (Test-Path $TinyTeX) { Remove-Item -Recurse -Force $TinyTeX }
+            New-Item -ItemType Directory -Force $TinyTeXParent | Out-Null
+            Move-Item (Join-Path $tmp 'TinyTeX') $TinyTeX
+        }
+        finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+        $env:PATH = "$TinyTeXBin;$env:PATH"
+        & (Join-Path $TinyTeXBin 'tlmgr.bat') option repository ctan | Out-Null
+    }
+    Install-TexPackages
+}
+
+function Install-TexPackages {
+    $initexmf = Find-Initexmf
+    if ($initexmf) {
+        Step "Letting MiKTeX fetch the packages a formula needs without asking"
+        & $initexmf --set-config-value '[MPM]AutoInstall=1'
+    } else {
+        $tlmgr = Find-Tool 'tlmgr'
+        if (-not $tlmgr) { throw "No tlmgr found to add LaTeX packages with" }
+        $root = ((& (Find-Tool 'kpsewhich') -var-value TEXMFROOT) -join '').Trim()
+        Step "Adding the LaTeX packages manim uses"
+        $writable = $false
+        try { $probe = Join-Path $root "tlpkg\.manimble-write-test"; [IO.File]::WriteAllText($probe, ''); Remove-Item $probe; $writable = $true } catch {}
+        # tlmgr refuses to install packages once CTAN has a newer tlmgr than itself, so it updates itself first
+        if ($writable) {
+            & $tlmgr update --self
+            & $tlmgr install @TexPackages
+            if ($LASTEXITCODE -ne 0) { throw "tlmgr could not install the LaTeX packages (exit code $LASTEXITCODE)" }
+        } else {
+            # a TeX installed for all users lives in a folder only an administrator can change: Windows asks (UAC)
+            $cmd = "& '$tlmgr' update --self; & '$tlmgr' install $($TexPackages -join ' '); exit `$LASTEXITCODE"
+            $p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+            if ($p.ExitCode -ne 0) { throw "Adding LaTeX packages was cancelled or failed" }
+        }
+    }
+    if ((Test-Tex) -ne 'ok') { throw "LaTeX is still missing packages manim needs" }
+    Step "LaTeX ready: $(Find-Tool 'latex')"
+}
+
+if ($CheckTex) { Write-Output (Test-Tex); exit 0 }
+
 if (-not $SkipPython) {
+    if (-not $Requirements) { throw "-Requirements (the engine's requirements.txt) is needed to install Python" }
     if (-not (Test-Path $PyExe)) {
         Step "Creating the Python environment in $PyEnv"
         $base = Find-BasePython
@@ -77,18 +189,10 @@ if (-not $SkipPython) {
 }
 
 if ($WithLatex) {
-    $texDirs = @("$env:LOCALAPPDATA\Programs\MiKTeX\miktex\bin\x64", "$env:ProgramFiles\MiKTeX\miktex\bin\x64", "$env:APPDATA\TinyTeX\bin\windows")
-    $have = (Get-Command latex -ErrorAction SilentlyContinue) -or ($texDirs | Where-Object { Test-Path (Join-Path $_ 'latex.exe') })
-    if ($have) { Step "LaTeX is already installed" }
-    else {
-        Step "Installing MiKTeX for formulas (winget, about 150 MB)"
-        winget install --id MiKTeX.MiKTeX --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-        if ($LASTEXITCODE -ne 0) { throw "Installing MiKTeX failed (winget exit code $LASTEXITCODE)" }
-    }
-    $initexmf = $texDirs | ForEach-Object { Join-Path $_ 'initexmf.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($initexmf) {
-        Step "Letting MiKTeX fetch the packages a formula needs without asking"
-        & $initexmf --set-config-value '[MPM]AutoInstall=1'
+    switch (Test-Tex) {
+        'ok' { Step "LaTeX is already installed, with the packages Manim uses" }
+        'missing' { Install-Tex }
+        'packages' { Install-TexPackages }
     }
 }
 Step "Done"

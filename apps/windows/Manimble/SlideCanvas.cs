@@ -100,6 +100,9 @@ public sealed class SlideCanvas : Border
     int? editingOid;
     (int oid, int row, int col, string old)? editingCell;
     Placeholder? editingPlaceholder;
+    /// Start every new line with a bullet (content boxes, and text whose lines all have one).
+    bool editorBullets;
+    const string Bullet = "• ";
 
     string? drawTool;
     /// The draw tool in hand: line, arrow, darrow, rectangle, ellipse or pen (null: select and move).
@@ -111,6 +114,9 @@ public sealed class SlideCanvas : Border
     public Color PenColor { get; set; } = Colors.White;
 
     public bool IsEditingText => editor != null;
+    /// The box being typed into on the slide, and the object it edits (null for a table cell or a placeholder).
+    public TextBox? Editor => editor;
+    public int? EditingOid => editingCell == null ? editingOid : null;
     public bool IsDragging => mode is Mode.Move or Mode.Resize or Mode.Endpoint;
 
     public SlideCanvas()
@@ -809,6 +815,18 @@ public sealed class SlideCanvas : Border
 
     public void SelectAll() => Select(VisibleIds());
 
+    /// Tab / Shift+Tab: the next / previous object of the build on screen (in the order the slide draws them), with
+    /// its group; from nothing selected, the first / last.
+    public void SelectNext(int d)
+    {
+        var order = (Stop?.Visible.Select(v => (int)v[0]) ?? Enumerable.Empty<int>()).Distinct().ToList();
+        if (order.Count == 0) return;
+        var at = Selected.Select(o => order.IndexOf(o)).Where(i => i >= 0).ToList();
+        var next = at.Count == 0 ? (d > 0 ? 0 : order.Count - 1)
+                                 : (((d > 0 ? at.Max() : at.Min()) + d) % order.Count + order.Count) % order.Count;
+        Select(WithGroup(order[next]));
+    }
+
     // ---------------------------------------------------------------- mouse
 
     void OnDown(object sender, MouseButtonEventArgs e)
@@ -1154,17 +1172,21 @@ public sealed class SlideCanvas : Border
         OpenEditor(new Rect(r.X - 6, r.Y - 4, Math.Max(r.Width + 12, 160), Math.Max(r.Height + 8, fontPx * 1.6)), o.Value, fontPx,
                    o.Kind == "tex" ? "LaTeX · Enter applies · Shift+Enter new line · Esc cancels" : "Enter applies · Shift+Enter new line · Esc cancels",
                    o.Kind == "tex" || o.Kind == "table");
+        editorBullets = o.IsText && o.Kind != "tex" && o.Value.Length > 0 && o.Value.Split('\n').All(l => l.StartsWith(Bullet));
     }
 
     void BeginPlaceholderEdit(Placeholder ph)
     {
         CancelEdit();
         editingPlaceholder = ph;
-        OpenEditor(ph.Rect, "", Math.Clamp(ph.Size * 0.9, 14, 90), ph.Prompt + " · Enter applies · Esc cancels", false);
+        var body = ph.Role == "body";
+        OpenEditor(ph.Rect, body ? Bullet : "", Math.Clamp(ph.Size * 0.9, 14, 90),
+                   ph.Prompt + (body ? " · Enter applies · Shift+Enter new bullet · Esc cancels" : " · Enter applies · Esc cancels"), false, selectAll: !body);
+        editorBullets = body;
         DrawOverlay();
     }
 
-    void OpenEditor(Rect r, string text, double fontPx, string tip, bool mono)
+    void OpenEditor(Rect r, string text, double fontPx, string tip, bool mono, bool selectAll = true)
     {
         editor = new TextBox
         {
@@ -1178,7 +1200,12 @@ public sealed class SlideCanvas : Border
         Canvas.SetLeft(editor, r.X); Canvas.SetTop(editor, r.Y);
         editor.PreviewKeyDown += EditorKey;
         overlay.Children.Add(editor);
-        editor.Loaded += (_, _) => { editor?.Focus(); editor?.SelectAll(); };
+        editor.Loaded += (_, _) =>
+        {
+            if (editor == null) return;
+            editor.Focus();
+            if (selectAll) editor.SelectAll(); else editor.CaretIndex = editor.Text.Length;
+        };
     }
 
     /// A text box drawn only as a border around its text, so it keeps the dark look over the slide.
@@ -1193,6 +1220,15 @@ public sealed class SlideCanvas : Border
     {
         if (e.Key == Key.Escape) { CancelEdit(); Focus(); e.Handled = true; }
         else if (e.Key == Key.Enter && !Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) { CommitEdit(); Focus(); e.Handled = true; }
+        else if (e.Key == Key.Enter && editorBullets && editor != null)
+        {
+            // Shift+Enter: a new line that starts with its own bullet
+            var at = editor.SelectionStart;
+            editor.SelectedText = "\n" + Bullet;
+            editor.CaretIndex = at + 1 + Bullet.Length;
+            editor.SelectionLength = 0;
+            e.Handled = true;
+        }
         else if (e.Key == Key.Tab && editingCell != null) { CommitEdit(); Focus(); e.Handled = true; }
     }
 
@@ -1201,6 +1237,8 @@ public sealed class SlideCanvas : Border
         if (editor == null) return;
         var text = editor.Text;
         var oid = editingOid; var ph = editingPlaceholder; var cell = editingCell;
+        if (editorBullets)   // bullets left on empty lines are dropped
+            text = string.Join("\n", text.Split('\n').Where(l => l.Trim(' ', '•', '\t', '\r').Length > 0));
         CancelEdit();
         if (cell is { } c) { if (text != c.old) CellCommitted?.Invoke(c.oid, c.row, c.col, text); }
         else if (oid is int o && Scene?.Obj(o) is { } obj && text != obj.Value) TextCommitted?.Invoke(o, text);
@@ -1214,6 +1252,7 @@ public sealed class SlideCanvas : Border
         editor = null;
         editingOid = null;
         editingCell = null;
+        editorBullets = false;
         var hadPh = editingPlaceholder != null;
         editingPlaceholder = null;
         if (hadPh) DrawOverlay();

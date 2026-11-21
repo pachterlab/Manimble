@@ -12,15 +12,19 @@ namespace Manimble;
 /// Whatever is already on the PC is used as it is.
 public sealed class SetupWindow : Window
 {
-    public sealed record Status(string? Python, bool Latex)
+    /// Ok, Missing, or Packages: a TeX without the packages Manim uses (the Mac app's Setup.TeX).
+    public enum TeX { Ok, Missing, Packages }
+
+    public sealed record Status(string? Python, TeX Tex)
     {
+        public bool Latex => Tex == TeX.Ok;
         public bool Complete => Python != null && Latex;
     }
 
     static bool testUsed;
 
     /// Slow (it starts Pythons to see whether they import manim).
-    /// MANIMBLE_TEST_SETUP=python,tex[,install]: the first check reports those as missing (and presses Install).
+    /// MANIMBLE_TEST_SETUP=python,tex|packages[,install]: the first check reports those as missing (and presses Install).
     public static async Task<Status> Check()
     {
         var test = Environment.GetEnvironmentVariable("MANIMBLE_TEST_SETUP");
@@ -28,9 +32,34 @@ public sealed class SetupWindow : Window
         {
             testUsed = true;
             var parts = test.Split(',');
-            return new Status(parts.Contains("python") ? null : await Tools.FindPython(), !parts.Contains("tex") && Tools.HasLatex());
+            return new Status(parts.Contains("python") ? null : await Tools.FindPython(),
+                parts.Contains("tex") ? TeX.Missing : parts.Contains("packages") ? TeX.Packages : await CheckTeX());
         }
-        return new Status(await Tools.FindPython(), Tools.HasLatex());
+        var tex = CheckTeX();
+        return new Status(await Tools.FindPython(), await tex);
+    }
+
+    /// install_dependencies.ps1 -CheckTex; without the script (nothing to install with), only whether a LaTeX is there.
+    static async Task<TeX> CheckTeX()
+    {
+        var fallback = Tools.HasLatex() ? TeX.Ok : TeX.Missing;
+        if (Script is not { } script) return fallback;
+        try
+        {
+            var psi = new ProcessStartInfo("powershell.exe")
+            {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            };
+            foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-CheckTex" })
+                psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi)!;
+            var errors = p.StandardError.ReadToEndAsync();
+            var output = (await p.StandardOutput.ReadToEndAsync()).Trim();
+            await p.WaitForExitAsync();
+            await errors;
+            return output switch { "ok" => TeX.Ok, "missing" => TeX.Missing, "packages" => TeX.Packages, _ => fallback };
+        }
+        catch { return fallback; }
     }
 
     /// install_dependencies.ps1: next to Manimble.exe in a build, else in apps\windows of the checkout.
@@ -95,15 +124,18 @@ public sealed class SetupWindow : Window
         var body = new TextBlock
         {
             Text = "Manimble draws slides with Manim, which runs in Python and uses LaTeX for formulas. Ticked items are " +
-                   "downloaded and installed for you alone (no administrator rights); anything already on this PC is used as it is.",
+                   "downloaded and installed for you alone; anything already on this PC is used as it is.",
             TextWrapping = TextWrapping.Wrap, Opacity = 0.75, Margin = new Thickness(0, 0, 0, 16),
         };
         var pythonRow = Row(pythonBox, "Python with Manim", status.Python,
             $"Downloads about 150 MB; uses about 600 MB in {Path.Combine(Paths.Base, "python")}. " +
             "Python itself comes from winget when none is installed.");
-        var texRow = Row(texBox, "LaTeX (MiKTeX)", status.Latex ? "a LaTeX installation (MiKTeX, TinyTeX or TeX Live)" : null,
-            "Downloads about 150 MB with winget, installed for you alone. Only formulas need it; MiKTeX fetches the " +
-            "packages a formula uses the first time it is needed.");
+        var texOffer = status.Tex == TeX.Packages
+            ? "Your LaTeX lacks packages Manim uses (standalone, preview, dvisvgm, …); they will be added. " +
+              "A TeX installed for all users asks for administrator rights to add them."
+            : $"TinyTeX: downloads about 75 MB; uses about 270 MB in {Tools.TinyTeXHome}. Only formulas need it.";
+        var texRow = Row(texBox, status.Tex == TeX.Packages ? "LaTeX packages" : "LaTeX",
+            status.Latex ? "a LaTeX installation with the packages Manim uses" : null, texOffer);
 
         installButton.IsDefault = true;
         installButton.IsEnabled = !status.Complete && Script != null;

@@ -52,6 +52,9 @@ sys.stdout = sys.stderr
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
+from manimble import pilcompat  # noqa: E402
+
+pilcompat.install()          # pictures under Pillow 13 with manim 0.21
 
 from manim import config, Scene, Mobject, Text, MathTex, Tex, ImageMobject, Camera, ORIGIN  # noqa: E402
 from manim import Paragraph, BackgroundRectangle, VMobject, MarkupText, ManimColor, Group, SVGMobject  # noqa: E402

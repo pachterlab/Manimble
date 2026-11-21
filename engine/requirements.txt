@@ -4,6 +4,9 @@
 # x86_64; that is why av, moderngl and glcontext are older releases. pycairo and srt are built from source.
 
 # What Manimble uses directly
+# manim stays at 0.21.0 for manim-slides. manim 0.21 cannot draw pictures under Pillow 13 on its own:
+# manimble/pilcompat.py patches the one call (manim 0.22 fixed it upstream). Keep Pillow at 13+, which fixes CVEs
+# in 12.x; drop pilcompat once manim is 0.22 or later. tests/test_pilcompat.py checks the shim.
 manim==0.21.0
 manim-slides==5.7.0
 Pillow==13.0.0

@@ -58,15 +58,15 @@ What is in the repository:
 > Manim library, a terminal (ConPTY) for command-line tools, and PowerShell for its first-launch setup.
 >
 > **unvirtualizedResources**: on first launch Manimble's setup window, with the user's consent, creates a Python
-> environment in %LOCALAPPDATA%\Manimble and can install Python and MiKTeX (a LaTeX distribution) for the current user
-> with winget. These have to land in the real user profile, not a per-package copy: the user runs the same Python and
-> LaTeX from their own terminal and editors, MiKTeX installs packages into its own folders on demand, and the decks
+> environment in %LOCALAPPDATA%\Manimble and can install Python (with winget) and TinyTeX (a LaTeX distribution) for the current user
+> in %APPDATA%TinyTeX. These have to land in the real user profile, not a per-package copy: the user runs the same Python and
+> LaTeX from their own terminal and editors, TinyTeX installs packages into its own folder on demand, and the decks
 > the user writes import that Python environment. The app writes nothing outside the user's profile.
 
 ### Notes for certification (paste into Submission options)
 
 > Manimble makes presentation slides from Python code with the open-source Manim library. On first launch a setup
-> window asks to install Python with Manim (from PyPI, with pip) and optionally MiKTeX for formulas; the user can
+> window asks to install Python with Manim (from PyPI, with pip) and optionally TinyTeX for formulas (from GitHub, checked against its SHA-256); the user can
 > decline, and File > Install Dependencies… brings it back. Nothing is downloaded without the user choosing it.
 > Without Python installed the app opens and shows the setup window. To test it fully, accept the setup (a few
 > minutes), then File > Open Example Deck.

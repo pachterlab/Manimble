@@ -966,6 +966,7 @@ class Manimble:
                     info["textNote"] = t.note
             elif o["kind"] == "image":
                 info["image"] = os.path.basename(o["value"])
+                info["border"] = self.planner.border_of(o)
                 if o.get("path"):
                     info["imagePath"] = o["path"]
             else:
@@ -1296,6 +1297,9 @@ class Manimble:
                 elif op == "highlight":
                     label = "highlight" if req.get("color") else "remove highlight"
                     attempts = [(label, self.planner.plan_highlight(obj, req.get("color"), float(req.get("opacity", 0.6))))]
+                elif op == "border":
+                    label = "picture border" if req.get("color") else "remove border"
+                    attempts = [(label, self.planner.plan_border(obj, req.get("color"), float(req.get("width", 4))))]
                 elif op == "align":
                     label = "alignment"
                     attempts = [(label, self.planner.plan_align(obj, str(req["value"])))]

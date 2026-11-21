@@ -199,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Copy", #selector(NSText.copy(_:)), "c"),
             item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
+            item("Duplicate", #selector(MainController.duplicatePressed), "d"),
             .separator(),
             item("Find…", #selector(MainController.showFind(_:)), "f"),
             item("Find and Replace…", #selector(MainController.showFindReplace(_:)), "f", [.command, .option]),
@@ -261,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add("Slide", [
             newSlideItem,
             item("New Build", #selector(MainController.newBuild), "", []),
-            item("Duplicate Slide", #selector(MainController.duplicateSlide), "d"),
+            item("Duplicate Slide", #selector(MainController.duplicateSlide), "d", [.command, .shift]),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
             item("Hide Slide", #selector(MainController.toggleHideSlide), "h", [.command, .shift]),
             item("Restore Slide to Show", #selector(MainController.restoreSlide), "", []),
@@ -271,6 +272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .separator(),
             item("Previous Slide", #selector(MainController.prevSlide), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.command]),
             item("Next Slide", #selector(MainController.nextSlide), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.command]),
+            item("First Slide", #selector(MainController.firstSlide), "", []),      // Home on the slide
+            item("Last Slide", #selector(MainController.lastSlide), "", []),        // End on the slide
             item("Previous Build", #selector(MainController.prevStop), "[", [.command]),
             item("Next Build", #selector(MainController.nextStop), "]", [.command]),
         ])
@@ -303,8 +306,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Superscript", #selector(MainController.formatSuperscript), "+", [.command, .shift]),
             item("Subscript", #selector(MainController.formatSubscript), "_", [.command, .shift]),
             .separator(),
-            item("Bigger", #selector(MainController.formatBigger), "=", [.command, .option]),
-            item("Smaller", #selector(MainController.formatSmaller), "-", [.command, .option]),
+            item("Bigger", #selector(MainController.formatBigger), ">", [.command, .shift]),      // as in PowerPoint
+            item("Smaller", #selector(MainController.formatSmaller), "<", [.command, .shift]),
             highlightItem,
             item("Hyperlink…", #selector(MainController.hyperlinkPressed), "k"),
             item("Clear Formatting", #selector(MainController.clearFormatting), "", []),
@@ -327,12 +330,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Apply Dark Mode to Deck…", #selector(MainController.applyDarkMode), "", []),
             item("Apply Inverted Colors to Deck…", #selector(MainController.applyInvertColors), "", []),
         ])
+        let alignSlide = NSMenu(title: "Align to Slide")
+        for (i, a) in MainActor.assumeIsolated({ MainController.alignSlideItems }).enumerated() {
+            if i == 3 { alignSlide.addItem(.separator()) }
+            alignSlide.addItem(item(a.title, a.action, "", []))
+        }
+        let alignSlideItem = NSMenuItem(title: "Align to Slide", action: nil, keyEquivalent: ""); alignSlideItem.submenu = alignSlide
         add("Arrange", MainActor.assumeIsolated { MainController.arrangeItems }.map { item($0.title, $0.action, $0.key, $0.mods) } + [
             .separator(),
             item("Group", #selector(MainController.groupObjects), "g"),
             item("Ungroup", #selector(MainController.ungroupObjects), "g", [.command, .shift]),
             .separator(),
             item("Apply Move to All Builds", #selector(MainController.spreadLastMove), "a", [.command, .shift]),
+            .separator(),
+            alignSlideItem,
         ])
         add("View", [
             item("Show Objects", #selector(MainController.toggleObjects), "j", [.command, .option]),

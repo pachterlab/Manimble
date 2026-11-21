@@ -9,7 +9,7 @@ what is done and what comes next.
 ## Install a release
 
 Install **Manimble** from the Microsoft Store. The Store installs it for your user account and keeps it up to date.
-On first launch a setup window offers to install Python with Manim (and MiKTeX for formulas) for your user account;
+On first launch a setup window offers to install Python with Manim (and TinyTeX for formulas) for your user account;
 File > Install Dependencies… brings it back. Uninstalling it leaves your Python environment, settings and decks.
 Maintainers: [STORE.md](STORE.md) explains how a release gets to the Store.
 
@@ -17,7 +17,7 @@ When a release is code-signed, its GitHub Release also carries an installer and 
 [Manimble-Windows-Setup.exe](https://github.com/pachterlab/Manimble/releases/latest/download/Manimble-Windows-Setup.exe)
 and run it. It installs Manimble for your user account only (no administrator rights) in
 `%LOCALAPPDATA%\Programs\Manimble`, with a Start menu shortcut, and makes `.manimble` packages open in Manimble. It
-needs no .NET install. On first launch a setup window offers to install Python with Manim (and MiKTeX for formulas)
+needs no .NET install. On first launch a setup window offers to install Python with Manim (and TinyTeX for formulas)
 for your user account; File > Install Dependencies… brings it back. Running a newer installer upgrades in place;
 Settings > Apps uninstalls it (your Python environment, settings and decks stay).
 
@@ -38,7 +38,8 @@ powershell -ExecutionPolicy Bypass -File apps\windows\install_manimble.ps1 -With
 
 The script:
 - creates a Python environment with Manim in `%LOCALAPPDATA%\Manimble\python` (using uv when it is installed);
-- with `-WithLatex`, installs MiKTeX for formulas and lets it fetch missing LaTeX packages on its own;
+- with `-WithLatex`, installs TinyTeX (in `%APPDATA%TinyTeX`) and the LaTeX packages Manim uses, or with a TeX
+  already installed (MiKTeX, TeX Live), just the packages (MiKTeX is set to fetch them on its own);
 - builds the app into `%LOCALAPPDATA%\Programs\Manimble` and adds a Start menu shortcut.
 
 No administrator rights are needed. Building needs the .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`).
@@ -61,7 +62,7 @@ the zip and installer to a tagged release. The Store package is never signed her
 ```powershell
 cd apps\windows\Manimble
 dotnet build
-.\bin\Debug\net10.0-windows\Manimble.exe ..\..\..\examples\hello\deck
+.\bin\Debug\net10.0-windows10.0.19041.0\Manimble.exe ..\..\..\examples\hello\deck
 ```
 
 A build inside the checkout runs the checkout's `engine` folder directly, so engine changes need no rebuild. A
@@ -77,6 +78,8 @@ both, as on the Mac.
 | `SetupWindow.cs` | first-launch setup: offers to install a missing Python or LaTeX with `install_dependencies.ps1` (later: File > Install Dependencies…) |
 | `Workspace.cs` | the working copy (a port of `apps/macos/Sources/Manimble/Workspace.swift`; directory junctions instead of symlinks) |
 | `MainWindow.xaml(.cs)` | navigator, canvas, builds, notes, inspector, source pane, menus and shortcuts |
+| `FormatRow.cs` | the toolbar's Theme, Zoom and Dark Mode (view only), and the formatting row laid out as the Mac's format bar; `MANIMBLE_TEST_FORMAT=<dir>` checks it headlessly |
+| `Toolbar.cs` | the rest of the Mac's toolbar: Expand / Collapse All (builds nested under every slide in the navigator), the Shape menu with the draw tools and pen, and Share (a PDF to the Windows share sheet, and the exports) |
 | `Ruler.cs` | the rulers along the canvas, in manim units; drag a guide off them onto the slide |
 | `TableEditing.cs` | table cells: typed into on the slide, or in the inspector's grid (rows and columns added or removed there) |
 | `BioCartoon.cs` | the BioCartoon icon search panel (the `biocartoon` command line) and inserting its icons |

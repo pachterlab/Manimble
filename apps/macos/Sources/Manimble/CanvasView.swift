@@ -315,6 +315,9 @@ final class CanvasView: MTKView {
     // callbacks
     var onSelect: ((Int?) -> Void)?
     var onMove: ((Int, Double, Double) -> Void)?
+    /// Tab / ⇧Tab: select the next (+1) / previous (-1) object; Home / End: the first (true) / last slide.
+    var onTab: ((Int) -> Void)?
+    var onHomeEnd: ((Bool) -> Void)?
     var onResize: ((Int, Double) -> Void)?
     /// A text box's side was dragged: its new width (frame px) and the side ("left" / "right") that moved.
     var onWrap: ((Int, Double, String) -> Void)?
@@ -1556,6 +1559,10 @@ final class CanvasView: MTKView {
     override func keyDown(with event: NSEvent) {
         let n: Double = event.modifierFlags.contains(.shift) ? 10 : 1
         if event.keyCode == 53, drawTool != nil { drawTool = nil; drawStart = nil; drawBand = nil; penPoints = []; anchorHost = nil; snapAnchor = nil; return }
+        let plain = event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+        if event.keyCode == 48, plain { onTab?(event.modifierFlags.contains(.shift) ? -1 : 1); return }   // ⇥ / ⇧⇥
+        if event.keyCode == 115, plain { onHomeEnd?(true); return }                                       // Home
+        if event.keyCode == 119, plain { onHomeEnd?(false); return }                                      // End
         guard let s = selection else { super.keyDown(with: event); return }
         let all = selectedIDs
         switch event.keyCode {

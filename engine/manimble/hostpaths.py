@@ -19,11 +19,12 @@ def tex_dirs() -> list[str]:
         local = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
         roaming = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
         program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+        # a TeX the user installed (MiKTeX, TeX Live) before the TinyTeX setup installs, as on the Mac (Tools.cs)
         dirs = [os.path.join(local, "Programs", "MiKTeX", "miktex", "bin", "x64"),
-                os.path.join(program_files, "MiKTeX", "miktex", "bin", "x64"),
-                os.path.join(roaming, "TinyTeX", "bin", "windows"),
-                os.path.join(roaming, "TinyTeX", "bin", "win32")]
+                os.path.join(program_files, "MiKTeX", "miktex", "bin", "x64")]
         dirs += [rf"C:\texlive\{y}\bin\windows" for y in range(2031, 2019, -1)]
+        dirs += [os.path.join(parent, "TinyTeX", "bin", b) for parent in (roaming, program_data) for b in ("windows", "win32")]
         return dirs
     return ["/Library/TeX/texbin", str(Path.home() / "Library/TinyTeX/bin/universal-darwin"),
             "/opt/homebrew/bin", "/usr/local/bin"]

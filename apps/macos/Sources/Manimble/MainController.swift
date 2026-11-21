@@ -253,6 +253,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
         }
         canvas.onNudge = { [weak self] oid, dx, dy in self?.nudgeObject(oid, dx, dy) }
+        canvas.onTab = { [weak self] d in self?.selectNextObject(d) }
+        canvas.onHomeEnd = { [weak self] first in self?.jumpToSlide(first: first) }
         stepsBar.orientation = .horizontal; stepsBar.spacing = 8
         stepsBar.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 8, right: 12)
         let stepsScroll = NSScrollView(); stepsScroll.documentView = stepsBar
@@ -2156,6 +2158,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             for v in tableEditor(o, width: width) { inspector.addArrangedSubview(v) }
         } else if o.kind == "image" {
             inspector.addArrangedSubview(label("File")); inspector.addArrangedSubview(NSTextField(labelWithString: o.image ?? ""))
+            borderRow(o)
         } else if o.kind == "drawing" {
             let n = NSTextField(wrappingLabelWithString: "\(o.value.capitalized) made by one line of code, kept together: drag to move it, "
                                 + "drag a corner to resize it. Change anything else in the source.")
@@ -2170,7 +2173,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 n.textColor = .secondaryLabelColor; width(n); inspector.addArrangedSubview(n)
             }
         }
-        if let b = canvas.stop?.box(of: sel) { geometryRows(b, o) }
+        if let b = canvas.stop?.box(of: sel) { geometryRows(b, o); alignOnSlideRow() }
         if o.siblings > 1 {
             let n = NSTextField(wrappingLabelWithString: "Created in a loop/helper: \(o.siblings) objects share this source line.")
             n.textColor = .systemOrange; width(n); inspector.addArrangedSubview(n)
@@ -3358,6 +3361,10 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return sceneName != nil && !selectedSlideIsUnused && player == nil
         case #selector(newSlide), #selector(duplicateSlide), #selector(moveSlideUp), #selector(moveSlideDown):
             return sceneName != nil && !selectedSlideIsUnused && player == nil
+        case #selector(duplicatePressed):        // the selected objects, or the slide when nothing is selected
+            return sceneName != nil && player == nil && (!canvas.selectedIDs.isEmpty || !selectedSlideIsUnused)
+        case #selector(firstSlide), #selector(lastSlide):
+            return state?.scenes.isEmpty == false && player == nil
         case #selector(toggleExpandAllBuilds):
             item.title = buildsExpandedAll ? "Collapse All Builds" : "Expand All Builds"
             return navigatorScenes.isEmpty == false && player == nil

@@ -23,6 +23,8 @@ public sealed class SlideItem : INotifyPropertyChanged
     int number; string? thumbPath; string badge = ""; bool hidden; bool current; bool error;
     public int Number { get => number; set { number = value; On(nameof(Number)); } }
     public BitmapSource? Thumb => Images.Load(thumbPath, 320);
+    /// The view changed (dark mode): the picture is loaded again.
+    public void RefreshThumb() => On(nameof(Thumb));
     public double ThumbHeight => 112;
     public string Badge { get => badge; set { if (badge != value) { badge = value; On(nameof(Badge)); On(nameof(BadgeVisibility)); } } }
     public Visibility BadgeVisibility => badge.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -44,6 +46,51 @@ public sealed class SlideItem : INotifyPropertyChanged
             _ => s.Stops > 1 ? $"{s.Stops} builds" : "",
         };
     }
+
+    /// The builds listed under the slide (Expand All); empty when they are folded away.
+    public IReadOnlyList<BuildThumb> Builds { get; private set; } = Array.Empty<BuildThumb>();
+    public Visibility BuildsVisibility => Builds.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// Lists the builds `paths` under the slide, `active` marked (-1: none); rebuilt only when the pictures change.
+    public void SetBuilds(IReadOnlyList<string> paths, int active)
+    {
+        if (!Builds.Select(b => b.Path).SequenceEqual(paths))
+        {
+            Builds = paths.Select((p, i) => new BuildThumb(Name, i, paths.Count, p)).ToList();
+            On(nameof(Builds)); On(nameof(BuildsVisibility));
+        }
+        foreach (var b in Builds) b.Active = b.Index == active;
+    }
+
+    /// The view changed (dark mode): the slide and its builds are loaded again.
+    public void RefreshAll() { RefreshThumb(); foreach (var b in Builds) b.RefreshThumb(); }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+    void On(string p) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(p));
+}
+
+/// One build nested under its slide in the navigator (Expand All): a smaller picture with its number.
+public sealed class BuildThumb : INotifyPropertyChanged
+{
+    public BuildThumb(string scene, int index, int count, string path) { Scene = scene; Index = index; Count = count; Path = path; }
+    public string Scene { get; }
+    public int Index { get; }
+    public int Count { get; }
+    public string Path { get; }
+    public string Number => (Index + 1).ToString();
+    public string Tip => $"Build {Index + 1} of {Count}";
+    public BitmapSource? Thumb => Images.Load(Path, 240);
+    public void RefreshThumb() => On(nameof(Thumb));
+    public double ThumbHeight => 105;
+    bool active;
+    public bool Active
+    {
+        get => active;
+        set { if (active != value) { active = value; On(nameof(Ring)); On(nameof(RingThickness)); On(nameof(ImageOpacity)); } }
+    }
+    public Brush Ring => active ? (Brush)Application.Current.Resources["SelectionBrush"] : new SolidColorBrush(Color.FromArgb(0x40, 0x80, 0x80, 0x80));
+    public Thickness RingThickness => new(active ? 2 : 1);
+    public double ImageOpacity => active ? 1 : 0.72;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     void On(string p) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(p));
@@ -75,6 +122,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        BuildFormatSubmenus();
         CanvasHost.Content = canvas;
         SlideList.ItemsSource = slides;
         SourceEditor.SyntaxHighlighting = HighlightingManager.Instance.GetDefinition("Python");
@@ -102,12 +150,13 @@ public partial class MainWindow : Window
             ["points"] = new JsonArray(pts.Select(p => (JsonNode)new JsonArray(Math.Round(p.X, 1), Math.Round(p.Y, 1))).ToArray()),
             ["color"] = penColor, ["width"] = 6,
         });
-        canvas.DrawToolChanged += () => DrawButtonText.Text = canvas.DrawTool switch
-        {
-            null => "Draw ▾", "pen" => "Pen (Esc ends)", "darrow" => "Drawing: double arrow", var t => "Drawing: " + t,
-        };
+        canvas.DrawToolChanged += UpdateShapeButtonText;
         BuildPenColorMenu();
         BuildThemeMenu();
+        SetUpZoomCombo();
+        RestoreColorView();
+        UpdateFormatRow();
+        PanelHost.IsVisibleChanged += (_, _) => SyncPanelButtons();
         SyncPlayMenu();
         canvas.ContextMenuOpening += CanvasContextMenu;
         canvas.ContextMenu = new ContextMenu();          // an empty menu, so ContextMenuOpening fires
@@ -123,6 +172,13 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         var s = Settings.Current;
         if (s.WindowWidth is double w && s.WindowHeight is double h) { Width = w; Height = h; }
+        // Fit the screen: centered, a window larger than the work area puts its title bar off the top edge, where
+        // it can't be dragged (1440×900 doesn't fit a 1080p laptop at 150% scaling).
+        var work = SystemParameters.WorkArea;
+        MinWidth = Math.Min(MinWidth, work.Width);
+        MinHeight = Math.Min(MinHeight, work.Height);
+        Width = Math.Min(Width, work.Width);
+        Height = Math.Min(Height, work.Height);
         if (s.WindowMaximized) WindowState = WindowState.Maximized;
         ShowSourceItem.IsChecked = s.ShowSource;
         ApplySourceVisibility();
@@ -136,6 +192,7 @@ public partial class MainWindow : Window
     {
         Workspace.CleanStale();
         pendingDeck = deck;
+        if (Environment.GetEnvironmentVariable("MANIMBLE_TEST_FORMAT") is { Length: > 0 } formatDir) _ = FormatTest(formatDir);
         await StartWithSetup(firstLaunch: true);
     }
 
@@ -206,7 +263,7 @@ public partial class MainWindow : Window
         {
             engine.Start(python);
             Toast("Engine started · " + python);
-            if (!Tools.HasLatex()) Toast("No LaTeX found: slides with formulas (MathTex, Tex) will not render until one is installed (MiKTeX or TinyTeX)", error: true);
+            if (!Tools.HasLatex()) Toast("No LaTeX found: slides with formulas (MathTex, Tex) will not render until one is installed (File ▸ Install Dependencies…)", error: true);
         }
         catch (Exception e)
         {
@@ -306,6 +363,8 @@ public partial class MainWindow : Window
         AltTextBox.Text = "";
         canvas.SetScene(null, 0);
         WelcomePanel.Visibility = Visibility.Collapsed;
+        FindGroup.IsEnabled = true;
+        SyncPanelButtons();
         canvas.ShowMessage("Rendering…");
         Settings.Current.AddRecent(ws.Original);
         terminal?.Start(ws.Work, ws.Original, engine.Python);         // a shell in the new deck's working copy
@@ -568,6 +627,7 @@ public partial class MainWindow : Window
             SlideList.SelectedItem = slides.FirstOrDefault(s => s.Name == sceneName);
             suppressList = false;
         }
+        ExpandedBuildsAfterReload();
         UpdateTitle();
         // the slide on screen is gone (an agent renamed it): show the one now in its place
         if (sceneName != null && busy == 0 && queuedEdits == 0 && !rows.Any(r => r.Name == sceneName))
@@ -633,6 +693,7 @@ public partial class MainWindow : Window
         if (!AltTextBox.IsKeyboardFocusWithin) AltTextBox.Text = sc.AltText ?? "";
         ShowSource(sc, null);
         RebuildBuilds();
+        RefreshNavigatorBuilds();
         RebuildInspector();
         ScriptPageChanged();
         FeedbackPageChanged();
@@ -680,6 +741,7 @@ public partial class MainWindow : Window
         stopIndex = Math.Clamp(i, 0, scene.Stops.Count - 1);
         canvas.SetStop(stopIndex);
         foreach (var (b, k) in BuildStrip.Items.OfType<ToggleButton>().Select((b, k) => (b, k))) b.IsChecked = k == stopIndex;
+        RefreshNavigatorBuilds();
         ScriptPageChanged();
         FeedbackPageChanged();
     }
@@ -885,6 +947,16 @@ public partial class MainWindow : Window
     }
 
     void Delete_Click(object sender, RoutedEventArgs e) => DeleteSelection();
+    void Duplicate_Click(object sender, RoutedEventArgs e) => DuplicateSelection();
+    void FirstSlide_Click(object sender, RoutedEventArgs e) => _ = StepSlide(-slides.Count);
+    void LastSlide_Click(object sender, RoutedEventArgs e) => _ = StepSlide(slides.Count);
+
+    /// Text alignment from the keyboard (Ctrl+L / Ctrl+E / Ctrl+R, as in PowerPoint), for one selected text.
+    void AlignText(string v)
+    {
+        if (Single is not int s || SelectedObj is not { Kind: "text" }) return;
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "align", ["value"] = v }));
+    }
     void Cut_Click(object sender, RoutedEventArgs e) => CutSelection();
     void Copy_Click(object sender, RoutedEventArgs e) => CopySelection();
     void Paste_Click(object sender, RoutedEventArgs e) => PasteOnSlide();
@@ -1011,22 +1083,25 @@ public partial class MainWindow : Window
         suppressInspector = true;
         try
         {
+            UpdateFormatRow();
             if (scene == null || sel.Count == 0)
             {
                 SelTitle.Text = "Nothing selected";
                 SelDetail.Text = "Click an object on the slide. Drag to move it, drag a corner to resize it, double-click text to retype it, Delete removes it.";
                 SelFields.Visibility = Visibility.Collapsed;
                 ArrangeBar.Visibility = Visibility.Collapsed;
+                SlideAlignBar.Visibility = Visibility.Collapsed;
                 HideTableEditor();
                 return;
             }
             ArrangeBar.Visibility = Visibility.Visible;
+            SlideAlignBar.Visibility = Visibility.Visible;
+            BorderFields.Visibility = Visibility.Collapsed;
             if (sel.Count > 1)
             {
                 SelTitle.Text = $"{sel.Count} objects";
                 SelDetail.Text = "Drag or use the arrow keys to move them together; Ctrl+G groups them.";
                 SelFields.Visibility = Visibility.Visible;
-                TextFormat.Visibility = Visibility.Collapsed;
                 GeometryFields.Visibility = Visibility.Collapsed;
                 HideTableEditor();
                 ColorBox.Text = "";
@@ -1049,31 +1124,15 @@ public partial class MainWindow : Window
             SelDetail.Text = string.Join(" · ", details);
             SelFields.Visibility = Visibility.Visible;
             GeometryFields.Visibility = Visibility.Visible;
-            TextFormat.Visibility = o.IsText ? Visibility.Visible : Visibility.Collapsed;
             if (o.Kind == "table") ShowTableEditor(sel[0], o); else HideTableEditor();
-            if (o.IsText)
-            {
-                if (!fontsLoaded)
-                {
-                    FontCombo.ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(n => n).ToList();
-                    fontsLoaded = true;
-                }
-                FontCombo.IsEnabled = o.Kind == "text";
-                FontCombo.Text = o.Font ?? scene.Font ?? "";
-                SizeBox.Text = o.FontSize is double fs ? fs.ToString("0.#") : "";
-                BoldButton.IsChecked = string.Equals(o.Weight, "BOLD", StringComparison.OrdinalIgnoreCase);
-                ItalicButton.IsChecked = string.Equals(o.Slant, "ITALIC", StringComparison.OrdinalIgnoreCase);
-                BoldButton.IsEnabled = ItalicButton.IsEnabled = o.Kind == "text";
-                UnderlineButton.IsChecked = o.Format?.Underline == true;
-                StrikeButton.IsChecked = o.Format?.Strike == true;
-                var align = o.Format?.Align ?? "left";
-                AlignLeftButton.IsChecked = align == "left";
-                AlignCenterButton.IsChecked = align == "center";
-                AlignRightButton.IsChecked = align == "right";
-                AlignLeftButton.IsEnabled = AlignCenterButton.IsEnabled = AlignRightButton.IsEnabled = o.Kind == "text";
-            }
             ColorBox.Text = o.Color ?? "";
             ColorSwatchFill.Background = o.Color != null && TryColor(o.Color) is Color c ? new SolidColorBrush(c) : Brushes.Transparent;
+            if (o.Kind == "image")
+            {
+                BorderFields.Visibility = Visibility.Visible;
+                BorderBox.Text = o.Border ?? "";
+                BorderSwatchFill.Background = o.Border != null && TryColor(o.Border) is Color bc ? new SolidColorBrush(bc) : Brushes.Transparent;
+            }
             if (canvas.Stop?.Box(sel[0]) is Rect b)
             {
                 XBox.Text = (b.X + b.Width / 2).ToString("0");
@@ -1138,13 +1197,75 @@ public partial class MainWindow : Window
         ("Purple", "#9A72AC"), ("Pink", "#D147BD"),
     };
 
-    void ColorSwatch_Click(object sender, RoutedEventArgs e)
+    void ColorSwatch_Click(object sender, RoutedEventArgs e) => ColorDropDown(ColorSwatch);
+
+    /// A picture's border: a frame in `hex` drawn around it (null or empty removes it).
+    void ApplyBorder(string? hex)
+    {
+        hex = hex?.Trim();
+        if (string.IsNullOrEmpty(hex)) hex = null;
+        else
+        {
+            if (!hex.StartsWith('#')) hex = "#" + hex;
+            if (hex.Length != 7 || TryColor(hex) == null) { Toast("A colour is #RRGGBB", error: true); return; }
+            hex = hex.ToUpperInvariant();
+        }
+        var ids = canvas.Selected.Where(i => scene?.Obj(i)?.Kind == "image").ToList();
+        if (ids.Count == 0) return;
+        JsonObject Req(int oid)
+        {
+            var r = new JsonObject { ["oid"] = oid, ["op"] = "border" };
+            if (hex != null) r["color"] = hex;
+            return r;
+        }
+        if (ids.Count == 1) { Submit(() => RunEdit(Req(ids[0]))); return; }
+        Submit(() => AsOneUndoStep("Border", async () => { foreach (var oid in ids) await RunEdit(Req(oid), reload: oid == ids[^1]); }));
+    }
+
+    void BorderBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter || canvas.Selected.Count == 0) return;
+        ApplyBorder(BorderBox.Text);
+        canvas.Focus();
+        e.Handled = true;
+    }
+
+    void BorderSwatch_Click(object sender, RoutedEventArgs e)
     {
         if (canvas.Selected.Count == 0) return;
-        var items = Palette.Select(p => (p.name, (string?)p.hex, (RoutedEventHandler)((_, _) => ApplyColor(p.hex)))).ToList();
+        var items = Palette.Select(p => (p.name, (string?)p.hex, (RoutedEventHandler)((_, _) => ApplyBorder(p.hex)))).ToList();
         items.Add(("-", null, (_, _) => { }));
-        items.Add(("Other (type #RRGGBB)…", null, (_, _) => { ColorBox.Focus(); ColorBox.SelectAll(); }));
-        DropDown(ColorSwatch, items.ToArray());
+        items.Add(("No border", null, (_, _) => ApplyBorder(null)));
+        items.Add(("Other (type #RRGGBB)…", null, (_, _) => { BorderBox.Focus(); BorderBox.SelectAll(); }));
+        DropDown(BorderSwatch, items.ToArray());
+    }
+
+    void AlignOnSlide_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is string how) AlignOnSlide(how);
+    }
+
+    /// The selection, as one block, to an edge or the middle of the slide (PowerPoint's Align ▸ Align to Slide).
+    void AlignOnSlide(string how)
+    {
+        var ids = canvas.Selected.ToList();
+        var boxes = ids.Select(canvas.BoxOf).OfType<Rect>().ToList();
+        if (boxes.Count == 0) return;
+        var u = boxes.Aggregate(Rect.Union);
+        var (fw, fh) = (canvas.FrameSize.Width, canvas.FrameSize.Height);
+        double dx = 0, dy = 0;
+        switch (how)
+        {
+            case "left": dx = -u.Left; break;
+            case "hcenter": dx = fw / 2 - (u.Left + u.Width / 2); break;
+            case "right": dx = fw - u.Right; break;
+            case "top": dy = -u.Top; break;
+            case "vcenter": dy = fh / 2 - (u.Top + u.Height / 2); break;
+            case "bottom": dy = fh - u.Bottom; break;
+        }
+        if (Math.Abs(dx) < 0.5 && Math.Abs(dy) < 0.5) { Toast("Already there"); return; }
+        canvas.Nudge(dx, dy);                       // shown at once; the render follows
+        OnMoveCommitted(ids, dx, dy);
     }
 
     void CommitStyle(string? font = null, string? weight = null, string? slant = null)
@@ -1212,18 +1333,29 @@ public partial class MainWindow : Window
     void Underline_Click(object sender, RoutedEventArgs e) => Decorate("underline");
     void Strike_Click(object sender, RoutedEventArgs e) => Decorate("strike");
 
+    // the choices behind the row's Highlight, Line Spacing and Columns buttons and the Format menu's submenus
+    static readonly (string name, string hex)[] HighlightColors =
+        { ("Yellow", "#FFD400"), ("Green", "#34C759"), ("Blue", "#4D7CFF"), ("Pink", "#FF5FA2"), ("Orange", "#FF9A2E") };
+    static readonly (string name, double value)[] LineSpacings =
+        { ("1.0 (single)", 1.0), ("1.15", 1.15), ("1.5", 1.5), ("2.0 (double)", 2.0), ("2.5", 2.5), ("3.0", 3.0) };
+    static readonly (string name, int n)[] ColumnCounts =
+        { ("One column", 1), ("Two columns", 2), ("Three columns", 3), ("Four columns", 4) };
+
     void Highlight_Click(object sender, RoutedEventArgs e)
     {
+        if (Single is null || SelectedObj is not { IsText: true }) return;
+        var items = HighlightColors.Select(c => (c.name, (string?)c.hex, (RoutedEventHandler)((_, _) => SetHighlight(c.hex)))).ToList();
+        items.Add(("-", null, (_, _) => { }));
+        items.Add(("No highlight", null, (_, _) => SetHighlight(null)));
+        DropDown(HighlightButton, items.ToArray());
+    }
+
+    void SetHighlight(string? hex)
+    {
         if (Single is not int s || SelectedObj is not { IsText: true }) return;
-        void Set(string? hex)
-        {
-            var req = new JsonObject { ["oid"] = s, ["op"] = "highlight", ["opacity"] = 0.6 };
-            if (hex != null) req["color"] = hex;
-            Submit(() => RunEdit(req));
-        }
-        DropDown(HighlightButton, ("Yellow", "#FFD400", (_, _) => Set("#FFD400")), ("Green", "#34C759", (_, _) => Set("#34C759")),
-            ("Blue", "#4D7CFF", (_, _) => Set("#4D7CFF")), ("Pink", "#FF5FA2", (_, _) => Set("#FF5FA2")),
-            ("Orange", "#FF9A2E", (_, _) => Set("#FF9A2E")), ("-", null, (_, _) => { }), ("No highlight", null, (_, _) => Set(null)));
+        var req = new JsonObject { ["oid"] = s, ["op"] = "highlight", ["opacity"] = 0.6 };
+        if (hex != null) req["color"] = hex;
+        Submit(() => RunEdit(req));
     }
 
     void Align_Click(object sender, RoutedEventArgs e)
@@ -1234,11 +1366,41 @@ public partial class MainWindow : Window
 
     void Spacing_Click(object sender, RoutedEventArgs e)
     {
+        if (Single is null || SelectedObj is not { Kind: "text" }) return;
+        DropDown((Button)sender, LineSpacings.Select(l => (l.name, (string?)null, (RoutedEventHandler)((_, _) => SetSpacing(l.value)))).ToArray());
+    }
+
+    void SetSpacing(double v)
+    {
         if (Single is not int s || SelectedObj is not { Kind: "text" }) return;
         // Manim's line_spacing is relative to the font size with 0.3 as single; 1.0 is single here, as in PowerPoint
-        void Set(double v) => Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "spacing", ["value"] = Math.Max(-0.6, v - 0.7) }));
-        DropDown((Button)sender, ("1.0 (single)", null, (_, _) => Set(1.0)), ("1.15", null, (_, _) => Set(1.15)), ("1.5", null, (_, _) => Set(1.5)),
-            ("2.0 (double)", null, (_, _) => Set(2.0)), ("2.5", null, (_, _) => Set(2.5)), ("3.0", null, (_, _) => Set(3.0)));
+        Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "spacing", ["value"] = Math.Max(-0.6, v - 0.7) }));
+    }
+
+    /// The Format menu greys out what the selection can't take, as the row does.
+    void FormatMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        if (ReferenceEquals(e.OriginalSource, FormatMenu)) UpdateFormatRow();
+    }
+
+    /// The Format menu's Highlight, Line Spacing and Columns submenus (built once, at startup).
+    void BuildFormatSubmenus()
+    {
+        void Fill(MenuItem menu, IEnumerable<(string name, Action act)> items)
+        {
+            menu.Items.Clear();
+            foreach (var (name, act) in items)
+            {
+                if (name == "-") { menu.Items.Add(new Separator()); continue; }
+                var mi = new MenuItem { Header = name };
+                mi.Click += (_, _) => act();
+                menu.Items.Add(mi);
+            }
+        }
+        Fill(HighlightMenu, HighlightColors.Select(c => (c.name, (Action)(() => SetHighlight(c.hex))))
+            .Append(("-", () => { })).Append(("No Highlight", () => SetHighlight(null))));
+        Fill(SpacingMenu, LineSpacings.Select(l => (l.name, (Action)(() => SetSpacing(l.value)))));
+        Fill(ColumnsMenu, ColumnCounts.Select(c => (c.name, (Action)(() => SetColumns(c.n)))));
     }
 
     void ClearFormat_Click(object sender, RoutedEventArgs e)
@@ -1304,8 +1466,7 @@ public partial class MainWindow : Window
         Submit(() => RunEdit(new JsonObject { ["oid"] = ids[0], ["oids"] = new JsonArray(ids.Select(i => (JsonNode)i).ToArray()), ["op"] = "ungroup" }));
     }
 
-    void Group_Click(object sender, RoutedEventArgs e) => GroupSelection();
-    void Ungroup_Click(object sender, RoutedEventArgs e) => UngroupSelection();
+    void Group_Click(object sender, RoutedEventArgs e) => GroupSelection();    void Ungroup_Click(object sender, RoutedEventArgs e) => UngroupSelection();
 
     /// The canvas's right-click menu, for what is selected.
     void CanvasContextMenu(object sender, ContextMenuEventArgs e)
@@ -1333,6 +1494,7 @@ public partial class MainWindow : Window
             if (o is { } obj && (obj.IsText || obj.Kind == "table")) Add(obj.Kind == "tex" ? "Edit LaTeX" : obj.Kind == "table" ? "Edit Cell" : "Edit Text", () => canvas.BeginTextEdit(sel[0]), gesture: "Enter");
             if (o is { Kind: "text" or "tex" } lo)
                 Add(lo.Format?.Link == null ? "Add Hyperlink…" : "Edit Hyperlink…", () => Hyperlink_Click(this, new RoutedEventArgs()), gesture: "Ctrl+K");
+            Add("Duplicate", DuplicateSelection, gesture: "Ctrl+D");
             Add("Delete", DeleteSelection, gesture: "Del");
             if (sel.Count == 1 && PlotOf(sel[0]) != null)
             {
@@ -1467,15 +1629,18 @@ public partial class MainWindow : Window
                 Stroke = Brushes.Gray, StrokeThickness = 0.5,
             };
             var mi = new MenuItem { Header = name, Tag = hex, Icon = swatch, IsCheckable = true, IsChecked = hex == penColor };
-            mi.Click += (_, _) =>
-            {
-                penColor = hex;
-                canvas.PenColor = (Color)ColorConverter.ConvertFromString(hex);
-                foreach (var o in PenColorMenu.Items.OfType<MenuItem>()) o.IsChecked = (string)o.Tag == hex;
-            };
+            mi.Click += (_, _) => SetPenColor(hex);
             PenColorMenu.Items.Add(mi);
         }
         canvas.PenColor = (Color)ColorConverter.ConvertFromString(penColor);
+    }
+
+    /// Insert > Draw > Pen Color and the Shape button's Pen Color.
+    void SetPenColor(string hex)
+    {
+        penColor = hex;
+        canvas.PenColor = (Color)ColorConverter.ConvertFromString(hex);
+        foreach (var o in PenColorMenu.Items.OfType<MenuItem>()) o.IsChecked = (string)o.Tag == hex;
     }
 
     /// Inserts an element: a preview shows at once, the source is patched and the slide re-rendered in the background,
@@ -1599,23 +1764,12 @@ public partial class MainWindow : Window
         m.IsOpen = true;
     }
 
-    void ShapeButton_Click(object sender, RoutedEventArgs e) => DropDown(ShapeButton,
-        ("Rectangle", "rectangle", InsertShape_Click), ("Rounded Rectangle", "rounded", InsertShape_Click), ("Circle", "circle", InsertShape_Click),
-        ("Ellipse", "ellipse", InsertShape_Click), ("Triangle", "triangle", InsertShape_Click), ("-", null, InsertShape_Click),
-        ("Line", "line", InsertShape_Click), ("Arrow", "arrow", InsertShape_Click), ("Double Arrow", "darrow", InsertShape_Click));
-
-    void DrawButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (canvas.DrawTool != null) { canvas.DrawTool = null; return; }        // a second click puts the tool down
-        DropDown(DrawButton, ("Line", "line", DrawTool_Click), ("Arrow", "arrow", DrawTool_Click), ("Double Arrow", "darrow", DrawTool_Click),
-            ("Rectangle", "rectangle", DrawTool_Click), ("Ellipse", "ellipse", DrawTool_Click), ("-", null, DrawTool_Click),
-            ("Pen (freehand)", "pen", DrawTool_Click));
-    }
-
-    void InsertTableButton_Click(object sender, RoutedEventArgs e) => DropDown((Button)sender,
+    // The button inserts a word table; only its arrow drops the word / math choice (as on the Mac).
+    void InsertTableButton_Click(object sender, RoutedEventArgs e) => DropDown(TableButton,
         ("Word Table…", "word", InsertTable_Click), ("Math Table…", "math", InsertTable_Click));
 
-    void NewSlideButton_Click(object sender, RoutedEventArgs e) => DropDown(NewSlideButton,
+    // The button adds a Title and Content slide; only its arrow drops the layout list (as on the Mac).
+    void NewSlideArrow_Click(object sender, RoutedEventArgs e) => DropDown(NewSlideButton,
         ("Title Slide", "title", NewSlideLayout_Click), ("Title and Content", "title_content", NewSlideLayout_Click),
         ("Two Content", "two_content", NewSlideLayout_Click), ("Title Only", "title_only", NewSlideLayout_Click), ("Blank", "blank", NewSlideLayout_Click));
 
@@ -1951,12 +2105,16 @@ public partial class MainWindow : Window
         if (ctrl && key is Key.OemMinus or Key.Subtract) { canvas.ZoomBy(0.8); e.Handled = true; return; }
         if (ctrl && key is Key.D0 or Key.NumPad0) { canvas.Zoom = null; e.Handled = true; return; }
         if (ctrl && shift && key == Key.R) { SetRulers(!RulerItem.IsChecked); e.Handled = true; return; }
-        if (ctrl && key == Key.OemQuotes) { GridItem.IsChecked = !GridItem.IsChecked; canvas.ShowGrid = GridItem.IsChecked; e.Handled = true; return; }
+        if (ctrl && key == Key.OemQuotes) { GridItem.IsChecked = !GridItem.IsChecked; canvas.ShowGrid = GridItem.IsChecked; GridButton.IsChecked = GridItem.IsChecked; e.Handled = true; return; }
         // typing in a text field: its own keys
         if (Keyboard.FocusedElement is TextBox || SourceEditor.IsKeyboardFocusWithin || canvas.IsEditingText) return;
         if (ctrl && key == Key.Z) { _ = UndoRedo(shift ? "redo" : "undo"); e.Handled = true; return; }
         if (ctrl && key == Key.Y) { _ = UndoRedo("redo"); e.Handled = true; return; }
         if (ctrl && shift && key == Key.N) { NewSlide_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.M) { NewSlide_Click(sender, e); e.Handled = true; return; }     // PowerPoint's New Slide
+        if (ctrl && !shift && key == Key.L) { AlignText("left"); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.E) { AlignText("center"); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.R) { AlignText("right"); e.Handled = true; return; }
         if (ctrl && shift && key == Key.T) { InsertText_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.E) { InsertFormula_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.I) { InsertImage_Click(sender, e); e.Handled = true; return; }
@@ -1969,6 +2127,8 @@ public partial class MainWindow : Window
         if (ctrl && !shift && key == Key.B) { ToggleBold(); e.Handled = true; return; }
         if (ctrl && key == Key.I && !shift) { ToggleItalic(); e.Handled = true; return; }
         if (ctrl && key == Key.U) { Decorate("underline"); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.D8) { Bullets_Click(sender, e); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.D7) { Numbers_Click(sender, e); e.Handled = true; return; }
         if (ctrl && key == Key.K) { Hyperlink_Click(sender, e); e.Handled = true; return; }
         if (ctrl && !shift && key == Key.G) { GroupSelection(); e.Handled = true; return; }
         if (ctrl && shift && key == Key.G) { UngroupSelection(); e.Handled = true; return; }
@@ -1977,8 +2137,17 @@ public partial class MainWindow : Window
         if (ctrl && shift && key == Key.OemPeriod) { Bigger_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.OemComma) { Smaller_Click(sender, e); e.Handled = true; return; }
         if (key == Key.Escape && canvas.DrawTool != null) { canvas.DrawTool = null; e.Handled = true; return; }
-        if (key == Key.Escape && FindBar.Visibility == Visibility.Visible && canvas.Selected.Count == 0) { CloseFind(); e.Handled = true; return; }
-        if (ctrl && key == Key.D) { DuplicateSlide_Click(sender, e); e.Handled = true; return; }
+        if (key == Key.Escape && (FindBox.Text.Length > 0 || ReplaceRow.Visibility == Visibility.Visible) && canvas.Selected.Count == 0) { CloseFind(); e.Handled = true; return; }
+        // Ctrl+D duplicates the selected objects, or the slide when nothing is selected (as PowerPoint does)
+        if (ctrl && key == Key.D)
+        {
+            if (!shift && canvas.Selected.Count > 0) DuplicateSelection(); else DuplicateSlide_Click(sender, e);
+            e.Handled = true; return;
+        }
+        if (!ctrl && key == Key.Home) { _ = StepSlide(-slides.Count); e.Handled = true; return; }
+        if (!ctrl && key == Key.End) { _ = StepSlide(slides.Count); e.Handled = true; return; }
+        // Tab / Shift+Tab on the slide: the next / previous object, as in PowerPoint
+        if (key == Key.Tab && !ctrl && canvas.IsKeyboardFocusWithin) { canvas.SelectNext(shift ? -1 : +1); e.Handled = true; return; }
         if (ctrl && key == Key.A) { canvas.SelectAll(); e.Handled = true; return; }
         if (ctrl && shift && key == Key.Up) { MoveSlideUp_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.Down) { MoveSlideDown_Click(sender, e); e.Handled = true; return; }

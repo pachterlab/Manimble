@@ -97,6 +97,7 @@ struct ObjInfo: Decodable {
     var shared: SharedInfo?
     var image: String?
     var imagePath: String?           // absolute path of the picture file (images)
+    var border: String?              // a picture's border colour (#RRGGBB), nil without one
     var shape: String?
     var rotation: Double?            // degrees, from the object's own rotate() calls
     var dims: [Double]?              // manim width/height in frame pixels

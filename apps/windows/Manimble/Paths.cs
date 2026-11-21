@@ -149,6 +149,8 @@ public sealed class Settings
     public string? PlotPython { get; set; }
     /// The user's guides per deck (the original folder, lower-cased): [1 = vertical / 0 = horizontal, frame px].
     public Dictionary<string, List<double[]>> Guides { get; set; } = new();
+    /// How slides are shown (View > Dark Mode / Invert Colors, the toolbar's Dark Mode): Normal, Dark or Invert.
+    public string? ColorView { get; set; }
 
     static Settings? current;
     public static Settings Current => current ??= Load();

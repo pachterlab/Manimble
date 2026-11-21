@@ -15,7 +15,7 @@ Only UI and platform glue live here. Anything that knows about manim, source cod
 | AVPlayer show / presenter | WPF `MediaElement` (Media Foundation, H.264 MP4) |
 | `~/Library/Application Support/Manimble` | `%LOCALAPPDATA%\Manimble` (`python`, `work`, `cache`, `manimble.log`) |
 | symlinks in the working copy | directory junctions (no admin / developer mode needed); files are copied |
-| BasicTeX / TinyTeX | MiKTeX or TinyTeX for Windows |
+| BasicTeX / TinyTeX | TinyTeX for Windows (a MiKTeX or TeX Live already installed is used first) |
 
 ## Phases
 

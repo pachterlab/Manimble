@@ -2,21 +2,21 @@
 .SYNOPSIS
   Installs Manimble for Windows from this checkout: the Python environment with Manim, optionally LaTeX, and the
   app itself (in %LOCALAPPDATA%\Programs\Manimble, with a Start menu shortcut). No administrator rights are needed,
-  except for LaTeX if you ask for it and winget installs it for all users.
+  except to add LaTeX packages to a TeX installed for all users (Windows asks).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File apps\windows\install_manimble.ps1
   powershell -ExecutionPolicy Bypass -File apps\windows\install_manimble.ps1 -WithLatex
 #>
 param(
-    [switch]$WithLatex,       # also install MiKTeX (formulas: MathTex, Tex) with winget
+    [switch]$WithLatex,       # also install LaTeX (formulas: MathTex, Tex): TinyTeX when there is none
     [switch]$SkipPython,      # the Python environment is already set up
     [switch]$SkipApp          # only the dependencies
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path "$PSScriptRoot\..\..").Path
 
-# Python with Manim, and with -WithLatex MiKTeX: the same script the app's first-launch setup runs
+# Python with Manim, and with -WithLatex LaTeX: the same script the app's first-launch setup runs
 $deps = @{ Requirements = (Join-Path $Root 'engine\requirements.txt') }
 if ($WithLatex) { $deps.WithLatex = $true }
 if ($SkipPython) { $deps.SkipPython = $true }

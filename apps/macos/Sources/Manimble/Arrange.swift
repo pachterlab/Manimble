@@ -44,7 +44,9 @@ extension MainController {
         switch item.action {
         case #selector(groupObjects): return editing && canvas.selectedIDs.count > 1
         case #selector(ungroupObjects): return editing && selectionIsGrouped
-        case #selector(bringToFront), #selector(bringForward), #selector(sendBackward), #selector(sendToBack):
+        case #selector(bringToFront), #selector(bringForward), #selector(sendBackward), #selector(sendToBack),
+             #selector(alignSlideLeft), #selector(alignSlideCenter), #selector(alignSlideRight),
+             #selector(alignSlideTop), #selector(alignSlideMiddle), #selector(alignSlideBottom):
             return editing && !canvas.selectedIDs.isEmpty
         default: return nil
         }
@@ -65,5 +67,9 @@ extension MainController {
             let i = NSMenuItem(title: a.title, action: a.action, keyEquivalent: ""); i.target = self
             m.addItem(i)
         }
+        m.addItem(MainController.alignSlideMenuItem(target: self))
+        m.addItem(.separator())
+        let d = NSMenuItem(title: "Duplicate", action: #selector(duplicatePressed), keyEquivalent: ""); d.target = self
+        m.addItem(d)
     }
 }

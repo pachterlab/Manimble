@@ -50,9 +50,14 @@ public partial class MainWindow
 {
     static readonly Dictionary<string, int> pastes = new();
 
+    /// Edit > Duplicate (Ctrl+D, as in PowerPoint): a copy of the selected objects pasted a little below and right of
+    /// them, without touching the clipboard.
+    void DuplicateSelection() => CopySelection(duplicate: true);
+
     /// Edit > Copy (Ctrl+C) on the slide: the selected objects as Manimble objects, plus a picture and their text for
-    /// other programs; `then` runs once they are on the clipboard (Cut deletes them).
-    void CopySelection(Action? then = null)
+    /// other programs; `then` runs once they are on the clipboard (Cut deletes them). `duplicate`: pasted straight back
+    /// onto the slide instead of going to the clipboard.
+    void CopySelection(Action? then = null, bool duplicate = false)
     {
         var oids = canvas.Selected.ToList();
         var name = sceneName;
@@ -74,6 +79,7 @@ public partial class MainWindow
                                           .Select(p => new CopiedObjects.Picture { Png = Convert.ToBase64String(File.ReadAllBytes(p.Png)), Box = p.Box }).ToList(),
                 }).ToList(),
             };
+            if (duplicate) { PasteObjects(copied, ws); return; }
             var data = new DataObject();
             data.SetData(CopiedObjects.Format, JsonSerializer.Serialize(copied));
             var texts = copied.Items.Select(i => i.Text).Where(t => !string.IsNullOrEmpty(t)).ToList();

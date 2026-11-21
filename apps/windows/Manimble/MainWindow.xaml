@@ -20,16 +20,16 @@
         <MenuItem Header="Open _Recent" x:Name="RecentMenu"/>
         <MenuItem Header="Open _Package (.manimble)…" Click="OpenPackage_Click"/>
         <MenuItem Header="Open _Example Deck" Click="OpenExample_Click"/>
+        <MenuItem Header="_Import">
+          <MenuItem Header="_PowerPoint (.pptx)…" Click="ImportPowerPoint_Click"/>
+          <MenuItem Header="_Beamer (.tex)…" Click="ImportBeamer_Click"/>
+        </MenuItem>
         <Separator/>
         <MenuItem Header="_Save to Original" InputGestureText="Ctrl+S" Click="Save_Click" x:Name="SaveItem"/>
         <MenuItem Header="Save Project _Copy…" Click="SaveCopy_Click"/>
         <MenuItem Header="Package for S_haring…" Click="PackageProject_Click"/>
         <MenuItem Header="Re_vert to Original…" Click="Revert_Click"/>
         <Separator/>
-        <MenuItem Header="_Import">
-          <MenuItem Header="_PowerPoint (.pptx)…" Click="ImportPowerPoint_Click"/>
-          <MenuItem Header="_Beamer (.tex)…" Click="ImportBeamer_Click"/>
-        </MenuItem>
         <MenuItem Header="Export _To">
           <MenuItem Header="_PowerPoint (.pptx)…" Click="ExportPowerPoint_Click"/>
           <MenuItem Header="P_DF…" Click="ExportPdf_Click"/>
@@ -52,15 +52,15 @@
         <MenuItem Header="Cu_t" InputGestureText="Ctrl+X" Click="Cut_Click"/>
         <MenuItem Header="_Copy" InputGestureText="Ctrl+C" Click="Copy_Click"/>
         <MenuItem Header="_Paste" InputGestureText="Ctrl+V" Click="Paste_Click"/>
+        <MenuItem Header="Select _All" InputGestureText="Ctrl+A" Click="SelectAll_Click"/>
         <Separator/>
         <MenuItem Header="_Find…" InputGestureText="Ctrl+F" Click="Find_Click"/>
         <MenuItem Header="Find and Re_place…" InputGestureText="Ctrl+H" Click="FindReplace_Click"/>
         <MenuItem Header="Find _Next" InputGestureText="F3" Click="FindNext_Click"/>
         <MenuItem Header="Find Pre_vious" InputGestureText="Shift+F3" Click="FindPrev_Click"/>
         <Separator/>
+        <MenuItem Header="D_uplicate" InputGestureText="Ctrl+D" Click="Duplicate_Click"/>
         <MenuItem Header="_Delete" InputGestureText="Del" Click="Delete_Click"/>
-        <MenuItem Header="Apply Move to All _Builds" InputGestureText="Ctrl+Shift+A" Click="SpreadMove_Click"/>
-        <MenuItem Header="Select _All" InputGestureText="Ctrl+A" Click="SelectAll_Click"/>
         <MenuItem Header="_Edit Text" InputGestureText="Enter" Click="EditText_Click"/>
       </MenuItem>
       <MenuItem Header="_Insert">
@@ -86,37 +86,29 @@
           <MenuItem Header="Pen (freehand)" Tag="pen" InputGestureText="Ctrl+Shift+P" Click="DrawTool_Click"/>
           <MenuItem Header="Pen Color" x:Name="PenColorMenu"/>
         </MenuItem>
+        <MenuItem Header="_BioCartoon Icons…" Click="BioCartoon_Click"/>
         <MenuItem Header="_Word Table…" Tag="word" Click="InsertTable_Click"/>
         <MenuItem Header="_Math Table…" Tag="math" Click="InsertTable_Click"/>
         <MenuItem Header="_Image…" InputGestureText="Ctrl+Shift+I" Click="InsertImage_Click"/>
-        <MenuItem Header="_BioCartoon Icons…" Click="BioCartoon_Click"/>
         <MenuItem Header="Python _Plot…" Click="InsertPythonPlot_Click"/>
         <Separator/>
         <MenuItem Header="Slide _Numbers…" Click="SlideNumbers_Click"/>
       </MenuItem>
-      <MenuItem Header="F_ormat">
-        <MenuItem Header="_Hyperlink…" InputGestureText="Ctrl+K" Click="Hyperlink_Click"/>
-        <Separator/>
-        <MenuItem Header="_Theme" x:Name="ThemeMenu"/>
-        <MenuItem Header="_Background…" Click="Background_Click"/>
-        <Separator/>
-        <MenuItem Header="Apply _Dark Mode to Deck…" Tag="dark" Click="DarkMode_Click"/>
-        <MenuItem Header="Apply _Inverted Colors to Deck…" Tag="invert" Click="DarkMode_Click"/>
-      </MenuItem>
       <MenuItem Header="_Slide">
         <MenuItem Header="_New Slide">
           <MenuItem Header="_Title Slide" Tag="title" Click="NewSlideLayout_Click"/>
-          <MenuItem Header="Title and _Content" Tag="title_content" InputGestureText="Ctrl+Shift+N" Click="NewSlideLayout_Click"/>
+          <MenuItem Header="Title and _Content" Tag="title_content" InputGestureText="Ctrl+M" Click="NewSlideLayout_Click"/>
           <MenuItem Header="T_wo Content" Tag="two_content" Click="NewSlideLayout_Click"/>
           <MenuItem Header="Title _Only" Tag="title_only" Click="NewSlideLayout_Click"/>
           <MenuItem Header="_Blank" Tag="blank" Click="NewSlideLayout_Click"/>
         </MenuItem>
         <MenuItem Header="New B_uild" InputGestureText="Ctrl+Shift+B" Click="NewBuild_Click"/>
-        <MenuItem Header="Delete Bui_ld" Click="DeleteBuild_Click"/>
-        <Separator/>
-        <MenuItem Header="_Duplicate Slide" InputGestureText="Ctrl+D" Click="DuplicateSlide_Click"/>
+        <MenuItem Header="_Duplicate Slide" InputGestureText="Ctrl+Shift+D" Click="DuplicateSlide_Click"/>
         <MenuItem Header="De_lete Slide" Click="DeleteSlide_Click"/>
         <MenuItem Header="_Hide Slide" Click="HideSlide_Click" x:Name="HideSlideItem"/>
+        <MenuItem Header="Delete Bui_ld" Click="DeleteBuild_Click"/>
+        <MenuItem Header="Expand _All Builds" Click="ExpandAll_Click" x:Name="ExpandAllItem"
+                  ToolTip="List the builds under every slide in the navigator"/>
         <Separator/>
         <MenuItem Header="Move Slide _Up" InputGestureText="Ctrl+Shift+Up" Click="MoveSlideUp_Click"/>
         <MenuItem Header="Move Slide Do_wn" InputGestureText="Ctrl+Shift+Down" Click="MoveSlideDown_Click"/>
@@ -125,39 +117,89 @@
         <MenuItem Header="Ne_xt Slide" InputGestureText="Ctrl+Down" Click="NextSlide_Click"/>
         <MenuItem Header="Previous _Build" InputGestureText="Page Up" Click="PrevBuild_Click"/>
         <MenuItem Header="Next B_uild" InputGestureText="Page Down" Click="NextBuild_Click"/>
+        <MenuItem Header="_First Slide" InputGestureText="Home" Click="FirstSlide_Click"/>
+        <MenuItem Header="_Last Slide" InputGestureText="End" Click="LastSlide_Click"/>
+      </MenuItem>
+      <MenuItem Header="F_ormat" x:Name="FormatMenu" SubmenuOpened="FormatMenu_Opened">
+        <MenuItem Header="_Bold" InputGestureText="Ctrl+B" x:Name="BoldItem" Click="Bold_Click"/>
+        <MenuItem Header="_Italic" InputGestureText="Ctrl+I" x:Name="ItalicItem" Click="Italic_Click"/>
+        <MenuItem Header="_Underline" InputGestureText="Ctrl+U" x:Name="UnderlineItem" Click="Underline_Click"/>
+        <MenuItem Header="_Strikethrough" x:Name="StrikeItem" Click="Strike_Click"/>
+        <MenuItem Header="Su_perscript" x:Name="SuperscriptItem" Click="Superscript_Click"/>
+        <MenuItem Header="Subs_cript" x:Name="SubscriptItem" Click="Subscript_Click"/>
+        <Separator/>
+        <MenuItem Header="Bi_gger" InputGestureText="Ctrl+Shift+." x:Name="BiggerItem" Click="Bigger_Click"/>
+        <MenuItem Header="S_maller" InputGestureText="Ctrl+Shift+," x:Name="SmallerItem" Click="Smaller_Click"/>
+        <MenuItem Header="High_light" x:Name="HighlightMenu"/>
+        <MenuItem Header="_Hyperlink…" InputGestureText="Ctrl+K" x:Name="HyperlinkItem" Click="Hyperlink_Click"/>
+        <MenuItem Header="Clear _Formatting" x:Name="ClearFormatItem" Click="ClearFormat_Click"/>
+        <Separator/>
+        <MenuItem Header="Bulleted Lis_t" InputGestureText="Ctrl+Shift+8" x:Name="BulletsItem" Click="Bullets_Click"/>
+        <MenuItem Header="_Numbered List" InputGestureText="Ctrl+Shift+7" x:Name="NumbersItem" Click="Numbers_Click"/>
+        <MenuItem Header="Increase Inde_nt" x:Name="IndentItem" Click="Indent_Click"/>
+        <MenuItem Header="_Decrease Indent" x:Name="OutdentItem" Click="Outdent_Click"/>
+        <Separator/>
+        <MenuItem Header="Align _Left" InputGestureText="Ctrl+L" Tag="left" x:Name="AlignLeftItem" Click="Align_Click"/>
+        <MenuItem Header="C_enter" InputGestureText="Ctrl+E" Tag="center" x:Name="AlignCenterItem" Click="Align_Click"/>
+        <MenuItem Header="Align _Right" InputGestureText="Ctrl+R" Tag="right" x:Name="AlignRightItem" Click="Align_Click"/>
+        <MenuItem Header="_Justify" x:Name="JustifyItem" Click="Justify_Click"/>
+        <MenuItem Header="Line Sp_acing" x:Name="SpacingMenu"/>
+        <MenuItem Header="C_olumns" x:Name="ColumnsMenu"/>
+        <Separator/>
+        <MenuItem Header="_Background…" Click="Background_Click"/>
+        <MenuItem Header="_Theme" x:Name="ThemeMenu"/>
+        <Separator/>
+        <MenuItem Header="Apply _Dark Mode to Deck…" Tag="dark" Click="DarkMode_Click"/>
+        <MenuItem Header="Apply _Inverted Colors to Deck…" Tag="invert" Click="DarkMode_Click"/>
+      </MenuItem>
+      <MenuItem Header="_Arrange">
+        <MenuItem Header="Bring to _Front" InputGestureText="Ctrl+Shift+]" Tag="front" Click="Arrange_Click"/>
+        <MenuItem Header="Bring _Forward" InputGestureText="Ctrl+]" Tag="forward" Click="Arrange_Click"/>
+        <MenuItem Header="Send _Backward" InputGestureText="Ctrl+[" Tag="backward" Click="Arrange_Click"/>
+        <MenuItem Header="Send to Bac_k" InputGestureText="Ctrl+Shift+[" Tag="back" Click="Arrange_Click"/>
+        <Separator/>
+        <MenuItem Header="_Group" InputGestureText="Ctrl+G" Click="Group_Click"/>
+        <MenuItem Header="_Ungroup" InputGestureText="Ctrl+Shift+G" Click="Ungroup_Click"/>
+        <Separator/>
+        <MenuItem Header="Apply Move to All B_uilds" InputGestureText="Ctrl+Shift+A" Click="SpreadMove_Click"/>
       </MenuItem>
       <MenuItem Header="_View">
+        <MenuItem Header="_Grid Lines" IsCheckable="True" x:Name="GridItem" InputGestureText="Ctrl+'" Click="Grid_Click"/>
+        <MenuItem Header="_Ruler" IsCheckable="True" x:Name="RulerItem" InputGestureText="Ctrl+Shift+R" Click="Ruler_Click"/>
+        <MenuItem Header="S_nap to Objects" IsCheckable="True" IsChecked="True" x:Name="SnapItem" Click="Snap_Click"/>
+        <MenuItem Header="Add _Vertical Guide" Click="AddVerticalGuide_Click"/>
+        <MenuItem Header="Add _Horizontal Guide" Click="AddHorizontalGuide_Click"/>
+        <MenuItem Header="_Clear Guides" x:Name="ClearGuidesItem" Click="ClearGuides_Click"/>
+        <MenuItem Header="Sc_ript…" Click="Script_Click"/>
+        <Separator/>
+        <MenuItem Header="_Dark Mode" IsCheckable="True" x:Name="DarkModeItem" Click="DarkModeItem_Click"
+                  ToolTip="Show slides with whites and blacks swapped (nothing is written to the deck)"/>
+        <MenuItem Header="_Invert Colors" IsCheckable="True" x:Name="InvertColorsItem" Click="InvertColorsItem_Click"
+                  ToolTip="Show every colour as its complement (nothing is written to the deck)"/>
+        <Separator/>
         <MenuItem Header="Zoom _In" InputGestureText="Ctrl+=" Click="ZoomIn_Click"/>
         <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Click="ZoomOut_Click"/>
         <MenuItem Header="_Fit in Window" InputGestureText="Ctrl+0" Click="ZoomFit_Click"/>
         <MenuItem Header="_Actual Size" Click="ZoomActual_Click"/>
         <Separator/>
-        <MenuItem Header="_Grid Lines" IsCheckable="True" x:Name="GridItem" InputGestureText="Ctrl+'" Click="Grid_Click"/>
-        <MenuItem Header="S_nap to Objects" IsCheckable="True" IsChecked="True" x:Name="SnapItem" Click="Snap_Click"/>
-        <MenuItem Header="_Ruler" IsCheckable="True" x:Name="RulerItem" InputGestureText="Ctrl+Shift+R" Click="Ruler_Click"/>
-        <MenuItem Header="Add _Vertical Guide" Click="AddVerticalGuide_Click"/>
-        <MenuItem Header="Add _Horizontal Guide" Click="AddHorizontalGuide_Click"/>
-        <MenuItem Header="_Clear Guides" x:Name="ClearGuidesItem" Click="ClearGuides_Click"/>
-        <Separator/>
-        <MenuItem Header="Sc_ript…" Click="Script_Click"/>
-        <MenuItem Header="_Feedback…" Click="Feedback_Click"/>
-        <Separator/>
         <MenuItem Header="Show _Terminal" InputGestureText="Ctrl+`" Click="ShowTerminal_Click"/>
         <MenuItem Header="_New Terminal" Click="NewTerminal_Click"/>
         <Separator/>
         <MenuItem Header="_Source Pane" IsCheckable="True" x:Name="ShowSourceItem" Click="ToggleSource_Click"/>
+        <MenuItem Header="_Feedback…" Click="Feedback_Click"/>
         <MenuItem Header="Show Engine _Log" Click="ShowLog_Click"/>
       </MenuItem>
       <MenuItem Header="_Play">
+        <MenuItem Header="Show _Animations" IsCheckable="True" x:Name="ShowAnimationsItem" Click="ShowAnimations_Click"
+                  ToolTip="Play the slides' real animations (built with manim); off plays the still frames of each build"/>
+        <Separator/>
         <MenuItem Header="Play from _Beginning" InputGestureText="F5" Click="PlayBeginning_Click"/>
         <MenuItem Header="Play from _Current Slide" InputGestureText="Shift+F5" Click="PlayCurrent_Click"/>
         <MenuItem Header="Presenter _View" InputGestureText="Alt+F5" Click="PresenterView_Click"/>
         <MenuItem Header="_Scripted Presentation" Click="ScriptedPresentation_Click"/>
         <MenuItem Header="Scripted Presentation from Current Slide" Click="ScriptedPresentationCurrent_Click"/>
-        <MenuItem Header="_Preview Current Slide&#x2019;s Animations" InputGestureText="Ctrl+Shift+F5" Click="PreviewAnimations_Click"/>
         <Separator/>
-        <MenuItem Header="Show _Animations" IsCheckable="True" x:Name="ShowAnimationsItem" Click="ShowAnimations_Click"
-                  ToolTip="Play the slides' real animations (built with manim); off plays the still frames of each build"/>
+        <MenuItem Header="_Preview Current Slide&#x2019;s Animations" InputGestureText="Ctrl+Shift+F5" Click="PreviewAnimations_Click"/>
         <MenuItem Header="Animation _Resolution" x:Name="ResolutionMenu">
           <MenuItem Header="720p" Tag="720" IsCheckable="True" Click="Resolution_Click"/>
           <MenuItem Header="1080p" Tag="1080" IsCheckable="True" Click="Resolution_Click"/>
@@ -173,8 +215,8 @@
 
     <!-- toolbar -->
     <Border DockPanel.Dock="Top" BorderThickness="0,0,0,1" BorderBrush="#22808080" Padding="6,3">
-      <StackPanel Orientation="Horizontal" x:Name="ToolBarPanel">
-        <StackPanel.Resources>
+      <DockPanel LastChildFill="False" x:Name="ToolBarRow" SizeChanged="ToolBarRow_SizeChanged">
+        <DockPanel.Resources>
           <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
             <Setter Property="Margin" Value="2,0"/>
             <Setter Property="Padding" Value="8,3"/>
@@ -186,39 +228,207 @@
             <Setter Property="Padding" Value="8,3"/>
             <Setter Property="BorderThickness" Value="0"/>
           </Style>
-        </StackPanel.Resources>
-        <Button Click="NewSlideButton_Click" ToolTip="New slide (Ctrl+Shift+N); the arrow picks a layout" x:Name="NewSlideButton">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE710;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="New Slide ▾"/></StackPanel>
+        </DockPanel.Resources>
+        <!-- right end, as on the Mac: zoom and the view-only dark mode, then the terminal and share -->
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" x:Name="ToolRight">
+          <StackPanel Orientation="Horizontal" Margin="4,0" ToolTip="Zoom (Ctrl+= / Ctrl+- / Ctrl+0 fits)">
+            <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE71E;" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="ZoomCombo" Width="104" SelectionChanged="ZoomCombo_SelectionChanged" VerticalAlignment="Center"/>
+          </StackPanel>
+          <ToggleButton x:Name="DarkModeButton" Click="DarkModeButton_Click"
+                        ToolTip="Show slides with whites and blacks swapped (view only; Format &gt; Apply Dark Mode to Deck writes it)">
+            <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE708;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Dark Mode"/></StackPanel>
+          </ToggleButton>
+          <Separator Margin="6,2"/>
+        <Button Click="ShowTerminal_Click" ToolTip="Show or hide the terminal (Ctrl+`)" x:Name="TerminalButton">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE756;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Terminal"/></StackPanel>
+        </Button>
+        <Button Click="ShareButton_Click" ToolTip="Share the presentation" x:Name="ShareButton">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE72D;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Share ▾"/></StackPanel>
+        </Button>
+        </StackPanel>
+        <!-- the Mac's order: New Slide, New Build, Expand All | Table, Text, Formula, Shape, BioCartoon, Image, Theme, Python Plot -->
+        <StackPanel Orientation="Horizontal" x:Name="ToolButtons">
+        <Button Click="NewSlide_Click" ToolTip="New Title and Content slide (Ctrl+Shift+N)" x:Name="NewSlideButton" Margin="2,0,0,0" Padding="8,3,4,3">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE710;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="New Slide"/></StackPanel>
+        </Button>
+        <Button Click="NewSlideArrow_Click" ToolTip="New slide with a chosen layout" Margin="0,0,2,0" Padding="3,3,6,3">
+          <TextBlock Text="▾"/>
+        </Button>
+        <Button Click="NewBuild_Click" ToolTip="Add a build after this one, starting from what it shows (Ctrl+Shift+B)" x:Name="NewBuildButton">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE81E;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="New Build"/></StackPanel>
+        </Button>
+        <Button Click="ExpandAll_Click" ToolTip="List the builds under every slide in the navigator" x:Name="ExpandAllButton">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE740;" VerticalAlignment="Center" Margin="0,0,6,0" x:Name="ExpandAllGlyph"/><TextBlock Text="Expand All" x:Name="ExpandAllText"/></StackPanel>
         </Button>
         <Separator Margin="6,2"/>
+        <Button Click="InsertTable_Click" Tag="word" ToolTip="Insert a word table (the arrow chooses word or math)" x:Name="TableButton" Padding="8,3,4,3">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE80A;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Table"/></StackPanel>
+        </Button>
+        <Button Click="InsertTableButton_Click" ToolTip="Insert a word table or a math table" Margin="0,0,2,0" Padding="3,3,6,3">
+          <TextBlock Text="▾"/>
+        </Button>
         <Button Click="InsertText_Click" ToolTip="Insert text (Ctrl+Shift+T)">
           <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8D2;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Text"/></StackPanel>
         </Button>
         <Button Click="InsertFormula_Click" ToolTip="Insert a formula (Ctrl+Shift+E)">
           <StackPanel Orientation="Horizontal"><TextBlock Text="∑" FontSize="15" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Formula"/></StackPanel>
         </Button>
-        <Button Click="ShapeButton_Click" ToolTip="Insert a shape" x:Name="ShapeButton">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xF158;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Shape ▾"/></StackPanel>
-        </Button>
-        <Button Click="DrawButton_Click" ToolTip="Draw a line, arrow or shape by dragging on the slide, or draw freehand" x:Name="DrawButton">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xEDFB;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock x:Name="DrawButtonText" Text="Draw ▾"/></StackPanel>
-        </Button>
-        <Button Click="InsertTableButton_Click" ToolTip="Insert a table">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE80A;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Table"/></StackPanel>
+        <Button Click="ShapeButton_Click" ToolTip="Insert a shape, draw one by dragging on the slide, or draw freehand" x:Name="ShapeButton">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xF158;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock x:Name="ShapeButtonText" Text="Shape ▾"/></StackPanel>
         </Button>
         <Button Click="BioCartoon_Click" ToolTip="Search BioCartoon's library of scientific illustrations">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8B9;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="BioCartoon"/></StackPanel>
-        </Button>
-        <Button Click="InsertPythonPlot_Click" ToolTip="Insert a picture drawn by Python code (Matplotlib), which can be run again">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9D2;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Python Plot"/></StackPanel>
+          <!-- the black-and-white BioCartoon logo as a mask over the button's text colour, so it follows light and dark like the glyphs -->
+          <StackPanel Orientation="Horizontal"><Rectangle Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,6,0" RenderOptions.BitmapScalingMode="HighQuality" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"><Rectangle.OpacityMask><ImageBrush ImageSource="/Assets/biocartoon-mono.png" Stretch="Uniform"/></Rectangle.OpacityMask></Rectangle><TextBlock Text="BioCartoon"/></StackPanel>
         </Button>
         <Button Click="InsertImage_Click" ToolTip="Insert an image (Ctrl+Shift+I)">
           <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xEB9F;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Image"/></StackPanel>
         </Button>
-        <Separator Margin="6,2"/>
-        <Button Click="PlayBeginning_Click" ToolTip="Play from the beginning (F5)">
-          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE768;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Play"/></StackPanel>
+        <Button Click="ThemeButton_Click" ToolTip="Switch the deck to another theme (font, colours, background)" x:Name="ThemeButton">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE790;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Theme ▾"/></StackPanel>
         </Button>
+        <Button Click="InsertPythonPlot_Click" ToolTip="Insert a picture drawn by Python code (Matplotlib), which can be run again">
+          <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9D2;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Python Plot"/></StackPanel>
+        </Button>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <!-- formatting row: text formatting on the left (enabled when one text object is selected), find on the right -->
+    <Border DockPanel.Dock="Top" BorderThickness="0,0,0,1" BorderBrush="#22808080" Padding="8,3">
+      <Border.Resources>
+        <Style TargetType="ToggleButton" BasedOn="{StaticResource {x:Type ToggleButton}}">
+          <Setter Property="MinWidth" Value="28"/>
+          <Setter Property="Padding" Value="6,2"/>
+          <Setter Property="Margin" Value="1,0"/>
+          <Setter Property="BorderThickness" Value="0"/>
+          <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></Style.Triggers>
+        </Style>
+        <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+          <Setter Property="MinWidth" Value="28"/>
+          <Setter Property="Padding" Value="6,2"/>
+          <Setter Property="Margin" Value="1,0"/>
+          <Setter Property="Background" Value="Transparent"/>
+          <Setter Property="BorderThickness" Value="0"/>
+          <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger></Style.Triggers>
+        </Style>
+      </Border.Resources>
+      <DockPanel LastChildFill="False" x:Name="FormatRow" SizeChanged="FormatRow_SizeChanged">
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" x:Name="FindGroup" IsEnabled="False">
+          <Grid Width="150" VerticalAlignment="Center" x:Name="FindBoxHost">
+            <TextBox x:Name="FindBox" TextChanged="FindBox_TextChanged" KeyDown="FindBox_KeyDown"
+                     ToolTip="Find in the text, formulas and notes of every slide (Ctrl+F)"/>
+            <TextBlock Text="Find" IsHitTestVisible="False" Opacity="0.5" Margin="11,0,0,0" VerticalAlignment="Center">
+              <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                  <Setter Property="Visibility" Value="Collapsed"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding Text, ElementName=FindBox}" Value="">
+                      <Setter Property="Visibility" Value="Visible"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </TextBlock.Style>
+            </TextBlock>
+          </Grid>
+          <ToggleButton x:Name="FindCase" Content="Aa" ToolTip="Match case" Click="FindOption_Click" Margin="4,0,1,0"/>
+          <ToggleButton x:Name="FindWord" ToolTip="Whole words" Click="FindOption_Click"><TextBlock Text="ab" TextDecorations="Underline"/></ToggleButton>
+          <ToggleButton x:Name="FindRegex" Content=".*" ToolTip="Regular expression" Click="FindOption_Click"/>
+          <ToggleButton x:Name="FindNotes" ToolTip="Also search speaker notes" Click="FindOption_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE70B;"/></ToggleButton>
+          <ToggleButton x:Name="ReplaceToggle" ToolTip="Replace (Ctrl+H)" Click="ReplaceToggle_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8AB;"/></ToggleButton>
+          <TextBlock x:Name="FindCount" VerticalAlignment="Center" Margin="6,0" Opacity="0.7" FontSize="12" MinWidth="52" TextAlignment="Center"/>
+          <Button Click="FindPrev_Click" ToolTip="Previous (Shift+F3, Shift+Enter)"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE74A;"/></Button>
+          <Button Click="FindNext_Click" ToolTip="Next (F3, Enter)"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE74B;"/></Button>
+          <Button Click="FindClose_Click" ToolTip="Clear the search (Esc)"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE711;"/></Button>
+        </StackPanel>
+        <!-- left of find, as on the Mac: the script and the feedback list, each in the top-right panel -->
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="0,0,8,0" x:Name="PanelButtons">
+          <ToggleButton x:Name="ScriptButton" Click="ScriptButton_Click" Padding="8,2" Margin="2,0"
+                        ToolTip="Script: words to read out and pointer moves for each build, played by Play &gt; Scripted Presentation">
+            <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8A5;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock Text="Script" FontSize="12"/></StackPanel>
+          </ToggleButton>
+          <ToggleButton x:Name="FeedbackButton" Click="FeedbackButton_Click" Padding="8,2" Margin="2,0" IsEnabled="False"
+                        ToolTip="Feedback notes typed in Presenter View (Feedback Mode), listed in the top-right panel: walk through them and delete them">
+            <StackPanel Orientation="Horizontal"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8BD;" VerticalAlignment="Center" Margin="0,0,6,0"/><TextBlock x:Name="FeedbackButtonText" Text="View Feedback" FontSize="12"/></StackPanel>
+          </ToggleButton>
+        </StackPanel>
+        <!-- the Mac's order: font | character styles | highlight, colour, clear | lists and indent | alignment, spacing,
+             columns | grid, snapping, guides. The last two groups give way when the window is narrow. -->
+        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" x:Name="FormatGroup">
+          <StackPanel Orientation="Horizontal" x:Name="FontGroup">
+            <ComboBox x:Name="FontCombo" IsEditable="True" IsTextSearchEnabled="True" Width="140"
+                      ToolTip="Font family (usually a deck-wide constant, so it changes every slide)"
+                      SelectionChanged="FontCombo_SelectionChanged" KeyDown="FontCombo_KeyDown"/>
+            <TextBox x:Name="SizeBox" Width="46" ToolTip="Font size (manim font_size) · Enter applies" KeyDown="SizeBox_KeyDown"
+                     Margin="4,0,0,0" VerticalAlignment="Center" TextAlignment="Right"/>
+            <Grid Margin="1,0,2,0" VerticalAlignment="Center" x:Name="SizeStepper">
+              <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+              <RepeatButton Grid.Row="0" Click="SizeUp_Click" ToolTip="Font size" Padding="3,0" MinWidth="0" Background="Transparent" BorderThickness="0">
+                <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE70E;" FontSize="8"/>
+              </RepeatButton>
+              <RepeatButton Grid.Row="1" Click="SizeDown_Click" ToolTip="Font size" Padding="3,0" MinWidth="0" Background="Transparent" BorderThickness="0">
+                <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE70D;" FontSize="8"/>
+              </RepeatButton>
+            </Grid>
+            <Button x:Name="BiggerButton" ToolTip="Increase font size (Ctrl+Shift+.)" Click="Bigger_Click"><TextBlock Text="A" FontSize="15"/></Button>
+            <Button x:Name="SmallerButton" ToolTip="Decrease font size (Ctrl+Shift+,)" Click="Smaller_Click"><TextBlock Text="A" FontSize="11" VerticalAlignment="Bottom"/></Button>
+            <Separator Margin="6,4" Width="1"/>
+            <ToggleButton x:Name="BoldButton" Content="B" FontWeight="Bold" ToolTip="Bold (Ctrl+B)" Click="Bold_Click"/>
+            <ToggleButton x:Name="ItalicButton" Content="I" FontStyle="Italic" ToolTip="Italic (Ctrl+I)" Click="Italic_Click"/>
+            <ToggleButton x:Name="UnderlineButton" ToolTip="Underline (Ctrl+U): a line attached to the text" Click="Underline_Click"><TextBlock Text="U" TextDecorations="Underline"/></ToggleButton>
+            <ToggleButton x:Name="StrikeButton" ToolTip="Strikethrough: a line attached to the text" Click="Strike_Click"><TextBlock Text="S" TextDecorations="Strikethrough"/></ToggleButton>
+            <Button x:Name="SuperscriptButton" ToolTip="Superscript: the selected characters while typing on the slide, else the whole text" Click="Superscript_Click">
+              <TextBlock><Run Text="x"/><Run Text="2" BaselineAlignment="Superscript" FontSize="9"/></TextBlock>
+            </Button>
+            <Button x:Name="SubscriptButton" ToolTip="Subscript: the selected characters while typing on the slide, else the whole text" Click="Subscript_Click">
+              <TextBlock><Run Text="x"/><Run Text="2" BaselineAlignment="Subscript" FontSize="9"/></TextBlock>
+            </Button>
+            <Separator Margin="6,4" Width="1"/>
+            <Button x:Name="HighlightButton" ToolTip="Text highlight colour (a background rectangle behind the text)" Click="Highlight_Click">
+              <TextBlock x:Name="HighlightIcon" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE7E6;"/>
+            </Button>
+            <Button x:Name="TextColorButton" ToolTip="Text colour" Click="TextColor_Click">
+              <StackPanel>
+                <TextBlock Text="A" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,-2,0,0"/>
+                <Border x:Name="TextColorBar" Height="3" Width="16" CornerRadius="1" Background="White" BorderBrush="#60808080" BorderThickness="0.5"/>
+              </StackPanel>
+            </Button>
+            <Button x:Name="ClearFormatButton" ToolTip="Clear all formatting: bold, italic, colour, highlight, underline, strikethrough, line spacing" Click="ClearFormat_Click">
+              <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE75C;"/>
+            </Button>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" x:Name="ParaGroup">
+            <Separator Margin="6,4" Width="1"/>
+            <ToggleButton x:Name="BulletsButton" ToolTip="Bulleted list (Ctrl+Shift+8)" Click="Bullets_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8FD;"/></ToggleButton>
+            <ToggleButton x:Name="NumbersButton" ToolTip="Numbered list (Ctrl+Shift+7)" Click="Numbers_Click"><TextBlock Text="1." FontWeight="SemiBold" FontSize="12"/></ToggleButton>
+            <Button x:Name="OutdentButton" ToolTip="Decrease indent (the selected lines while typing on the slide, else every line)" Click="Outdent_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE290;"/></Button>
+            <Button x:Name="IndentButton" ToolTip="Increase indent (the selected lines while typing on the slide, else every line)" Click="Indent_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE291;"/></Button>
+            <Separator Margin="6,4" Width="1"/>
+            <ToggleButton x:Name="AlignLeftButton" ToolTip="Align left" Tag="left" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E4;"/></ToggleButton>
+            <ToggleButton x:Name="AlignCenterButton" ToolTip="Center" Tag="center" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E3;"/></ToggleButton>
+            <ToggleButton x:Name="AlignRightButton" ToolTip="Align right" Tag="right" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E2;"/></ToggleButton>
+            <ToggleButton x:Name="AlignJustifyButton" ToolTip="Justify — not available for Manim text with manual line breaks" Click="Justify_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE700;"/></ToggleButton>
+            <Button x:Name="SpacingButton" ToolTip="Line spacing" Click="Spacing_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9E9;"/></Button>
+            <Button x:Name="ColumnsButton" ToolTip="Columns: lay the lines out side by side" Click="Columns_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE89A;"/></Button>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" x:Name="ViewGroup">
+            <Separator Margin="6,4" Width="1"/>
+            <ToggleButton x:Name="GridButton" ToolTip="Grid lines, one manim unit apart (Ctrl+')" Click="GridButton_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xF0E2;"/></ToggleButton>
+            <ToggleButton x:Name="SnapButton" ToolTip="Snap to other objects, guides and the slide while dragging (hold Alt to drag freely)" Click="SnapButton_Click"><TextBlock Text="⌗"/></ToggleButton>
+            <Button x:Name="GuideVButton" ToolTip="Add a vertical guide (drag it into place, drag it off the slide to remove)" Click="AddVerticalGuide_Click"><TextBlock Text="│"/></Button>
+            <Button x:Name="GuideHButton" ToolTip="Add a horizontal guide (drag it into place, drag it off the slide to remove)" Click="AddHorizontalGuide_Click"><TextBlock Text="─"/></Button>
+          </StackPanel>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <!-- replace, under the find box when the replace toggle is on -->
+    <Border DockPanel.Dock="Top" x:Name="ReplaceRow" Visibility="Collapsed" BorderThickness="0,0,0,1" BorderBrush="#22808080" Padding="8,3">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <TextBox x:Name="ReplaceBox" Width="200" KeyDown="ReplaceBox_KeyDown" VerticalAlignment="Center"
+                 ToolTip="Replace with (with Regex, \1 or $1 names a group)"/>
+        <Button Content="Replace" Padding="10,2" Margin="6,0,0,0" Click="ReplaceOne_Click" ToolTip="Replace this match"/>
+        <Button Content="Replace All" Padding="10,2" Margin="4,0,0,0" Click="ReplaceAll_Click" ToolTip="Replace every match (one undo step)"/>
       </StackPanel>
     </Border>
 
@@ -264,6 +474,22 @@
                     </Grid>
                   </Border>
                   <TextBlock Text="{Binding Name}" FontSize="11" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                  <!-- Expand All: the slide's builds, nested under it as on the Mac; a click shows that build -->
+                  <ItemsControl ItemsSource="{Binding Builds}" Visibility="{Binding BuildsVisibility}" Margin="14,4,0,2">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Border BorderThickness="{Binding RingThickness}" BorderBrush="{Binding Ring}" CornerRadius="3" Background="#FF000000"
+                                Margin="0,0,0,4" Cursor="Hand" Tag="{Binding}" PreviewMouseLeftButtonDown="BuildThumb_MouseDown"
+                                ToolTip="{Binding Tip}">
+                          <Grid>
+                            <Image Source="{Binding Thumb}" Stretch="Uniform" Width="186" Height="{Binding ThumbHeight}" Opacity="{Binding ImageOpacity}"/>
+                            <TextBlock Text="{Binding Number}" Foreground="White" Background="#8C000000" Padding="4,0" FontSize="9" FontWeight="Bold"
+                                       HorizontalAlignment="Left" VerticalAlignment="Top" Margin="3"/>
+                          </Grid>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
                 </StackPanel>
               </Grid>
             </DataTemplate>
@@ -281,31 +507,6 @@
           <RowDefinition Height="130" MinHeight="0" x:Name="DrawerRow"/>
         </Grid.RowDefinitions>
         <ContentControl x:Name="CanvasHost" Grid.Row="0" Focusable="False"/>
-        <!-- find and replace, over the canvas -->
-        <Border Grid.Row="0" x:Name="FindBar" Visibility="Collapsed" HorizontalAlignment="Right" VerticalAlignment="Top"
-                Margin="0,8,12,0" Padding="10,8" CornerRadius="6" Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
-                BorderBrush="#40808080" BorderThickness="1" Width="440">
-          <StackPanel>
-            <DockPanel>
-              <Button DockPanel.Dock="Right" Content="✕" Padding="6,1" Margin="4,0,0,0" Click="FindClose_Click" ToolTip="Close (Esc)"/>
-              <Button DockPanel.Dock="Right" Content="↓" Padding="6,1" Margin="2,0,0,0" Click="FindNext_Click" ToolTip="Next (F3, Enter)"/>
-              <Button DockPanel.Dock="Right" Content="↑" Padding="6,1" Margin="2,0,0,0" Click="FindPrev_Click" ToolTip="Previous (Shift+F3)"/>
-              <TextBlock DockPanel.Dock="Right" x:Name="FindCount" VerticalAlignment="Center" Margin="6,0" Opacity="0.7" FontSize="12" MinWidth="54" TextAlignment="Right"/>
-              <TextBox x:Name="FindBox" TextChanged="FindBox_TextChanged" KeyDown="FindBox_KeyDown" ToolTip="Find in the text, formulas and notes of every slide"/>
-            </DockPanel>
-            <DockPanel x:Name="ReplaceRow" Margin="0,6,0,0" Visibility="Collapsed">
-              <Button DockPanel.Dock="Right" Content="All" Padding="8,1" Margin="4,0,0,0" Click="ReplaceAll_Click" ToolTip="Replace every match (one undo step)"/>
-              <Button DockPanel.Dock="Right" Content="Replace" Padding="8,1" Margin="4,0,0,0" Click="ReplaceOne_Click" ToolTip="Replace this match"/>
-              <TextBox x:Name="ReplaceBox" KeyDown="ReplaceBox_KeyDown" ToolTip="Replace with (with Regex, \1 or $1 names a group)"/>
-            </DockPanel>
-            <WrapPanel Margin="0,6,0,0">
-              <CheckBox x:Name="FindCase" Content="Match case" Margin="0,0,10,0" FontSize="12" Click="FindOption_Click"/>
-              <CheckBox x:Name="FindWord" Content="Whole words" Margin="0,0,10,0" FontSize="12" Click="FindOption_Click"/>
-              <CheckBox x:Name="FindRegex" Content="Regex" Margin="0,0,10,0" FontSize="12" Click="FindOption_Click"/>
-              <CheckBox x:Name="FindNotes" Content="Speaker notes" FontSize="12" Click="FindOption_Click"/>
-            </WrapPanel>
-          </StackPanel>
-        </Border>
         <Border Grid.Row="0" x:Name="WelcomePanel" Background="{StaticResource CanvasBackBrush}">
           <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="460">
             <TextBlock Text="Manimble" FontSize="34" FontWeight="SemiBold" Foreground="White" HorizontalAlignment="Center"/>
@@ -378,29 +579,6 @@
                 <Setter Property="Margin" Value="0,0,3,0"/>
               </Style>
             </StackPanel.Resources>
-            <!-- text: font, size, style -->
-            <StackPanel x:Name="TextFormat">
-              <DockPanel Margin="0,0,0,4">
-                <Button DockPanel.Dock="Right" Content="A▾" ToolTip="Smaller (Ctrl+Shift+,)" Click="Smaller_Click" Margin="3,0,0,0"/>
-                <Button DockPanel.Dock="Right" Content="A▴" ToolTip="Bigger (Ctrl+Shift+.)" Click="Bigger_Click" Margin="3,0,0,0"/>
-                <TextBox DockPanel.Dock="Right" x:Name="SizeBox" Width="52" ToolTip="Font size · Enter applies" KeyDown="SizeBox_KeyDown" Margin="6,0,0,0"/>
-                <ComboBox x:Name="FontCombo" IsEditable="True" IsTextSearchEnabled="True" ToolTip="Font family"
-                          SelectionChanged="FontCombo_SelectionChanged" KeyDown="FontCombo_KeyDown"/>
-              </DockPanel>
-              <WrapPanel Margin="0,0,0,4">
-                <ToggleButton x:Name="BoldButton" Content="B" FontWeight="Bold" ToolTip="Bold (Ctrl+B)" Click="Bold_Click"/>
-                <ToggleButton x:Name="ItalicButton" Content="I" FontStyle="Italic" ToolTip="Italic (Ctrl+I)" Click="Italic_Click"/>
-                <ToggleButton x:Name="UnderlineButton" ToolTip="Underline (Ctrl+U)" Click="Underline_Click"><TextBlock Text="U" TextDecorations="Underline"/></ToggleButton>
-                <ToggleButton x:Name="StrikeButton" ToolTip="Strikethrough" Click="Strike_Click"><TextBlock Text="S" TextDecorations="Strikethrough"/></ToggleButton>
-                <Button x:Name="HighlightButton" ToolTip="Highlight" Click="Highlight_Click"><TextBlock Text="H" Background="#80FFD400" Padding="3,0"/></Button>
-                <Separator Margin="3,2" Width="1"/>
-                <ToggleButton x:Name="AlignLeftButton" ToolTip="Align left" Tag="left" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E4;"/></ToggleButton>
-                <ToggleButton x:Name="AlignCenterButton" ToolTip="Center" Tag="center" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E3;"/></ToggleButton>
-                <ToggleButton x:Name="AlignRightButton" ToolTip="Align right" Tag="right" Click="Align_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E2;"/></ToggleButton>
-                <Button ToolTip="Line spacing" Click="Spacing_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9E9;"/></Button>
-                <Button ToolTip="Clear formatting" Click="ClearFormat_Click"><TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE894;"/></Button>
-              </WrapPanel>
-            </StackPanel>
             <!-- colour -->
             <DockPanel Margin="0,0,0,4">
               <TextBlock Text="Color" VerticalAlignment="Center" Width="44" FontSize="12"/>
@@ -408,6 +586,14 @@
                 <Border x:Name="ColorSwatchFill" Width="18" Height="14" BorderBrush="#80808080" BorderThickness="1"/>
               </Button>
               <TextBox x:Name="ColorBox" KeyDown="ColorBox_KeyDown" ToolTip="#RRGGBB · Enter applies" Margin="4,0,0,0"/>
+            </DockPanel>
+            <!-- picture border: a frame drawn around a picture -->
+            <DockPanel Margin="0,0,0,4" x:Name="BorderFields" Visibility="Collapsed">
+              <TextBlock Text="Border" VerticalAlignment="Center" Width="44" FontSize="12"/>
+              <Button x:Name="BorderSwatch" DockPanel.Dock="Left" Width="30" Height="24" Padding="0" Click="BorderSwatch_Click" ToolTip="Picture border colour">
+                <Border x:Name="BorderSwatchFill" Width="18" Height="14" BorderBrush="#80808080" BorderThickness="1"/>
+              </Button>
+              <TextBox x:Name="BorderBox" KeyDown="BorderBox_KeyDown" ToolTip="#RRGGBB · Enter applies · empty removes the border" Margin="4,0,0,0"/>
             </DockPanel>
             <!-- geometry: centre, size, rotation (frame pixels, degrees) -->
             <Grid Margin="0,0,0,4" x:Name="GeometryFields">
@@ -461,6 +647,23 @@
             <Button Content="To Back" Tag="back" Click="Arrange_Click" ToolTip="Send to back (Ctrl+Shift+[)"/>
             <Button Content="Group" Click="Group_Click" ToolTip="Group (Ctrl+G)"/>
             <Button Content="Ungroup" Click="Ungroup_Click" ToolTip="Ungroup (Ctrl+Shift+G)"/>
+          </WrapPanel>
+          <!-- align to the slide: shown for any selection -->
+          <WrapPanel Margin="10,0,10,0" x:Name="SlideAlignBar">
+            <WrapPanel.Resources>
+              <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                <Setter Property="Padding" Value="6,2"/>
+                <Setter Property="Margin" Value="0,0,3,3"/>
+                <Setter Property="FontSize" Value="12"/>
+              </Style>
+            </WrapPanel.Resources>
+            <TextBlock Text="On slide" VerticalAlignment="Center" FontSize="12" Opacity="0.75" Margin="0,0,6,3"/>
+            <Button Content="Left" Tag="left" Click="AlignOnSlide_Click" ToolTip="Align to the slide's left edge"/>
+            <Button Content="Center" Tag="hcenter" Click="AlignOnSlide_Click" ToolTip="Center across the slide"/>
+            <Button Content="Right" Tag="right" Click="AlignOnSlide_Click" ToolTip="Align to the slide's right edge"/>
+            <Button Content="Top" Tag="top" Click="AlignOnSlide_Click" ToolTip="Align to the slide's top edge"/>
+            <Button Content="Middle" Tag="vcenter" Click="AlignOnSlide_Click" ToolTip="Center down the slide"/>
+            <Button Content="Bottom" Tag="bottom" Click="AlignOnSlide_Click" ToolTip="Align to the slide's bottom edge"/>
           </WrapPanel>
         </StackPanel>
         <DockPanel Grid.Row="1">

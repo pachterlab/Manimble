@@ -98,30 +98,51 @@ public partial class MainWindow
         ["regex"] = FindRegex.IsChecked == true, ["notes"] = FindNotes.IsChecked == true,
     };
 
+    /// Find lives at the right of the formatting row and is always there once a deck is open;
+    /// Ctrl+F focuses it, Ctrl+H also shows the replace row under it.
     void OpenFind(bool replace)
     {
         if (workspace == null) return;
-        if (!findHooked) { findTimer.Tick += async (_, _) => { findTimer.Stop(); await RunFind(keepIndex: false); }; findHooked = true; }
-        FindBar.Visibility = Visibility.Visible;
-        ReplaceRow.Visibility = replace ? Visibility.Visible : Visibility.Collapsed;
+        if (replace) ShowReplace(true);
         // the selected text is what to look for
         if (FindBox.Text.Length == 0 && SelectedObj is { IsText: true } o && !o.Value.Contains('\n')) FindBox.Text = o.Value;
         FindBox.Focus();
         FindBox.SelectAll();
     }
 
+    void ShowReplace(bool on)
+    {
+        ReplaceRow.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        ReplaceToggle.IsChecked = on;
+    }
+
     void Find_Click(object sender, RoutedEventArgs e) => OpenFind(false);
     void FindReplace_Click(object sender, RoutedEventArgs e) => OpenFind(true);
     void FindClose_Click(object sender, RoutedEventArgs e) => CloseFind();
+    void ReplaceToggle_Click(object sender, RoutedEventArgs e)
+    {
+        ShowReplace(ReplaceToggle.IsChecked == true);
+        if (ReplaceToggle.IsChecked == true) ReplaceBox.Focus();
+    }
 
+    /// Clears the search and hides the replace row.
     void CloseFind()
     {
-        FindBar.Visibility = Visibility.Collapsed;
+        findTimer.Stop();
+        FindBox.Text = "";
+        findMatches = new(); findIndex = -1; FindCount.Text = "";
+        ShowReplace(false);
         canvas.Focus();
     }
 
-    void FindBox_TextChanged(object sender, TextChangedEventArgs e) { findTimer.Stop(); findTimer.Start(); }
-    void FindOption_Click(object sender, RoutedEventArgs e) { findTimer.Stop(); findTimer.Start(); }
+    void RestartFindTimer()
+    {
+        if (!findHooked) { findTimer.Tick += async (_, _) => { findTimer.Stop(); await RunFind(keepIndex: false); }; findHooked = true; }
+        findTimer.Stop(); findTimer.Start();
+    }
+
+    void FindBox_TextChanged(object sender, TextChangedEventArgs e) => RestartFindTimer();
+    void FindOption_Click(object sender, RoutedEventArgs e) => RestartFindTimer();
 
     void FindBox_KeyDown(object sender, KeyEventArgs e)
     {
@@ -137,7 +158,7 @@ public partial class MainWindow
 
     async Task RunFind(bool keepIndex)
     {
-        if (FindBox.Text.Length == 0) { findMatches = new(); findIndex = -1; FindCount.Text = ""; return; }
+        if (workspace == null || FindBox.Text.Length == 0) { findMatches = new(); findIndex = -1; FindCount.Text = ""; return; }
         FindResult? r;
         try { r = await engine.Call<FindResult>("find", FindOptions()); }
         catch (Exception ex) { FindCount.Text = "error"; Toast(ex.Message, error: true); return; }
@@ -161,7 +182,7 @@ public partial class MainWindow
 
     async Task StepFind(int d)
     {
-        if (FindBar.Visibility != Visibility.Visible) { OpenFind(false); return; }
+        if (FindBox.Text.Length == 0) { OpenFind(false); return; }
         if (findMatches.Count == 0) { await RunFind(keepIndex: false); return; }
         findIndex = (findIndex + d + findMatches.Count) % findMatches.Count;
         UpdateFindCount();
@@ -234,8 +255,8 @@ public partial class MainWindow
     void ZoomOut_Click(object sender, RoutedEventArgs e) => canvas.ZoomBy(0.8);
     void ZoomFit_Click(object sender, RoutedEventArgs e) => canvas.Zoom = null;
     void ZoomActual_Click(object sender, RoutedEventArgs e) => canvas.Zoom = 1;
-    void Grid_Click(object sender, RoutedEventArgs e) => canvas.ShowGrid = GridItem.IsChecked;
-    void Snap_Click(object sender, RoutedEventArgs e) => canvas.SnapEnabled = SnapItem.IsChecked;
+    void Grid_Click(object sender, RoutedEventArgs e) { canvas.ShowGrid = GridItem.IsChecked; GridButton.IsChecked = GridItem.IsChecked; }
+    void Snap_Click(object sender, RoutedEventArgs e) { canvas.SnapEnabled = SnapItem.IsChecked; SnapButton.IsChecked = SnapItem.IsChecked; }
 
     // ================================================================ rulers and guides
 

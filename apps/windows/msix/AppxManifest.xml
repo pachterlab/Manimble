@@ -7,7 +7,7 @@
 
   Manimble is a full-trust desktop app (runFullTrust). File-system and registry write virtualization are off
   (unvirtualizedResources) so it keeps its files in the real %LOCALAPPDATA%\Manimble, as the zip and installer
-  builds do: the Python environment the first-launch setup makes there, and the Python (winget) and MiKTeX it may
+  builds do: the Python environment the first-launch setup makes there, and the Python (winget) and TinyTeX it may
   install, have to be visible to the terminal and to the user's own tools, not hidden in a per-package copy.
   Partner Center asks why both restricted capabilities are needed; apps/windows/STORE.md has the answers.
 -->

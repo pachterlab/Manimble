@@ -1667,6 +1667,45 @@ class Planner:
             return [Edit(src.rel, a, b, f"({args})")]
         return [self._append_chain(obj["frames"], f".add_background_rectangle({args})")]
 
+    def border_of(self, obj: dict) -> str | None:
+        """The colour of a picture's border (`img.add(border(img, color=...))  # manimble border`), if it has one."""
+        try:
+            src, call, top, stmt = self._creation(obj)
+        except EditError:
+            return None
+        var = _assigned_name(stmt, top)
+        s = self._decoration_stmt(src, stmt, var, "border") if var else None
+        if s is None:
+            return None
+        inner = s.value.args[0] if s.value.args else None
+        col = next((k.value for k in inner.keywords if k.arg == "color"), None) if isinstance(inner, ast.Call) else None
+        return col.value if isinstance(col, ast.Constant) and isinstance(col.value, str) else "#FFFFFF"
+
+    def plan_border(self, obj: dict, color: str | None, width: float = 4) -> list[Edit]:
+        """A picture's border: a rectangle the size of the picture attached to it (`img.add(border(img, ...))`), so it
+        moves, scales and fades with it. None removes it."""
+        if obj["kind"] != "image":
+            raise EditError("only pictures can be given a border")
+        src, call, top, stmt = self._creation(obj)
+        var = _assigned_name(stmt, top)
+        existing = self._decoration_stmt(src, stmt, var, "border") if var else None
+        if color is None:
+            if existing is None:
+                return []
+            a, b = _stmt_lines(src, existing)
+            return [Edit(src.rel, a, b, "")]
+        code = f"{var}.add(border({var}, color={py_str(color.upper())}, stroke_width={fmt(width, 1)}))  # manimble border"
+        if existing is not None:
+            a, b = _stmt_lines(src, existing)
+            return [Edit(src.rel, a, b, " " * existing.col_offset + code + "\n")]
+        edits: list[Edit] = []
+        if not var:
+            var, edits = self._ensure_var(obj, src, top, stmt)
+            code = f"{var}.add(border({var}, color={py_str(color.upper())}, stroke_width={fmt(width, 1)}))  # manimble border"
+        edits += ensure_helpers(self.p, src, ["border"])
+        edits.append(_after_stmt(src, stmt, code))
+        return _merge_helper_edits(edits)
+
     def _link_call(self, src: Src, call):
         """The `.set(manimble_link=...)` in the object's method chain, if any."""
         return next((c for c in self._chain(src, call) if isinstance(c.func, ast.Attribute) and c.func.attr == "set"
@@ -2251,10 +2290,21 @@ def highlight_chars(mobject, chars, opacity=0.6, buff=0.06):
     return out
 '''
 
+BORDER_SOURCE = '''
+
+def border(mobject, color="#FFFFFF", stroke_width=4):
+    """A frame around a picture, its size: added to the picture, it moves, scales and fades with it."""
+    from manim import Rectangle
+    out = Rectangle(width=mobject.width, height=mobject.height, color=color, stroke_width=stroke_width)
+    out.move_to(mobject.get_center())
+    out.manimble_decoration = True
+    return out
+'''
+
 # appended to an existing manimble_helpers.py that lacks them
 HELPER_FUNCS = {"sub_slides": SUB_SLIDES_SOURCE, "underline_chars": CHARS_SOURCE, "strike_chars": CHARS_SOURCE,
-                "highlight_chars": CHARS_SOURCE}
-HELPERS_SOURCE += SUB_SLIDES_SOURCE + CHARS_SOURCE
+                "highlight_chars": CHARS_SOURCE, "border": BORDER_SOURCE}
+HELPERS_SOURCE += SUB_SLIDES_SOURCE + CHARS_SOURCE + BORDER_SOURCE
 
 
 def ensure_helpers(project, src: Src, wanted: list[str]) -> list[Edit]:

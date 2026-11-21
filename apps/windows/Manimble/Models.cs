@@ -99,6 +99,7 @@ public sealed class ObjInfo
     public SharedInfo? Shared { get; set; }
     public string? Image { get; set; }
     public string? ImagePath { get; set; }
+    public string? Border { get; set; }
     public string? Shape { get; set; }
     public double? Rotation { get; set; }
     public double[]? Dims { get; set; }

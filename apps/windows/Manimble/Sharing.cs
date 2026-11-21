@@ -211,12 +211,20 @@ public partial class MainWindow
         if (path == null) return;
         var opts = ExportOptions("Export to PDF", false, "");
         if (opts is not { } o) return;
+        if (await WritePdf(path, o.builds)) Tools.Reveal(path);
+    }
+
+    /// Renders every slide (every build with `builds`) and writes them to the PDF at `path`; false (with a toast)
+    /// when it could not. Export to PDF and the toolbar's Share PDF.
+    async Task<bool> WritePdf(string path, bool builds)
+    {
+        if (workspace == null || engine.Python == null) return false;
         await FinishEdits();
         Busy(+1, "Rendering every slide for the PDF…");
         try
         {
-            var r = await engine.Call<PagesResult>("pages", new JsonObject { ["builds"] = o.builds });
-            if (r?.Pages is not { Count: > 0 } pages) { Toast(r?.Error ?? "Could not render the slides for the PDF", error: true); return; }
+            var r = await engine.Call<PagesResult>("pages", new JsonObject { ["builds"] = builds });
+            if (r?.Pages is not { Count: > 0 } pages) { Toast(r?.Error ?? "Could not render the slides for the PDF", error: true); return false; }
             // the pages into one PDF with Pillow, which the engine's Python has
             var list = Path.Combine(Path.GetTempPath(), "manimble-pdf-pages.json");
             File.WriteAllText(list, JsonSerializer.Serialize(new { pages, path }));
@@ -228,11 +236,11 @@ public partial class MainWindow
             using var p = Process.Start(psi)!;
             var err = await p.StandardError.ReadToEndAsync();
             await p.WaitForExitAsync();
-            if (p.ExitCode != 0) { Toast("Could not write the PDF: " + LastLine(err), error: true); return; }
+            if (p.ExitCode != 0) { Toast("Could not write the PDF: " + LastLine(err), error: true); return false; }
             Toast("Saved " + Path.GetFileName(path) + $" ({pages.Count} pages)");
-            Tools.Reveal(path);
+            return true;
         }
-        catch (Exception ex) { Toast("Could not export the PDF: " + ex.Message, error: true); }
+        catch (Exception ex) { Toast("Could not export the PDF: " + ex.Message, error: true); return false; }
         finally { Busy(-1); }
     }
 

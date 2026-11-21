@@ -17,6 +17,7 @@
 | <kbd>⌘</kbd><kbd>Z</kbd> | Undo |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd> | Redo |
 | <kbd>⌘</kbd><kbd>X</kbd> / <kbd>⌘</kbd><kbd>C</kbd> / <kbd>⌘</kbd><kbd>V</kbd> | Cut / Copy / Paste |
+| <kbd>⌘</kbd><kbd>D</kbd> | Duplicate the selected objects (the slide, when nothing is selected) |
 | <kbd>⌘</kbd><kbd>A</kbd> | Select every object on the slide; in a text box, the code editor or the terminal, select all of its text |
 | <kbd>⌘</kbd><kbd>F</kbd> | Find… |
 | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>F</kbd> | Find and Replace… |
@@ -28,6 +29,8 @@
 | Arrow keys | Nudge the selection |
 | <kbd>⇧</kbd> + arrow keys | Nudge in bigger steps |
 | <kbd>↩</kbd> | Edit the selected object's text or formula |
+| <kbd>⇥</kbd> / <kbd>⇧</kbd><kbd>⇥</kbd> | Select the next / previous object |
+| <kbd>Home</kbd> / <kbd>End</kbd> | Go to the first / last slide |
 | <kbd>⌫</kbd> | Delete the selection |
 | <kbd>Esc</kbd> | Deselect; put away a drawing tool |
 | <kbd>⇧</kbd>-click | Add to the selection |
@@ -58,7 +61,7 @@
 | Shortcut | Command |
 |---|---|
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>N</kbd> | New Slide ▸ Title and Content |
-| <kbd>⌘</kbd><kbd>D</kbd> | Duplicate Slide |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>D</kbd> | Duplicate Slide |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>⌫</kbd> | Delete Slide |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>H</kbd> | Hide Slide / Unhide Slide |
 | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>↑</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>↓</kbd> | Move Slide Up / Down |
@@ -74,7 +77,7 @@
 | <kbd>⌘</kbd><kbd>U</kbd> | Underline |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>+</kbd> | Superscript |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>_</kbd> | Subscript |
-| <kbd>⌥</kbd><kbd>⌘</kbd><kbd>=</kbd> / <kbd>⌥</kbd><kbd>⌘</kbd><kbd>-</kbd> | Bigger / Smaller |
+| <kbd>⇧</kbd><kbd>⌘</kbd><kbd>></kbd> / <kbd>⇧</kbd><kbd>⌘</kbd><kbd><</kbd> | Bigger / Smaller |
 | <kbd>⌘</kbd><kbd>K</kbd> | Hyperlink… |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>8</kbd> | Bulleted List |
 | <kbd>⇧</kbd><kbd>⌘</kbd><kbd>7</kbd> | Numbered List |
@@ -121,6 +124,16 @@
 | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>P</kbd> | Play from Current Slide |
 | <kbd>⌃</kbd><kbd>⌘</kbd><kbd>P</kbd> | Presenter View |
 | <kbd>⌥</kbd><kbd>⌘</kbd><kbd>R</kbd> | Preview Current Slide's Animations |
+
+## Windows
+
+The Windows app uses <kbd>Ctrl</kbd> for <kbd>⌘</kbd>, and follows PowerPoint for Windows where the two differ:
+<kbd>Ctrl</kbd><kbd>M</kbd> (or <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>N</kbd>) adds a slide, <kbd>Ctrl</kbd><kbd>D</kbd>
+duplicates the selected objects (the slide when nothing is selected), <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>D</kbd>
+duplicates the slide, <kbd>Ctrl</kbd><kbd>L</kbd> / <kbd>Ctrl</kbd><kbd>E</kbd> / <kbd>Ctrl</kbd><kbd>R</kbd> align
+text left / centre / right, <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>></kbd> / <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd><</kbd>
+make text bigger / smaller, and <kbd>F5</kbd> / <kbd>Shift</kbd><kbd>F5</kbd> play from the beginning / the current
+slide. <kbd>Tab</kbd>, <kbd>Home</kbd> and <kbd>End</kbd> work as on the Mac.
 
 The keys that work during a show are listed in [Playing a presentation](../presenting/playing.md#keys-during-a-show).
 In Presenter View, <kbd>R</kbd> resets the timer (instead of replaying the build) and <kbd>F</kbd> turns Feedback

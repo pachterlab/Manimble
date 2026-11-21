@@ -1,15 +1,23 @@
 using System.IO;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace Manimble;
 
+/// How slides are shown; nothing is written to the deck (Format > Apply Dark Mode to Deck does that).
+public enum ColorView { Normal, Dark, Invert }
+
 /// Loads the engine's PNGs and JPEGs into memory, so the files are never locked (the engine rewrites and deletes
-/// them), with a small cache keyed by path and modification time.
+/// them), with a small cache keyed by path and modification time. In dark mode or with inverted colours every
+/// picture comes back mapped, so the canvas, thumbnails and slideshow all show the same view.
 public static class Images
 {
     static readonly Dictionary<string, (DateTime stamp, BitmapSource img)> cache = new(StringComparer.OrdinalIgnoreCase);
     static readonly LinkedList<string> order = new();
     const int Max = 400;
+
+    /// The view now; set it, then redraw whatever shows pictures.
+    public static ColorView View { get; set; } = ColorView.Normal;
 
     public static BitmapSource? Load(string? path, int decodeWidth = 0)
     {
@@ -18,7 +26,8 @@ public static class Images
         {
             var fi = new FileInfo(path);
             if (!fi.Exists) return null;
-            var key = decodeWidth > 0 ? path + "|" + decodeWidth : path;
+            var view = View;
+            var key = (decodeWidth > 0 ? path + "|" + decodeWidth : path) + (view == ColorView.Normal ? "" : "|" + view);
             if (cache.TryGetValue(key, out var c) && c.stamp == fi.LastWriteTimeUtc) return c.img;
             var bytes = File.ReadAllBytes(path);
             var bi = new BitmapImage();
@@ -29,19 +38,70 @@ public static class Images
             bi.StreamSource = new MemoryStream(bytes);
             bi.EndInit();
             bi.Freeze();
-            cache[key] = (fi.LastWriteTimeUtc, bi);
+            BitmapSource img = view == ColorView.Normal ? bi : Map(bi, view);
+            cache[key] = (fi.LastWriteTimeUtc, img);
             order.AddLast(key);
             while (order.Count > Max)
             {
                 cache.Remove(order.First!.Value);
                 order.RemoveFirst();
             }
-            return bi;
+            return img;
         }
         catch (Exception e)
         {
             Log.Note($"image {path}: {e.Message}");
             return null;
         }
+    }
+
+    // Chroma (max - min) below Lo is fully flipped, above Hi kept: the Mac's DarkMode.map and engine/manimble/darkmode.py.
+    const float Lo = 0.12f, Hi = 0.28f;
+
+    public static (float r, float g, float b) MapColor(float r, float g, float b, ColorView view)
+    {
+        switch (view)
+        {
+            case ColorView.Normal: return (r, g, b);
+            case ColorView.Invert: return (1 - r, 1 - g, 1 - b);
+        }
+        float mx = Math.Max(r, Math.Max(g, b)), mn = Math.Min(r, Math.Min(g, b));
+        float t = Math.Clamp((mx - mn - Lo) / (Hi - Lo), 0, 1);
+        float k = (1 - t * t * (3 - 2 * t)) * (1 - mx - mn);
+        return (r + k, g + k, b + k);
+    }
+
+    public static Color MapColor(Color c, ColorView view)
+    {
+        var (r, g, b) = MapColor(c.R / 255f, c.G / 255f, c.B / 255f, view);
+        return Color.FromArgb(c.A, ToByte(r), ToByte(g), ToByte(b));
+    }
+
+    static byte ToByte(float v) => (byte)Math.Clamp((int)MathF.Round(v * 255), 0, 255);
+
+    /// A picture with every pixel mapped (premultiplied alpha is undone first, so edges keep their colour).
+    static BitmapSource Map(BitmapSource src, ColorView view)
+    {
+        var conv = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
+        int w = conv.PixelWidth, h = conv.PixelHeight, stride = w * 4;
+        var px = new byte[stride * h];
+        conv.CopyPixels(px, stride, 0);
+        var lut = new Dictionary<int, int>();
+        for (int i = 0; i < px.Length; i += 4)
+        {
+            byte a = px[i + 3];
+            if (a == 0) continue;
+            int rgb = px[i + 2] << 16 | px[i + 1] << 8 | px[i];
+            if (!lut.TryGetValue(rgb, out var m))
+            {
+                var (r, g, b) = MapColor(px[i + 2] / 255f, px[i + 1] / 255f, px[i] / 255f, view);
+                m = ToByte(r) << 16 | ToByte(g) << 8 | ToByte(b);
+                if (lut.Count < 1 << 20) lut[rgb] = m;
+            }
+            px[i + 2] = (byte)(m >> 16); px[i + 1] = (byte)(m >> 8); px[i] = (byte)m;
+        }
+        var outImg = BitmapSource.Create(w, h, src.DpiX, src.DpiY, PixelFormats.Bgra32, null, px, stride);
+        outImg.Freeze();
+        return outImg;
     }
 }

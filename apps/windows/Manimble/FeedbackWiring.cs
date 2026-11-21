@@ -33,6 +33,7 @@ public partial class MainWindow
         feedback = workspace is { } ws ? new FeedbackStore(Path.Combine(ws.Work, "feedback.json"), File.Exists(Path.Combine(ws.Original, "feedback.json"))) : null;
         editorFeedback.Store = feedback;
         editorFeedback.Scene = null;
+        WatchFeedbackCount();
     }
 
     /// The editor moved to another slide or build: its notes come along.

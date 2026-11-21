@@ -10,15 +10,21 @@ public static class Tools
     static string Roaming => Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
     static string ProgramFiles => Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
 
-    /// Folders that hold a TeX distribution's programs (MiKTeX per-user or for all users, TinyTeX, TeX Live).
+    /// Folders that hold a TeX distribution's programs, best first: a TeX the user installed themselves (MiKTeX per-user
+    /// or for all users, TeX Live) before TinyTeX, which setup installs when there is none, as the Mac app puts
+    /// /Library/TeX/texbin before ~/Library/TinyTeX.
     public static IEnumerable<string> TexDirs()
     {
         yield return Path.Combine(Local, "Programs", "MiKTeX", "miktex", "bin", "x64");
         yield return Path.Combine(ProgramFiles, "MiKTeX", "miktex", "bin", "x64");
-        yield return Path.Combine(Roaming, "TinyTeX", "bin", "windows");
-        yield return Path.Combine(Roaming, "TinyTeX", "bin", "win32");
         foreach (var year in Enumerable.Range(2020, 12).Reverse())
             yield return $@"C:\texlive\{year}\bin\windows";
+        // install_dependencies.ps1 puts TinyTeX in %ProgramData% when %APPDATA% has spaces or non-ASCII characters
+        foreach (var parent in new[] { Roaming, Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData) })
+        {
+            yield return Path.Combine(parent, "TinyTeX", "bin", "windows");
+            yield return Path.Combine(parent, "TinyTeX", "bin", "win32");
+        }
     }
 
     /// PATH for the engine: the Python environment's Scripts folder (manim-slides, ffmpeg wrappers), TeX and the rest.
@@ -31,6 +37,11 @@ public static class Tools
         dirs.AddRange(current.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries));
         return string.Join(Path.PathSeparator, dirs.Distinct(StringComparer.OrdinalIgnoreCase));
     }
+
+    /// Where install_dependencies.ps1 puts TinyTeX: TinyTeX's own rule, %APPDATA% unless its path has spaces or
+    /// non-ASCII characters, then %ProgramData%.
+    public static string TinyTeXHome =>
+        Path.Combine(Roaming.All(c => c > ' ' && c <= '~') ? Roaming : Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "TinyTeX");
 
     public static bool HasLatex() =>
         TexDirs().Any(d => File.Exists(Path.Combine(d, "latex.exe"))) || Which("latex.exe") != null;
