@@ -29,6 +29,7 @@ public sealed class SlideshowWindow : Window
     readonly string startScene;
     readonly int startPage;
     bool black;
+    readonly ShowZoom zoom;
 
     public SlideshowWindow(Engine engine, string startScene, int startPage)
     {
@@ -48,12 +49,13 @@ public sealed class SlideshowWindow : Window
         g.Children.Add(info);
         Content = g;
         KeyDown += OnKey;
-        // a click opens the hyperlink under it, else advances
-        MouseLeftButtonDown += (_, e) => { if (LinkAt(e.GetPosition(this)) is { } url) Tools.OpenUrl(url); else Step(+1); };
+        // a click (or a touch tap) opens the hyperlink under it, else advances; a pinch zooms
+        zoom = new ShowZoom(this, image, p => Click(TranslatePoint(p, image)));
+        MouseLeftButtonDown += (_, e) => Click(e.GetPosition(image));
         MouseRightButtonDown += (_, _) => Step(-1);
         MouseMove += (_, e) =>
         {
-            Cursor = LinkAt(e.GetPosition(this)) != null ? Cursors.Hand : Cursors.Arrow;
+            Cursor = LinkAt(e.GetPosition(image)) != null ? Cursors.Hand : Cursors.Arrow;
             hideCursor.Stop(); hideCursor.Start();
         };
         hideCursor.Tick += (_, _) => { hideCursor.Stop(); Cursor = Cursors.None; };
@@ -109,12 +111,15 @@ public sealed class SlideshowWindow : Window
         info.Text = $"{slide + 1} / {deck.Count}" + (s.Pages.Count > 1 ? $" · {page + 1}/{s.Pages.Count}" : "");
     }
 
+    void Click(Point p) { if (LinkAt(p) is { } url) Tools.OpenUrl(url); else Step(+1); }
+
+    /// The hyperlink under a point of the (possibly zoomed) image, in its own unzoomed coordinates.
     string? LinkAt(Point p)
     {
         if (black || slide >= deck.Count || image.Source is not System.Windows.Media.Imaging.BitmapSource b || b.PixelHeight == 0) return null;
         var regions = deck[slide].Links?.ElementAtOrDefault(page);
         if (regions == null || regions.Count == 0) return null;
-        return LinkRegion.Fraction(p, RenderSize, (double)b.PixelWidth / b.PixelHeight) is { } f ? LinkRegion.At(regions, f) : null;
+        return LinkRegion.Fraction(p, image.RenderSize, (double)b.PixelWidth / b.PixelHeight) is { } f ? LinkRegion.At(regions, f) : null;
     }
 
     void Step(int d)
@@ -122,6 +127,7 @@ public sealed class SlideshowWindow : Window
         if (deck.Count == 0) return;
         black = false;
         var s = deck[slide];
+        var was = slide;
         if (d > 0)
         {
             if (page + 1 < s.Pages.Count) page++;
@@ -133,6 +139,7 @@ public sealed class SlideshowWindow : Window
             if (page > 0) page--;
             else if (slide > 0) { slide--; page = Math.Max(0, deck[slide].Pages.Count - 1); }
         }
+        if (slide != was) zoom.Reset();
         ShowPage();
     }
 
@@ -140,11 +147,11 @@ public sealed class SlideshowWindow : Window
     {
         switch (e.Key)
         {
-            case Key.Escape: Close(); break;
+            case Key.Escape: if (zoom.IsZoomed) zoom.Reset(); else Close(); break;
             case Key.Right or Key.Down or Key.Space or Key.PageDown or Key.Enter or Key.N: Step(+1); break;
             case Key.Left or Key.Up or Key.PageUp or Key.Back or Key.P: Step(-1); break;
-            case Key.Home: slide = 0; page = 0; ShowPage(); break;
-            case Key.End: slide = deck.Count - 1; page = 0; ShowPage(); break;
+            case Key.Home: slide = 0; page = 0; zoom.Reset(); ShowPage(); break;
+            case Key.End: slide = deck.Count - 1; page = 0; zoom.Reset(); ShowPage(); break;
             case Key.B or Key.OemPeriod: black = !black; ShowPage(); break;
             default: return;
         }

@@ -654,6 +654,7 @@ extension MainController {
         m.addItem(newItem)
         add("New Build", #selector(newBuild))
         add("Duplicate Slide", #selector(duplicateSlide))
+        add("Duplicate Build", #selector(duplicateBuild))
         m.addItem(.separator())
         add("Export Slide as Movie (.mp4)…", #selector(exportSlideMovie(_:)), navigatorScenes[row].name)
         m.addItem(.separator())

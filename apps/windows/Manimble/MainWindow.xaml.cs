@@ -133,14 +133,18 @@ public partial class MainWindow : Window
         canvas.HasCornerAction = oid => PlotOf(oid) != null;
         canvas.CornerAction += RerunPlot;
         canvas.ObjectDoubleClicked += EditPlot;
-        canvas.CanDrop = d => d.GetDataPresent(BioCartoonPanel.DragFormat);
-        canvas.DataDropped += (d, p) => { if (BioCartoonPanel.FromDrag(d) is { } icon) BioCartoonDropped(icon, p); };
+        canvas.CanDrop = d => d.GetDataPresent(BioCartoonPanel.DragFormat) || CanDropPictures(d);
+        canvas.DataDropped += (d, p) =>
+        {
+            if (BioCartoonPanel.FromDrag(d) is { } icon) BioCartoonDropped(icon, p);
+            else PicturesDropped(d, p);
+        };
         canvas.TextCommitted += (oid, text) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "text", ["value"] = text }));
         canvas.PlaceholderCommitted += OnPlaceholderCommitted;
         canvas.SelectionChanged += RebuildInspector;
         canvas.GuidesChanged += SaveGuides;
         canvas.ShowRulers = RulerItem.IsChecked = Settings.Current.ShowRulers;
-        canvas.ResizeCommitted += (oid, ratio) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "resize", ["ratio"] = ratio }));
+        canvas.ResizeCommitted += OnResizeCommitted;
         canvas.WrapCommitted += (oid, width, side) => Submit(() => RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "wrap", ["width"] = width, ["side"] = side }));
         canvas.EndpointsCommitted += (oid, e) => Submit(() => RunEdit(new JsonObject
             { ["oid"] = oid, ["op"] = "endpoints", ["sx"] = e[0], ["sy"] = e[1], ["ex"] = e[2], ["ey"] = e[3] }));
@@ -759,7 +763,7 @@ public partial class MainWindow : Window
 
     // drag a slide in the navigator to reorder the show
     Point? listDown;
-    void SlideList_PreviewDown(object sender, MouseButtonEventArgs e) => listDown = e.GetPosition(SlideList);
+    void SlideList_PreviewDown(object sender, MouseButtonEventArgs e) { listDown = e.GetPosition(SlideList); buildFocused = false; }
     void SlideList_PreviewMove(object sender, MouseEventArgs e)
     {
         if (listDown is not Point d || e.LeftButton != MouseButtonState.Pressed) return;
@@ -872,12 +876,43 @@ public partial class MainWindow : Window
 
     (string scene, int oid, int stop)? lastBuildMove;
 
-    /// Right after a move in one build, that move in every build instead (Ctrl+Shift+A, as on the Mac).
-    void SpreadLastMove()
+    /// A handle dragged on the slide: a corner resizes in proportion, a side handle stretches a picture or shape
+    /// (a size edit, as the inspector's unlocked width and height). The engine resizes about the centre, so a
+    /// move by (dx, dy) follows to keep the opposite corner or side where it was, the two as one undo step; the
+    /// move applies in every build, as the resize does.
+    void OnResizeCommitted(int oid, double kx, double ky, double dx, double dy)
+    {
+        JsonObject req;
+        if (Math.Abs(kx - ky) < 1e-6) req = new JsonObject { ["oid"] = oid, ["op"] = "resize", ["ratio"] = kx };
+        else
+        {
+            if (scene?.Obj(oid) is not { } o) { canvas.ClearOverride(oid); return; }
+            var (w, h) = Dims(oid, o);
+            req = new JsonObject { ["oid"] = oid, ["op"] = "size" };
+            if (Math.Abs(kx - 1) > 1e-4) req["width"] = w * kx;
+            if (Math.Abs(ky - 1) > 1e-4) req["height"] = h * ky;
+        }
+        if (Math.Abs(dx) + Math.Abs(dy) < 0.5) { Submit(() => RunEdit(req)); return; }
+        Submit(() => AsOneUndoStep("Resize", async () =>
+        {
+            var r = await RunEdit(req, reload: false);
+            if (r?.Ok == true && r.Message != "no change")
+                await RunEdit(new JsonObject { ["oid"] = oid, ["op"] = "move", ["dx"] = dx, ["dy"] = dy });
+            else if (sceneName != null)
+            {
+                await LoadScene(sceneName, keepStop: true, keepOverrides: true);
+                canvas.ClearOverride(oid);
+            }
+        }));
+    }
+
+    /// Right after a move in one build, that move in every build instead (Ctrl+Shift+A, as on the Mac); with
+    /// `matching` (Ctrl+Alt+Shift+A), only in the builds where the object stood where it stood in this one.
+    void SpreadLastMove(bool matching = false)
     {
         if (lastBuildMove is not { } m || m.scene != sceneName) { Toast("Move an object in one build first"); return; }
         lastBuildMove = null;
-        Submit(() => RunEdit(new JsonObject { ["oid"] = m.oid, ["op"] = "spread", ["scene"] = m.scene, ["stop"] = m.stop }));
+        Submit(() => RunEdit(new JsonObject { ["oid"] = m.oid, ["op"] = matching ? "spread_match" : "spread", ["scene"] = m.scene, ["stop"] = m.stop }));
     }
 
     void Nudge(double dx, double dy)
@@ -958,9 +993,10 @@ public partial class MainWindow : Window
         Submit(() => RunEdit(new JsonObject { ["oid"] = s, ["op"] = "align", ["value"] = v }));
     }
     void Cut_Click(object sender, RoutedEventArgs e) => CutSelection();
-    void Copy_Click(object sender, RoutedEventArgs e) => CopySelection();
+    void Copy_Click(object sender, RoutedEventArgs e) { if (NavigatorFocused) CopySlide(); else CopySelection(); }
     void Paste_Click(object sender, RoutedEventArgs e) => PasteOnSlide();
     void SpreadMove_Click(object sender, RoutedEventArgs e) => SpreadLastMove();
+    void SpreadMatchingMove_Click(object sender, RoutedEventArgs e) => SpreadLastMove(true);
     void SelectAll_Click(object sender, RoutedEventArgs e) => canvas.SelectAll();
     void EditText_Click(object sender, RoutedEventArgs e) { if (canvas.Selected.Count == 1) canvas.BeginTextEdit(canvas.Selected[0]); }
 
@@ -1781,6 +1817,20 @@ public partial class MainWindow : Window
     // ================================================================ builds
 
     void NewBuild_Click(object sender, RoutedEventArgs e) => BuildOp("new_build", "could not add a build");
+    /// A copy of the build on screen right after it: the same picture and the same build notes.
+    void DuplicateBuild_Click(object sender, RoutedEventArgs e) => DuplicateBuild();
+
+    /// Duplicate build `stop` (default: the one on screen) of slide `target` (default: the slide on screen, else
+    /// that slide is opened first).
+    async void DuplicateBuild(string? target = null, int? stop = null)
+    {
+        if (target != null && target != sceneName)
+        {
+            await SelectScene(target);
+            if (sceneName != target) return;
+        }
+        BuildOp("new_build", "could not duplicate the build", copy: true, stopOverride: stop);
+    }
 
     void DeleteBuild_Click(object sender, RoutedEventArgs e)
     {
@@ -1788,15 +1838,17 @@ public partial class MainWindow : Window
         BuildOp("delete_build", "could not delete the build");
     }
 
-    void BuildOp(string cmd, string failure)
+    void BuildOp(string cmd, string failure, bool copy = false, int? stopOverride = null)
     {
         var name = sceneName;
         if (name == null || scene?.Stops == null) return;
-        var stop = stopIndex;
+        var stop = stopOverride ?? stopIndex;
         Submit(async () =>
         {
             Busy(+1, "Rendering…");
-            var r = await engine.TryCall<EditResult>(cmd, new JsonObject { ["scene"] = name, ["stop"] = stop });
+            var req = new JsonObject { ["scene"] = name, ["stop"] = stop };
+            if (copy) req["copy"] = true;
+            var r = await engine.TryCall<EditResult>(cmd, req);
             Busy(-1);
             if (r?.Ok != true) { Toast(r?.Error ?? failure, error: true); return; }
             Toast("Saved · " + (r.Message ?? cmd.Replace('_', ' ')));
@@ -2120,8 +2172,8 @@ public partial class MainWindow : Window
         if (ctrl && shift && key == Key.I) { InsertImage_Click(sender, e); e.Handled = true; return; }
         if (ctrl && shift && key == Key.P) { canvas.DrawTool = canvas.DrawTool == "pen" ? null : "pen"; e.Handled = true; return; }
         if (ctrl && shift && key == Key.B) { NewBuild_Click(sender, e); e.Handled = true; return; }
-        if (ctrl && shift && key == Key.A) { SpreadLastMove(); e.Handled = true; return; }
-        if (ctrl && !shift && key == Key.C) { CopySelection(); e.Handled = true; return; }
+        if (ctrl && shift && key == Key.A) { SpreadLastMove(Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)); e.Handled = true; return; }
+        if (ctrl && !shift && key == Key.C) { if (NavigatorFocused) CopySlide(); else CopySelection(); e.Handled = true; return; }
         if (ctrl && !shift && key == Key.X) { CutSelection(); e.Handled = true; return; }
         if (ctrl && !shift && key == Key.V) { PasteOnSlide(); e.Handled = true; return; }
         if (ctrl && !shift && key == Key.B) { ToggleBold(); e.Handled = true; return; }

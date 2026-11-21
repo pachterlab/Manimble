@@ -72,6 +72,7 @@ public sealed class AnimatedShowWindow : Window
     bool finished;
     bool showProgress = true;
     Mode mode;
+    readonly ShowZoom zoom;
 
     public event Action? Exited;
     public event Action? Changed;
@@ -120,12 +121,9 @@ public sealed class AnimatedShowWindow : Window
             Show(i < 0 ? 0 : i, Mode.Play);
         };
         KeyDown += OnKey;
-        // a click opens the hyperlink under it, else advances
-        MouseLeftButtonDown += (_, e) =>
-        {
-            if (LinkAt(e.GetPosition(media), media.RenderSize) is { } url) Tools.OpenUrl(url);
-            else Next();
-        };
+        // a click (or a touch tap) opens the hyperlink under it, else advances; a pinch zooms the slide
+        zoom = new ShowZoom(this, media, p => Click(TranslatePoint(p, media)));
+        MouseLeftButtonDown += (_, e) => Click(e.GetPosition(media));
         MouseRightButtonDown += (_, _) => Previous();
         MouseMove += (_, e) =>
         {
@@ -136,6 +134,12 @@ public sealed class AnimatedShowWindow : Window
         Cursor = Cursors.None;
         SizeChanged += (_, _) => UpdateChrome();
         Closed += (_, _) => { foreach (var p in players) p.Close(); Exited?.Invoke(); };
+    }
+
+    void Click(Point p)
+    {
+        if (LinkAt(p, media.RenderSize) is { } url) Tools.OpenUrl(url);
+        else Next();
     }
 
     /// The pages again, as slides that were still building get their clips (`present` "update" events). The show
@@ -163,6 +167,7 @@ public sealed class AnimatedShowWindow : Window
     void Show(int i, Mode m)
     {
         if (i < 0 || i >= deck.Slides.Count) return;
+        if (i != index && index < deck.Slides.Count && deck.Slides[i].Number != deck.Slides[index].Number) zoom.Reset();
         index = i;
         mode = m;
         generation++;
@@ -330,6 +335,7 @@ public sealed class AnimatedShowWindow : Window
         }
         switch (key)
         {
+            case Key.Escape when zoom.IsZoomed: zoom.Reset(); break;
             case Key.Escape or Key.Q: Close(); break;
             case Key.Right or Key.Down or Key.PageDown or Key.Enter or Key.N: Next(); break;
             case Key.Left or Key.Up or Key.PageUp or Key.Back: Previous(); break;

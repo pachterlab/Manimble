@@ -97,6 +97,8 @@ public partial class MainWindow
             if (sceneName != b.Scene) return;
         }
         ShowStop(b.Index);
+        buildFocused = true;                               // Ctrl+C now copies this build, not the slide
+        if (SlideList.ItemContainerGenerator.ContainerFromItem(SlideList.SelectedItem) is ListBoxItem li) li.Focus(); else SlideList.Focus();
     }
 
     // ================================================================ Shape: shapes, draw tools and the pen

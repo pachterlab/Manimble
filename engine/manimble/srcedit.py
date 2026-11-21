@@ -956,6 +956,59 @@ class Planner:
         return [(f"moved it in every build ({how})", edits + plan)
                 for how, plan in self.plan_move(own, x, y) if plan]
 
+    def one_build_shift(self, scene: dict, obj: dict, stops: list, stop: int) -> tuple[float, float]:
+        """(x, y) of the one-build move `plan_build_move` made at `stop`, or EditError when there is none."""
+        src, var, pre, made, before, after = self._build_context(scene, obj, stops, stop)
+        start = before if before is not None and before.lineno > made.end_lineno else made
+        found = None if pre else self._marked(src, start, var, self.BUILD_MARK)
+        if found is None:
+            raise EditError("this element was not moved in this build alone")
+        return _shift_of(found)
+
+    def plan_match_build_move(self, scene: dict, obj: dict, stops: list, stop: int, builds: set
+                              ) -> list[tuple[str, list[Edit]]]:
+        """Turn the one-build move of `plan_build_move` at `stop` into the same move in each build of `builds` (which
+        holds `stop`): every run of consecutive builds gets one marked shift where it starts and the opposite one
+        right after the next_slide() that ends it, so the builds outside keep their positions."""
+        src, var, pre, made, before, after = self._build_context(scene, obj, stops, stop)
+        x, y = self.one_build_shift(scene, obj, stops, stop)
+
+        def start_of(k):
+            _, _, _, mk, bf, _ = self._build_context(scene, obj, stops, k)
+            return bf if bf is not None and bf.lineno > mk.end_lineno else mk
+
+        net: dict = {}                       # (anchor line, mark) -> [anchor, dx, dy]
+
+        def add(anchor, mark, dx, dy):
+            if anchor is None:
+                return
+            e = net.setdefault((anchor.lineno, mark), [anchor, 0.0, 0.0])
+            e[1] += dx
+            e[2] += dy
+        # the move already made in `stop` alone is taken back first
+        add(start_of(stop), self.BUILD_MARK, -x, -y)
+        add(after, self.BUILD_END_MARK, x, y)
+        ks = sorted(builds)
+        runs, a = [], ks[0]
+        for p, q in zip(ks, ks[1:] + [None]):
+            if q != p + 1:
+                runs.append((a, p))
+                a = q
+        for a, b in runs:
+            add(start_of(a), self.BUILD_MARK, x, y)
+            add(self._build_context(scene, obj, stops, b)[5], self.BUILD_END_MARK, -x, -y)
+        edits, fresh = [], {}
+        for (_, mark), (anchor, dx, dy) in sorted(net.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+            s = self._marked(src, anchor, var, mark)
+            if s is not None:
+                edits.append(self._bump(src, anchor, var, mark, dx, dy))
+            elif abs(dx) > 5e-4 or abs(dy) > 5e-4:
+                fresh.setdefault(anchor.lineno, (anchor, []))[1].append(f"{var}.shift(({fmt(dx)}, {fmt(dy)}, 0))  {mark}")
+        for anchor, lines in fresh.values():   # new lines after one statement go in as one insertion
+            edits.append(_after_stmt(src, anchor, ("\n" + " " * anchor.col_offset).join(lines)))
+        names = ", ".join(str(k + 1) for k in ks)
+        return [(f"moved it in builds {names}", edits)]
+
     def _build_context(self, scene: dict, obj: dict, stops: list, stop: int):
         """(src, var, edits naming the object, its creation statement, the next_slide() statements that start and
         end the build) for a move in one build, or EditError when the slide's code is not laid out for one."""

@@ -73,6 +73,7 @@ final class AnimatedPlayer: NSObject {
     private var current: Deck?
     private var pending: Deck?
     private let still = CALayer()
+    private let zoom: ShowZoom
     private let progress = CALayer()
     private let counter = CATextLayer()
     private let placeholder = CATextLayer()      // over a page still building that has no still yet
@@ -96,6 +97,7 @@ final class AnimatedPlayer: NSObject {
     init(screen: NSScreen) {
         window = PlayerWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         root = ShowView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        zoom = ShowZoom(frame: CGRect(origin: .zero, size: screen.frame.size))
         super.init()
         window.backgroundColor = .black
         window.level = .mainMenu + 1
@@ -104,10 +106,13 @@ final class AnimatedPlayer: NSObject {
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.black.cgColor
         window.contentView = root
-        still.frame = root.bounds
+        zoom.stage.frame = root.bounds
+        root.layer?.addSublayer(zoom.stage)
+        window.zoom = zoom
+        still.frame = zoom.stage.bounds
         still.contentsGravity = .resizeAspect
         still.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        root.layer?.addSublayer(still)
+        zoom.stage.addSublayer(still)
         progress.backgroundColor = Theme.accent.cgColor
         progress.frame = CGRect(x: 0, y: 0, width: 0, height: 3)
         root.layer?.addSublayer(progress)
@@ -171,6 +176,7 @@ final class AnimatedPlayer: NSObject {
 
     private func show(_ i: Int, _ mode: Mode) {
         guard slides.indices.contains(i) else { return }
+        if i != index, slides[i].number != slides[index].number { zoom.reset(animated: false) }
         index = i
         generation += 1
         finished = false
@@ -193,9 +199,9 @@ final class AnimatedPlayer: NSObject {
             return
         }
         let next = Deck()
-        next.layer.frame = root.bounds
+        next.layer.frame = zoom.stage.bounds
         next.layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        root.layer?.insertSublayer(next.layer, below: still)
+        zoom.stage.insertSublayer(next.layer, below: still)
         pending = next
         let item = AVPlayerItem(url: URL(fileURLWithPath: p))
         if DarkMode.isOn { item.videoComposition = DarkMode.videoComposition(for: item.asset) }
@@ -288,7 +294,7 @@ final class AnimatedPlayer: NSObject {
     /// Where the slide is drawn in the window: the clip's picture, else the still's, else a 16:9 fit.
     var slideRectOnScreen: CGRect {
         if let v = current?.layer.videoRect, v.width > 0, current?.layer.superlayer != nil { return v }
-        let b = root.bounds
+        let b = zoom.stage.bounds
         var aspect: CGFloat = 16 / 9
         if let c = still.contents, CFGetTypeID(c as CFTypeRef) == CGImage.typeID {
             let img = c as! CGImage
@@ -361,7 +367,7 @@ final class AnimatedPlayer: NSObject {
         let file = (p?.currentItem?.asset as? AVURLAsset)?.url.lastPathComponent ?? "-"
         let t = p.map { String(format: "%.2f", $0.currentTime().seconds) } ?? "-"
         let st = p.map { ["paused", "waiting", "playing"][$0.timeControlStatus.rawValue] } ?? "-"
-        return "slide \(index + 1)/\(slides.count) \(s.scene)#\(s.index) file=\(file) t=\(t) \(st) finished=\(finished) pending=\(pending != nil) building=\(slides.filter { $0.pending == true }.count) layers=\(root.layer?.sublayers?.count ?? 0)"
+        return "slide \(index + 1)/\(slides.count) \(s.scene)#\(s.index) file=\(file) t=\(t) \(st) finished=\(finished) pending=\(pending != nil) building=\(slides.filter { $0.pending == true }.count) layers=\(zoom.stage.sublayers?.count ?? 0)"
     }
 
     func jump(section k: Int) {
@@ -377,7 +383,7 @@ final class AnimatedPlayer: NSObject {
         case 123, 126, 51, 116: previous()                 // ← ↑ delete pageUp
         case 115: show(0, .play)                           // home
         case 119: show(slides.count - 1, .end)             // end
-        case 53: exit()                                    // esc
+        case 53: if zoom.isZoomed { zoom.reset(animated: true) } else { exit() }   // esc: zoom out first
         default:
             let c = e.charactersIgnoringModifiers?.lowercased() ?? ""
             if let n = Int(c), n >= 1 { jump(section: n - 1); return }
@@ -418,8 +424,8 @@ final class AnimatedPlayer: NSObject {
     /// Where an event falls on the slide, as fractions (y from the top); nil off the picture.
     private func slidePoint(_ e: NSEvent) -> CGPoint? {
         let vr = current?.layer.videoRect ?? .zero
-        let r = vr.isEmpty ? root.bounds : vr
-        let p = e.locationInWindow
+        let r = vr.isEmpty ? zoom.stage.bounds : vr
+        let p = zoom.unzoomed(root.convert(e.locationInWindow, from: nil))
         let x = (p.x - r.minX) / r.width, y = 1 - (p.y - r.minY) / r.height
         return (0...1).contains(x) && (0...1).contains(y) ? CGPoint(x: x, y: y) : nil
     }

@@ -19,6 +19,22 @@ final class PlayerWindow: NSWindow {
     var onMouse: ((NSEvent, Bool) -> Void)? // takes over from onClick when the position matters (true = left button)
     /// Whether the pointer is over a hyperlink, which shows the pointing hand.
     var overLink: ((NSEvent) -> Bool)? { didSet { acceptsMouseMovedEvents = overLink != nil } }
+    /// Trackpad zoom: pinch in or out over the slide, two-finger scroll pans while zoomed in, a two-finger
+    /// double tap goes back to the whole slide.
+    var zoom: ShowZoom?
+    override func magnify(with event: NSEvent) {
+        guard let z = zoom, let v = contentView else { return super.magnify(with: event) }
+        z.magnify(by: event.magnification, at: v.convert(event.locationInWindow, from: nil))
+    }
+    override func smartMagnify(with event: NSEvent) {
+        guard let z = zoom, let v = contentView else { return super.smartMagnify(with: event) }
+        if z.isZoomed { z.reset(animated: true) } else { z.zoom(to: 2, at: v.convert(event.locationInWindow, from: nil)) }
+    }
+    override func scrollWheel(with event: NSEvent) {
+        guard let z = zoom, z.isZoomed else { return super.scrollWheel(with: event) }
+        let k: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 10
+        z.pan(dx: event.scrollingDeltaX * k, dy: -event.scrollingDeltaY * k)
+    }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override func keyDown(with event: NSEvent) { onKey?(event) }
@@ -88,6 +104,61 @@ final class PlayerWindow: NSWindow {
     }
 }
 
+/// Zoom and pan of the slide on the audience display. `stage` holds the slide's layers (not the progress bar or
+/// the counter) and is scaled about its bottom-left corner; the slide always covers the window it filled at 1×.
+final class ShowZoom {
+    let stage = CALayer()
+    private(set) var scale: CGFloat = 1
+    private var offset = CGPoint.zero
+    static let maxScale: CGFloat = 8
+    var isZoomed: Bool { scale > 1.001 }
+
+    init(frame: CGRect) {
+        stage.anchorPoint = .zero
+        stage.frame = frame
+        stage.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        stage.masksToBounds = false
+    }
+
+    /// Pinch by `m` (NSEvent.magnification) keeping the point `p` (in the stage's superlayer) where it is.
+    func magnify(by m: CGFloat, at p: CGPoint) { zoom(to: scale * (1 + m), at: p, animated: false) }
+
+    func zoom(to s: CGFloat, at p: CGPoint, animated: Bool = true) {
+        let s2 = min(Self.maxScale, max(1, s))
+        let c = CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale)
+        offset = CGPoint(x: p.x - c.x * s2, y: p.y - c.y * s2)
+        scale = s2
+        apply(animated: animated)
+    }
+
+    func pan(dx: CGFloat, dy: CGFloat) {
+        offset.x += dx; offset.y += dy
+        apply(animated: false)
+    }
+
+    func reset(animated: Bool) {
+        guard isZoomed || offset != .zero else { return }
+        scale = 1; offset = .zero
+        apply(animated: animated)
+    }
+
+    /// A point of the window's content view as it would be at 1× (for hit-testing links on a zoomed slide).
+    func unzoomed(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: (p.x - offset.x) / scale, y: (p.y - offset.y) / scale)
+    }
+
+    private func apply(animated: Bool) {
+        let b = stage.bounds
+        offset.x = min(0, max(b.width - b.width * scale, offset.x))
+        offset.y = min(0, max(b.height - b.height * scale, offset.y))
+        if scale <= 1.001 { scale = 1; offset = .zero }
+        CATransaction.begin()
+        if animated { CATransaction.setAnimationDuration(0.25) } else { CATransaction.setDisableActions(true) }
+        stage.setAffineTransform(CGAffineTransform(translationX: offset.x, y: offset.y).scaledBy(x: scale, y: scale))
+        CATransaction.commit()
+    }
+}
+
 extension NSWindow {
     /// Runs `work` the next time this window posts `name`.
     func once(_ name: Notification.Name, _ work: @escaping () -> Void) {
@@ -105,6 +176,7 @@ final class SlidePlayer: NSObject {
 
     let window: PlayerWindow
     private let content = CALayer()
+    private let zoom: ShowZoom
     private let progress = CALayer()
     private let counter = CATextLayer()
     private let placeholder = CATextLayer()      // over a page whose picture is still rendering (an empty path)
@@ -128,6 +200,7 @@ final class SlidePlayer: NSObject {
 
     init(screen: NSScreen) {
         window = PlayerWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        zoom = ShowZoom(frame: CGRect(origin: .zero, size: screen.frame.size))
         super.init()
         window.backgroundColor = .black
         window.level = .mainMenu + 1
@@ -137,11 +210,14 @@ final class SlidePlayer: NSObject {
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.black.cgColor
         window.contentView = root
-        content.frame = root.bounds
+        zoom.stage.frame = root.bounds
+        root.layer?.addSublayer(zoom.stage)
+        window.zoom = zoom
+        content.frame = zoom.stage.bounds
         content.contentsGravity = .resizeAspect
         content.magnificationFilter = .linear; content.minificationFilter = .trilinear
         content.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        root.layer?.addSublayer(content)
+        zoom.stage.addSublayer(content)
         progress.backgroundColor = Theme.accent.cgColor
         progress.frame = CGRect(x: 0, y: 0, width: 0, height: 3)
         root.layer?.addSublayer(progress)
@@ -168,7 +244,7 @@ final class SlidePlayer: NSObject {
     /// The hyperlink under a point of the show window, if the page on screen has one there.
     private func link(inWindow p: NSPoint) -> URL? {
         guard pages.indices.contains(index), !blackedOut, !pages[index].links.isEmpty else { return nil }
-        let r = slideRectOnScreen
+        let r = slideRectOnScreen, p = zoom.unzoomed(p)
         return link(at: CGPoint(x: (p.x - r.minX) / r.width, y: 1 - (p.y - r.minY) / r.height))
     }
 
@@ -272,6 +348,7 @@ final class SlidePlayer: NSObject {
     func go(_ i: Int) {
         guard pages.indices.contains(i), i != index else { return }
         let slideChange = pages[i].slide != pages[index].slide
+        if slideChange { zoom.reset(animated: false) }
         index = i
         show(animated: true, slideChange: slideChange)
     }
@@ -284,7 +361,7 @@ final class SlidePlayer: NSObject {
         case 123, 126, 51, 116: previous()                 // ← ↑ delete pageUp
         case 115: go(0)                                    // home
         case 119: go(pages.count - 1)                      // end
-        case 53: exit()                                    // esc
+        case 53: if zoom.isZoomed { zoom.reset(animated: true) } else { exit() }   // esc: zoom out first
         default:
             switch e.charactersIgnoringModifiers?.lowercased() {
             case "q": exit()

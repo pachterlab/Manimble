@@ -1234,6 +1234,23 @@ class Manimble:
                 elif op == "spread":
                     label = "move in every build"
                     attempts = self.planner.plan_spread_build_move(self.scene(name), obj, data["stops"], stop)
+                elif op == "spread_match":
+                    # the builds where the object stood where it stood in this one before its one-build move
+                    stops = data["stops"]
+                    x, y = self.planner.one_build_shift(self.scene(name), obj, stops, stop)
+                    px, py = x / ux, -y / uy
+                    if not before_box:
+                        return {"ok": False, "error": "this element is not on the slide in this build"}
+                    was = (before_box[1] - px, before_box[2] - py, before_box[3] - px, before_box[4] - py)
+                    builds = {stop}
+                    for k, st in enumerate(stops):
+                        v = next((v for v in st["visible"] if str(v[0]) == oid), None)
+                        if k != stop and v and max(abs(v[i + 1] - was[i]) for i in range(4)) < 1.5:
+                            builds.add(k)
+                    if len(builds) == 1:
+                        return {"ok": False, "error": "no other build had this element in the same place"}
+                    label = "move in matching builds"
+                    attempts = self.planner.plan_match_build_move(self.scene(name), obj, stops, stop, builds)
                 elif op == "table":
                     label = "edit table"
                     attempts = [(label, self.planner.plan_table(obj, req["rows"]))]
@@ -1434,6 +1451,14 @@ class Manimble:
             ok, why = self._verify(op, req, oid, stop, before_box, new["data"], ux, uy, before=data)
             if ok and op == "wrap" and not framed:
                 written, new = self._keep_edge(name, oid, req, stop, before_box, new, ux, uy, written)
+            if ok and op == "text" and obj["kind"] == "text" and not framed:
+                # retyped text grows from where it starts, as in a text box: its left edge (centre or right edge, by
+                # its alignment) stays put, and its top when lines were added or removed (a line's ink top moves
+                # with its letters)
+                align = self.planner.format_info(obj).get("align") or "left"
+                written, new = self._keep_edge(name, oid, {"side": {"right": "left", "center": "center"}.get(align, "right")},
+                                               stop, before_box, new, ux, uy, written,
+                                               top=obj["value"].count("\n") != req["value"].count("\n"))
             if ok and framed:
                 written, new = self._fit_frame(name, oid, stop, new, ux, uy, written)
             if ok:
@@ -1723,16 +1748,18 @@ class Manimble:
             merged[rel] = (written[rel][0], a) if rel in written else (b, a)
         return merged, moved
 
-    def _keep_edge(self, name, oid, req, stop, before_box, new, ux, uy, written):
-        """A re-wrapped text box keeps its top edge and the edge opposite the dragged handle where they were."""
+    def _keep_edge(self, name, oid, req, stop, before_box, new, ux, uy, written, top=True):
+        """A re-wrapped text box keeps its top edge and the edge opposite the dragged handle where they were
+        (side "center": its horizontal centre)."""
         st = new["data"]["stops"][min(stop, len(new["data"]["stops"]) - 1)]
         after = next((v for v in st["visible"] if str(v[0]) == oid), None)
         o = new["data"]["objects"].get(oid)
         if after is None or o is None:
             return written, new
         side = req.get("side", "right")
-        dx = (before_box[3] - after[3]) if side == "left" else (before_box[1] - after[1])
-        dy = before_box[2] - after[2]
+        dx = (before_box[3] - after[3]) if side == "left" else \
+            (before_box[1] + before_box[3] - after[1] - after[3]) / 2 if side == "center" else (before_box[1] - after[1])
+        dy = before_box[2] - after[2] if top else 0
         if abs(dx) < 0.5 and abs(dy) < 0.5:
             return written, new
         try:
@@ -2055,7 +2082,8 @@ class Manimble:
                     chunk = chunk.replace(f"class {name}(", f"class {nn}(", 1)
                     if not chunk.endswith("\n"):
                         chunk += "\n"
-                    i = names.index(name) if name in names else len(names) - 1
+                    after = req.get("after") or name      # a pasted slide goes after the one selected
+                    i = names.index(after) if after in names else (names.index(name) if name in names else len(names) - 1)
                     final = names[:i + 1] + [nn] + names[i + 1:]
                     if numbering:
                         chunk = self._page_patch_text(chunk, numbering["start"] + final.index(nn), numbering["start"] + len(final) - 1, numbering)
@@ -3351,7 +3379,8 @@ class Manimble:
     def new_build(self, req: dict) -> dict:
         """Add an empty build right after build `stop`: a `self.next_slide()` ends that build and a short
         `self.wait(0.1)` fills the new one (manim-slides skips a build with no animation in it). It shows what the
-        build before it shows; the notes of the builds around it stay where they are."""
+        build before it shows; the notes of the builds around it stay where they are. With `copy` (Duplicate Build)
+        the new build also gets build `stop`'s notes, so it is a copy of that build: same picture, same notes."""
         from .srcedit import Edit, _after_stmt
         with self.edit_lock:
             self._settle()
@@ -3361,6 +3390,9 @@ class Manimble:
                 return {"ok": False, "error": rec["error"]}
             stops = rec["data"]["stops"]
             k = max(0, min(int(req.get("stop", 0)), len(stops) - 1))
+            copying = bool(req.get("copy"))
+            notes = self._build_notes_of(name, stops)[k] if copying else ""
+            pause = f"self.next_slide(notes={py_str(notes)})" if notes else "self.next_slide()"
             try:
                 src, fn = self._construct(self.scene(name))
                 if k < len(stops) - 1:              # before the next_slide() that ends build k
@@ -3368,10 +3400,10 @@ class Manimble:
                     stmt = src.parent[call]
                     indent = " " * stmt.col_offset
                     at = src.line_starts[stmt.lineno - 1]
-                    edit = Edit(src.rel, at, at, f"{indent}self.next_slide()\n{indent}self.wait(0.1)  {self.NEW_BUILD_MARK}\n")
+                    edit = Edit(src.rel, at, at, f"{indent}{pause}\n{indent}self.wait(0.1)  {self.NEW_BUILD_MARK}\n")
                 else:                               # after the last build: at the end of construct()
                     last = fn.body[-1]
-                    edit = _after_stmt(src, last, f"self.next_slide()\n{' ' * last.col_offset}self.wait(0.1)  {self.NEW_BUILD_MARK}")
+                    edit = _after_stmt(src, last, f"{pause}\n{' ' * last.col_offset}self.wait(0.1)  {self.NEW_BUILD_MARK}")
             except (EditError, KeyError) as exc:
                 return {"ok": False, "error": f"A build cannot be added here: {exc}"}
             try:
@@ -3385,6 +3417,9 @@ class Manimble:
                 self.results.pop(name, None)
                 self.render_now(name, interactive=True)
                 return {"ok": False, "error": new["error"]}
+            if copying:
+                self._commit(f"duplicate build {k + 1}", written)
+                return {"ok": True, "message": f"duplicated build {k + 1}", "stop": k + 1, "changed": self.last_changed}
             self._commit(f"new build {k + 2}", written)
             return {"ok": True, "message": f"added build {k + 2}", "stop": k + 1, "changed": self.last_changed}
 
@@ -3682,6 +3717,7 @@ class Manimble:
             self._settle()
             if not self.history:
                 return {"ok": False, "error": "nothing to undo"}
+            before = self._slide_names()
             e = self.history[-1]
             try:
                 plan = self._restore(e["files"], 0)
@@ -3694,13 +3730,14 @@ class Manimble:
             self.redo.append(e)
             self.last_changed = {}
             self._requeue_stale()
-            return {"ok": True, "label": e["label"]}
+            return {"ok": True, "label": e["label"], **self._undo_where(before, plan)}
 
     def redo_(self) -> dict:
         with self.edit_lock:
             self._settle()
             if not self.redo:
                 return {"ok": False, "error": "nothing to redo"}
+            before = self._slide_names()
             e = self.redo[-1]
             try:
                 plan = self._restore(e["files"], 1)
@@ -3712,7 +3749,50 @@ class Manimble:
             self.history.append(e)
             self.last_changed = self._diff_lines(e["files"])
             self._requeue_stale()
-            return {"ok": True, "label": e["label"]}
+            return {"ok": True, "label": e["label"], **self._undo_where(before, plan)}
+
+    def _slide_names(self) -> list:
+        """The slides in navigator order (the show's, then the unused ones), read from the files as they are now."""
+        self.refresh_scenes()
+        shown = [s["name"] for s in self.scenes]
+        return shown + [s["name"] for s in self.all_scenes if s["name"] not in set(shown)]
+
+    def _undo_where(self, before: list, plan: dict) -> dict:
+        """Where an undo or redo happened, so the app can take the user there: `scene`, the slide to show (one
+        brought back, moved or changed; None when the step only removed slides or changed shared code), and the
+        slides it `added` or `removed`, with `index`, the navigator position of the first removed one."""
+        after = self._slide_names()
+        gone = set(before) - set(after)
+        new = set(after) - set(before)
+        moved = []
+        if not gone and not new and before != after:
+            for tag, _, _, j1, j2 in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+                if tag != "equal":
+                    moved += after[j1:j2]
+        changed = []
+        spans = {s["name"]: s for s in self.all_scenes}
+        for rel, (now, was) in plan.items():
+            if not rel.endswith(".py") or now is None or was is None:
+                continue
+            try:
+                a, b = was.decode("utf-8").split("\n"), now.decode("utf-8").split("\n")
+            except UnicodeDecodeError:
+                continue
+            for tag, _, _, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+                if tag == "equal":
+                    continue
+                lo, hi = j1 + 1, max(j2, j1 + 1)
+                for n in after:
+                    s = spans.get(n)
+                    if s and s["file"] == rel and n not in changed and s["line"] <= hi and lo <= (s.get("end") or s["line"]):
+                        changed.append(n)
+        added = [n for n in after if n in new]
+        removed = [n for n in before if n in gone]
+        target = (added or moved or [n for n in after if n in changed] or [None])[0]
+        out = {"scene": target, "added": added, "removed": removed}
+        if removed:
+            out["index"] = before.index(removed[0])
+        return out
 
     def clear_history(self) -> dict:
         """Forget every undo and redo step: the deck went back to its saved files (Revert), which no step leads from."""

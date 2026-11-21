@@ -263,6 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             newSlideItem,
             item("New Build", #selector(MainController.newBuild), "", []),
             item("Duplicate Slide", #selector(MainController.duplicateSlide), "d", [.command, .shift]),
+            item("Duplicate Build", #selector(MainController.duplicateBuild), "", []),
             item("Delete Slide", #selector(MainController.deleteSlide), String(UnicodeScalar(NSBackspaceCharacter)!), [.command, .shift]),
             item("Hide Slide", #selector(MainController.toggleHideSlide), "h", [.command, .shift]),
             item("Restore Slide to Show", #selector(MainController.restoreSlide), "", []),
@@ -342,6 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Ungroup", #selector(MainController.ungroupObjects), "g", [.command, .shift]),
             .separator(),
             item("Apply Move to All Builds", #selector(MainController.spreadLastMove), "a", [.command, .shift]),
+            item("Apply Move to Matching Builds", #selector(MainController.spreadLastMoveMatching), "a", [.command, .shift, .option]),
             .separator(),
             alignSlideItem,
         ])

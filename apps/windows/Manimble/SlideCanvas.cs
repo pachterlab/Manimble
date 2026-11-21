@@ -12,8 +12,12 @@ public struct Preview
 {
     public Vector Offset;
     public double Scale;
-    public Preview(Vector offset, double scale = 1) { Offset = offset; Scale = scale; }
-    public bool IsIdentity => Offset.Length < 0.01 && Math.Abs(Scale - 1) < 0.0005;
+    public double SX, SY;                     // a stretch on top of Scale (a picture's side handles); 0 = none
+    public Preview(Vector offset, double scale = 1) { Offset = offset; Scale = scale; SX = 1; SY = 1; }
+    /// The horizontal and vertical factors shown.
+    public double KX => (Scale == 0 ? 1 : Scale) * (SX == 0 ? 1 : SX);
+    public double KY => (Scale == 0 ? 1 : Scale) * (SY == 0 ? 1 : SY);
+    public bool IsIdentity => Offset.Length < 0.01 && Math.Abs(KX - 1) < 0.0005 && Math.Abs(KY - 1) < 0.0005;
 }
 
 /// The slide canvas (the Mac's Metal CanvasView). It shows the exact frame of a build when idle; while an object is
@@ -54,8 +58,10 @@ public sealed class SlideCanvas : Border
     public event Action? SelectionChanged;
     /// Objects dragged by (dx, dy) frame px.
     public event Action<List<int>, double, double>? MoveCommitted;
-    /// An object scaled about its centre by a corner handle.
-    public event Action<int, double>? ResizeCommitted;
+    /// A handle dragged, as in PowerPoint: (object, horizontal and vertical factors, how far its centre moves in
+    /// frame px). A corner resizes in proportion with the opposite corner fixed (equal factors); a picture's side
+    /// handle stretches one dimension with the opposite side fixed.
+    public event Action<int, double, double, double, double>? ResizeCommitted;
     /// A text box's side dragged: its new width (frame px) and the side that moved ("left" or "right").
     public event Action<int, double, string>? WrapCommitted;
     /// A line's ends dragged: [sx, sy, ex, ey].
@@ -89,7 +95,8 @@ public sealed class SlideCanvas : Border
     Vector dragDelta;              // a move in progress
     int dragOid;                   // the object of a resize or endpoint drag
     int dragEnd;                   // 0 = start, 1 = end of a line
-    double dragScale = 1;          // a resize in progress
+    double dragKX = 1, dragKY = 1; // a resize in progress: its factors and how far the centre goes with them
+    Vector dragShift;
     Rect dragBox;                  // the box a resize or wrap started from
     Rect? wrapBand;                // a text box's new width while its side is dragged
     Rect? band;                    // marquee or the shape being drawn
@@ -479,7 +486,11 @@ public sealed class SlideCanvas : Border
         var p = Overrides.TryGetValue(oid, out var o) ? o : new Preview(new Vector());
         if (p.Scale == 0) p.Scale = 1;
         if (mode == Mode.Move && Selected.Contains(oid)) p.Offset += dragDelta;
-        if (mode == Mode.Resize && oid == dragOid) p.Scale *= dragScale;
+        if (mode == Mode.Resize && oid == dragOid)
+        {
+            p.SX = (p.SX == 0 ? 1 : p.SX) * dragKX; p.SY = (p.SY == 0 ? 1 : p.SY) * dragKY;
+            p.Offset += dragShift;
+        }
         return p;
     }
 
@@ -518,10 +529,10 @@ public sealed class SlideCanvas : Border
                 {
                     // scaled about the centre of the object's box (a group's sprites scale together about it)
                     var c = st.Box(sp.Oid) is Rect b ? new Point(b.X + b.Width / 2, b.Y + b.Height / 2) : new Point(sp.X + sp.W / 2, sp.Y + sp.H / 2);
-                    var s = pv.Scale;
-                    img.Width = sp.W * s; img.Height = sp.H * s;
-                    Canvas.SetLeft(img, c.X + (sp.X - c.X) * s + pv.Offset.X);
-                    Canvas.SetTop(img, c.Y + (sp.Y - c.Y) * s + pv.Offset.Y);
+                    double kx = pv.KX, ky = pv.KY;
+                    img.Width = sp.W * kx; img.Height = sp.H * ky;
+                    Canvas.SetLeft(img, c.X + (sp.X - c.X) * kx + pv.Offset.X);
+                    Canvas.SetTop(img, c.Y + (sp.Y - c.Y) * ky + pv.Offset.Y);
                 }
                 composite.Children.Add(img);
             }
@@ -560,7 +571,7 @@ public sealed class SlideCanvas : Border
         if (b is not Rect r) return null;
         var pv = PreviewOf(oid);
         var c = new Point(r.X + r.Width / 2, r.Y + r.Height / 2) + pv.Offset;
-        return new Rect(c.X - r.Width * pv.Scale / 2, c.Y - r.Height * pv.Scale / 2, r.Width * pv.Scale, r.Height * pv.Scale);
+        return new Rect(c.X - r.Width * pv.KX / 2, c.Y - r.Height * pv.KY / 2, r.Width * pv.KX, r.Height * pv.KY);
     }
 
     // ---------------------------------------------------------------- overlay
@@ -628,6 +639,8 @@ public sealed class SlideCanvas : Border
                     if (wrapBand != null) overlay.Children.Add(Outline(wb, new SolidColorBrush(Color.FromRgb(0xff, 0x6c, 0x0c)), t * 1.4));
                     foreach (var c in SideHandles(new Rect(wb.X, sb.Y, wb.Width, sb.Height))) overlay.Children.Add(Handle(c.X, c.Y, t, round: true));
                 }
+                else if (Stretchable(oid))
+                    foreach (var c in StretchHandles(sb)) overlay.Children.Add(Handle(c.X, c.Y, t, round: true));
             }
         }
         if (showGrid)
@@ -778,12 +791,14 @@ public sealed class SlideCanvas : Border
         if (BoxOf(oid) is not Rect b) return null;
         // the nearest one: on a one-line text box the side handles sit within reach of the corners
         var cs = Corners(b).ToList();
+        int first = 20;                         // handle number of the first side handle
         if (Wrappable(oid)) cs.AddRange(SideHandles(b));
+        else if (Stretchable(oid)) { cs.AddRange(StretchHandles(b)); first = 30; }
         (int which, double d)? best = null;
         for (int i = 0; i < cs.Count; i++)
         {
             var d = (p - cs[i]).Length;
-            if (d <= r && (best == null || d < best.Value.d)) best = (i < 4 ? i : 16 + i, d);
+            if (d <= r && (best == null || d < best.Value.d)) best = (i < 4 ? i : first + i - 4, d);
         }
         return best is { } bh ? (oid, bh.which) : null;
     }
@@ -791,6 +806,16 @@ public sealed class SlideCanvas : Border
     /// Plain text whose string is in the source: its box can be made wider or narrower (re-wrapping it). Not a shared
     /// constant's text: its box comment would belong to every use of it.
     bool Wrappable(int oid) => Scene?.Obj(oid) is { Kind: "text" } o && o.TextOk != false && o.Shared == null && editingOid != oid;
+
+    /// A picture or shape: its side handles stretch it (as in PowerPoint), its corners keep its proportions.
+    bool Stretchable(int oid) => Scene?.Obj(oid) is { Kind: "image" or "shape" };
+
+    /// The middles of a picture's left, right, top and bottom sides (handles 30 to 33).
+    static Point[] StretchHandles(Rect b) => new[]
+    {
+        new Point(b.Left, b.Top + b.Height / 2), new Point(b.Right, b.Top + b.Height / 2),
+        new Point(b.Left + b.Width / 2, b.Top), new Point(b.Left + b.Width / 2, b.Bottom),
+    };
 
     /// The middles of a text box's left and right sides (handles 20 and 21).
     static Point[] SideHandles(Rect b) => new[] { new Point(b.Left, b.Top + b.Height / 2), new Point(b.Right, b.Top + b.Height / 2) };
@@ -858,9 +883,10 @@ public sealed class SlideCanvas : Border
         if (HandleAt(p) is { } hd)
         {
             dragOid = hd.oid;
-            if (hd.which >= 20) { mode = Mode.Wrap; dragEnd = hd.which - 20; dragBox = BoxOf(hd.oid)!.Value; wrapBand = dragBox; }
+            if (hd.which >= 30) { mode = Mode.Resize; dragEnd = hd.which; dragKX = dragKY = 1; dragShift = new Vector(); dragBox = BoxOf(hd.oid)!.Value; }
+            else if (hd.which >= 20) { mode = Mode.Wrap; dragEnd = hd.which - 20; dragBox = BoxOf(hd.oid)!.Value; wrapBand = dragBox; }
             else if (hd.which >= 10) { mode = Mode.Endpoint; dragEnd = hd.which - 10; LineOverrides[hd.oid] = LineEnds(hd.oid)!.ToArray(); }
-            else { mode = Mode.Resize; dragScale = 1; dragBox = BoxOf(hd.oid)!.Value; }
+            else { mode = Mode.Resize; dragEnd = hd.which; dragKX = dragKY = 1; dragShift = new Vector(); dragBox = BoxOf(hd.oid)!.Value; }
             overlay.CaptureMouse();
             return;
         }
@@ -947,9 +973,31 @@ public sealed class SlideCanvas : Border
             }
             case Mode.Resize:
             {
-                var c = new Point(dragBox.X + dragBox.Width / 2, dragBox.Y + dragBox.Height / 2);
-                var d0 = Math.Max(1, Math.Sqrt(dragBox.Width * dragBox.Width + dragBox.Height * dragBox.Height) / 2);
-                dragScale = Math.Max(0.05, (p - c).Length / d0);
+                var b = dragBox;
+                var c = new Point(b.X + b.Width / 2, b.Y + b.Height / 2);
+                if (dragEnd >= 30)
+                {
+                    // a picture's side: stretched, the opposite side stays put
+                    double minS = 8 / Scale;
+                    dragKX = dragKY = 1; dragShift = new Vector();
+                    switch (dragEnd)
+                    {
+                        case 30: { var w = Math.Max(minS, b.Right - p.X); dragKX = w / Math.Max(1e-6, b.Width); dragShift.X = b.Right - w / 2 - c.X; break; }
+                        case 31: { var w = Math.Max(minS, p.X - b.Left); dragKX = w / Math.Max(1e-6, b.Width); dragShift.X = b.Left + w / 2 - c.X; break; }
+                        case 32: { var ht = Math.Max(minS, b.Bottom - p.Y); dragKY = ht / Math.Max(1e-6, b.Height); dragShift.Y = b.Bottom - ht / 2 - c.Y; break; }
+                        default: { var ht = Math.Max(minS, p.Y - b.Top); dragKY = ht / Math.Max(1e-6, b.Height); dragShift.Y = b.Top + ht / 2 - c.Y; break; }
+                    }
+                }
+                else
+                {
+                    // a corner: in proportion, the opposite corner stays put
+                    var cs = Corners(b);
+                    Point a = cs[3 - dragEnd], k0 = cs[dragEnd];
+                    var v = k0 - a;
+                    var k = Math.Max(0.05, ((p - a) * v) / Math.Max(1, v.LengthSquared));
+                    dragKX = dragKY = k;
+                    dragShift = (c - a) * (k - 1);
+                }
                 Redraw();
                 return;
             }
@@ -977,7 +1025,7 @@ public sealed class SlideCanvas : Border
         if (CornerAt(p) != null) { Cursor = Cursors.Hand; return; }
         if (HandleAt(p) is { } hd)
         {
-            Cursor = hd.which >= 20 ? Cursors.SizeWE : hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
+            Cursor = hd.which >= 32 ? Cursors.SizeNS : hd.which >= 20 ? Cursors.SizeWE : hd.which >= 10 ? Cursors.Cross : hd.which is 0 or 3 ? Cursors.SizeNWSE : Cursors.SizeNESW;
             return;
         }
         if (GuideAt(p) is int g)
@@ -1042,15 +1090,17 @@ public sealed class SlideCanvas : Border
             }
             case Mode.Resize:
             {
-                var s = dragScale;
-                dragScale = 1;
-                if (commit && Math.Abs(s - 1) > 0.002)
+                double kx = dragKX, ky = dragKY;
+                var shift = dragShift;
+                dragKX = dragKY = 1; dragShift = new Vector();
+                if (commit && (Math.Abs(kx - 1) > 0.002 || Math.Abs(ky - 1) > 0.002))
                 {
                     var p = Overrides.TryGetValue(dragOid, out var o) ? o : new Preview(new Vector());
-                    p.Scale = (p.Scale == 0 ? 1 : p.Scale) * s;
+                    p.SX = (p.SX == 0 ? 1 : p.SX) * kx; p.SY = (p.SY == 0 ? 1 : p.SY) * ky;
+                    p.Offset += shift;
                     Overrides[dragOid] = p;
                     Redraw();
-                    ResizeCommitted?.Invoke(dragOid, s);
+                    ResizeCommitted?.Invoke(dragOid, kx, ky, shift.X, shift.Y);
                 }
                 else Redraw();
                 break;

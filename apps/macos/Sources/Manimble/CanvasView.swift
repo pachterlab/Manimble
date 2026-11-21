@@ -171,13 +171,21 @@ private let accentRGB = SIMD4<Float>(1.0, 0.424, 0.047, 1)
 struct Override {
     var dx: Double = 0, dy: Double = 0        // px translation
     var scale: Double = 1                     // about the object's centre
+    var sx: Double = 1, sy: Double = 1        // a stretch on top of `scale` (a picture's side handles)
     var replacement: (tex: MTLTexture, w: Double, h: Double)?   // new text/formula raster
+    /// Retyped text (no frame): the replacement keeps the ink's left edge, centre or right edge by this alignment,
+    /// and its top when `keepTop` (lines added or removed), as the engine places it; nil centres it on the ink.
+    var keepEdge: String?
+    var keepTop = false
+    var kx: Double { scale * sx }             // the horizontal and vertical factors shown
+    var ky: Double { scale * sy }
 }
 
 enum Handle: Int {
     case nw, ne, sw, se
-    case w, e                 // text box sides: set the wrap width, the font size stays
-    var isSide: Bool { self == .w || self == .e }
+    case w, e                 // text box sides: set the wrap width, the font size stays; a picture's: stretch it
+    case n, s                 // a picture's top and bottom: stretch it
+    var isSide: Bool { self == .w || self == .e || self == .n || self == .s }
 }
 
 /// Metal-drawn slide canvas: exact frame when idle; backdrop + object sprites while editing.
@@ -308,6 +316,9 @@ final class CanvasView: MTKView {
     var onPen: (([CGPoint]) -> Void)?
     /// A BioCartoon icon dropped on the slide (pasteboard data, frame px); returns whether it was taken.
     var onIconDrop: ((Data, CGPoint) -> Bool)?
+    /// Whether a drag carries pictures the slide can take (image files, a browser's image); and the drop itself.
+    var canDropPictures: ((NSPasteboard) -> Bool)?
+    var onPictureDrop: ((NSPasteboard, CGPoint) -> Bool)?
     private var penPoints: [CGPoint] = [] { didSet { needsDisplay2() } }
     /// Strokes handed to the engine whose render has not arrived yet (drawn so they never flicker away).
     var pendingStrokes: [[CGPoint]] = [] { didSet { needsDisplay2() } }
@@ -318,7 +329,9 @@ final class CanvasView: MTKView {
     /// Tab / ⇧Tab: select the next (+1) / previous (-1) object; Home / End: the first (true) / last slide.
     var onTab: ((Int) -> Void)?
     var onHomeEnd: ((Bool) -> Void)?
-    var onResize: ((Int, Double) -> Void)?
+    /// A handle dragged: (object, horizontal and vertical factors, how far its centre moves in frame px). The
+    /// factors are equal for a corner; a side handle stretches one dimension.
+    var onResize: ((Int, Double, Double, Double, Double) -> Void)?
     /// A text box's side was dragged: its new width (frame px) and the side ("left" / "right") that moved.
     var onWrap: ((Int, Double, String) -> Void)?
     /// Edit an object; for a double-click, the click's window location (where text editing puts the caret).
@@ -407,7 +420,7 @@ final class CanvasView: MTKView {
         let moved = ends.map { x, y -> (Double, Double) in
             func gap(_ b: Box) -> Double { hypot(max(0, b.x0 - x, x - b.x1), max(0, b.y0 - y, y - b.y1)) }
             guard let (b, o) = live.min(by: { gap($0.0) < gap($1.0) }), gap(b) <= reach else { return (x, y) }
-            return (b.cx + (x - b.cx) * o.scale + o.dx, b.cy + (y - b.cy) * o.scale + o.dy)
+            return (b.cx + (x - b.cx) * o.kx + o.dx, b.cy + (y - b.cy) * o.ky + o.dy)
         }
         // the similarity taking the old segment to the new (rotation, uniform scale, translation)
         let (ax, ay) = ends[0], (bx, by) = ends[1], (cx, cy) = moved[0], (dx, dy) = moved[1]
@@ -420,9 +433,10 @@ final class CanvasView: MTKView {
     }
 
     /// A fresh render now shows part of this object's previewed offset: keep previewing only the rest.
-    func settle(_ oid: Int, shownDx: Double, shownDy: Double) {
+    func settle(_ oid: Int, shownDx: Double, shownDy: Double, sized: Bool = false) {
         guard var o = overrides[oid] else { return }
         o.dx -= shownDx; o.dy -= shownDy
+        if sized { o.scale = 1; o.sx = 1; o.sy = 1 }      // the render shows the new size; a move may still be due
         overrides[oid] = o
         if dragOID == oid { dragBase = (dragBase.dx - shownDx, dragBase.dy - shownDy) }
         if let base = dragGroup[oid] { dragGroup[oid] = (base.dx - shownDx, base.dy - shownDy) }
@@ -444,6 +458,7 @@ final class CanvasView: MTKView {
         var anchor: TextAnchor?              // a layout box or text frame: where the text is pinned
         var align = "left"                   // the lines' alignment (left | center | right)
         var lineSpacing: Double?             // manim line_spacing (0.3 when nil)
+        var pinOnLayout = false              // free text: pinned where it first shows, by `align`, so it grows rightwards
     }
     /// Where text is pinned in its box (frame px): `x` is its left edge, centre or right edge by `align`; `y` its
     /// top (`top`) or vertical centre.
@@ -792,7 +807,7 @@ final class CanvasView: MTKView {
     private func frameBox(_ oid: Int) -> Box? {
         guard let f = sceneObjects[String(oid)]?.frameBox else { return nil }
         guard let o = overrides[oid] else { return f }
-        let w = f.w * o.scale, h = f.h * o.scale
+        let w = f.w * o.kx, h = f.h * o.ky
         return Box(x0: f.cx + o.dx - w / 2, y0: f.cy + o.dy - h / 2, x1: f.cx + o.dx + w / 2, y1: f.cy + o.dy + h / 2)
     }
 
@@ -806,6 +821,11 @@ final class CanvasView: MTKView {
             return Box(x0: x0, y0: y0, x1: x0 + w, y1: y0 + h)
         }
         let cx = b.cx + o.dx, cy = b.cy + o.dy
+        if let edge = o.keepEdge {
+            let x0 = edge == "center" ? cx - w / 2 : edge == "right" ? b.x1 + o.dx - w : b.x0 + o.dx
+            let y0 = o.keepTop ? b.y0 + o.dy : cy - h / 2
+            return Box(x0: x0, y0: y0, x1: x0 + w, y1: y0 + h)
+        }
         return Box(x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2)
     }
 
@@ -824,7 +844,7 @@ final class CanvasView: MTKView {
         guard var b = stop?.box(of: oid) else { return nil }
         if let o = overrides[oid] {
             if let rep = o.replacement { return replacementBox(oid, o, ink: b, rep) }
-            let w = b.w * o.scale, h = b.h * o.scale
+            let w = b.w * o.kx, h = b.h * o.ky
             b = Box(x0: b.cx + o.dx - w / 2, y0: b.cy + o.dy - h / 2, x1: b.cx + o.dx + w / 2, y1: b.cy + o.dy + h / 2)
         }
         return b
@@ -1024,8 +1044,8 @@ final class CanvasView: MTKView {
                     if let o = o {
                         let b = stop.box(of: sp.oid) ?? Box(x0: sp.x, y0: sp.y, x1: sp.x + sp.w, y1: sp.y + sp.h)
                         let cx = b.cx, cy = b.cy
-                        let nx = cx + o.dx + (sp.x - cx) * o.scale, ny = cy + o.dy + (sp.y - cy) * o.scale
-                        drawTex(t, nx, ny, sp.w * o.scale, sp.h * o.scale, map: map)
+                        let nx = cx + o.dx + (sp.x - cx) * o.kx, ny = cy + o.dy + (sp.y - cy) * o.ky
+                        drawTex(t, nx, ny, sp.w * o.kx, sp.h * o.ky, map: map)
                     } else {
                         drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map, hole: hole)
                     }
@@ -1174,6 +1194,8 @@ final class CanvasView: MTKView {
                 if wrappable(s) {
                     let sb = wrapBand ?? b
                     corners += [(sb.x0, b.cy), (sb.x1, b.cy)]
+                } else if stretchable(s) {
+                    corners += [(b.x0, b.cy), (b.x1, b.cy), (b.cx, b.y0), (b.cx, b.y1)]
                 }
                 for (x, y) in corners {
                     var u = Uniforms2(rect: accentRGB, color: SIMD4(1, 1, 1, 1), frame: frame, pad: SIMD2(0.28, 0),
@@ -1208,17 +1230,20 @@ final class CanvasView: MTKView {
         if hover != nil { hover = nil; needsDisplay2() }
     }
 
-    override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
-        s.draggingPasteboard.data(forType: BioCartoonPane.dragType) != nil ? .copy : []
+    private func dropOperation(_ s: NSDraggingInfo) -> NSDragOperation {
+        let pb = s.draggingPasteboard
+        return pb.data(forType: BioCartoonPane.dragType) != nil || canDropPictures?(pb) == true ? .copy : []
     }
+    override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation { dropOperation(s) }
     override func draggingUpdated(_ s: NSDraggingInfo) -> NSDragOperation {
         onCursorMove?(framePoint(window: s.draggingLocation))
-        return s.draggingPasteboard.data(forType: BioCartoonPane.dragType) != nil ? .copy : []
+        return dropOperation(s)
     }
     override func draggingExited(_ s: NSDraggingInfo?) { onCursorMove?(nil) }
     override func performDragOperation(_ s: NSDraggingInfo) -> Bool {
-        guard let d = s.draggingPasteboard.data(forType: BioCartoonPane.dragType) else { return false }
-        return onIconDrop?(d, framePoint(window: s.draggingLocation)) ?? false
+        let p = framePoint(window: s.draggingLocation)
+        if let d = s.draggingPasteboard.data(forType: BioCartoonPane.dragType) { return onIconDrop?(d, p) ?? false }
+        return onPictureDrop?(s.draggingPasteboard, p) ?? false
     }
 
     /// The frontmost object under a point, as drawn: an icon on top wins over whatever it covers.
@@ -1245,10 +1270,22 @@ final class CanvasView: MTKView {
         return o.kind == "text" && o.textOk != false && inline?.oid != oid
     }
 
-    private func handleAt(_ p: CGPoint, _ b: Box, sides: Bool = false) -> Handle? {
+    /// A picture or shape: its side handles stretch it (as in PowerPoint), its corners keep its proportions.
+    private func stretchable(_ oid: Int) -> Bool {
+        guard let o = sceneObjects[String(oid)] else { return false }
+        return o.kind == "image" || o.kind == "shape"
+    }
+
+    /// The handles an object's box shows beyond its corners.
+    private func handleAt(_ p: CGPoint, _ b: Box, of oid: Int) -> Handle? {
+        handleAt(p, b, sides: wrappable(oid), ends: stretchable(oid))
+    }
+
+    private func handleAt(_ p: CGPoint, _ b: Box, sides: Bool = false, ends: Bool = false) -> Handle? {
         let tol = 9 * pxPerPoint
         var corners: [(Handle, Double, Double)] = [(.nw, b.x0, b.y0), (.ne, b.x1, b.y0), (.sw, b.x0, b.y1), (.se, b.x1, b.y1)]
-        if sides { corners += [(.w, b.x0, b.cy), (.e, b.x1, b.cy)] }
+        if sides || ends { corners += [(.w, b.x0, b.cy), (.e, b.x1, b.cy)] }
+        if ends { corners += [(.n, b.cx, b.y0), (.s, b.cx, b.y1)] }
         // the nearest one: on a one-line text box the side handles sit within reach of the corners
         var best: (Handle, Double)?
         for (h, x, y) in corners where abs(Double(p.x) - x) <= tol && abs(Double(p.y) - y) <= tol {
@@ -1280,8 +1317,8 @@ final class CanvasView: MTKView {
         if h != hover { hover = h; needsDisplay2() }
         let p = framePoint(event), px = Double(p.x), py = Double(p.y), reach: Double = 10 * pxPerPoint
         if let s = selection, let e = lineEnds(s), (0..<2).contains(where: { i -> Bool in hypot(px - e[i * 2], py - e[i * 2 + 1]) <= reach }) { NSCursor.crosshair.set() }
-        else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let hd = handleAt(framePoint(event), b, sides: wrappable(s)) {
-            (hd.isSide ? NSCursor.resizeLeftRight : NSCursor.crosshair).set()
+        else if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let hd = handleAt(framePoint(event), b, of: s) {
+            (hd == .n || hd == .s ? NSCursor.resizeUpDown : hd.isSide ? NSCursor.resizeLeftRight : NSCursor.crosshair).set()
         }
         else if h != nil { NSCursor.openHand.set() } else { NSCursor.arrow.set() }
     }
@@ -1323,9 +1360,10 @@ final class CanvasView: MTKView {
                 return
             }
         }
-        if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let h = handleAt(p, b, sides: wrappable(s)) {
+        if let s = selection, lineEnds(s) == nil, let b = currentBox(s), let h = handleAt(p, b, of: s) {
             dragStart = p; dragOID = s; dragHandle = h; dragBox = b
-            if h.isSide { wrapBand = b }
+            dragBase = overrides[s].map { ($0.dx, $0.dy) } ?? (0, 0)
+            if h.isSide && wrappable(s) { wrapBand = b }
             return
         }
         let oid = hit(p)
@@ -1411,7 +1449,7 @@ final class CanvasView: MTKView {
         }
         guard let s = dragStart, let oid = dragOID, let b = dragBox else { return }
         let p = framePoint(event)
-        if let h = dragHandle, h.isSide {           // the far side stays put; at least a few characters wide
+        if let h = dragHandle, h.isSide, wrapBand != nil {   // the far side stays put; at least a few characters wide
             var w = b
             let minW = 24 * pxPerPoint
             if h == .e { w.x1 = max(b.x0 + minW, Double(p.x)) } else { w.x0 = min(b.x1 - minW, Double(p.x)) }
@@ -1419,11 +1457,24 @@ final class CanvasView: MTKView {
             return
         }
         var o = overrides[oid] ?? Override()
-        if let h = dragHandle {
-            _ = h
-            let d0 = hypot(b.w / 2, b.h / 2)
-            let d = hypot(Double(p.x) - b.cx, Double(p.y) - b.cy)
-            o.scale = max(0.05, d / max(d0, 1))
+        if let h = dragHandle, h.isSide {           // a picture's side: stretched, the opposite side stays put
+            let minS = 8 * pxPerPoint, px = Double(p.x), py = Double(p.y)
+            var sdx = 0.0, sdy = 0.0
+            switch h {
+            case .e: let w = max(minS, px - b.x0); o.sx = w / b.w; sdx = b.x0 + w / 2 - b.cx
+            case .w: let w = max(minS, b.x1 - px); o.sx = w / b.w; sdx = b.x1 - w / 2 - b.cx
+            case .s: let ht = max(minS, py - b.y0); o.sy = ht / b.h; sdy = b.y0 + ht / 2 - b.cy
+            default: let ht = max(minS, b.y1 - py); o.sy = ht / b.h; sdy = b.y1 - ht / 2 - b.cy
+            }
+            o.scale = 1
+            o.dx = dragBase.dx + sdx; o.dy = dragBase.dy + sdy
+        } else if let h = dragHandle {              // a corner: in proportion, the opposite corner stays put
+            let ax = h == .nw || h == .sw ? b.x1 : b.x0, ay = h == .nw || h == .ne ? b.y1 : b.y0
+            let cx = h == .nw || h == .sw ? b.x0 : b.x1, cy = h == .nw || h == .ne ? b.y0 : b.y1
+            let vx = cx - ax, vy = cy - ay, n2 = max(vx * vx + vy * vy, 1)
+            let k = max(0.05, ((Double(p.x) - ax) * vx + (Double(p.y) - ay) * vy) / n2)
+            o.scale = k; o.sx = 1; o.sy = 1
+            o.dx = dragBase.dx + (b.cx - ax) * (k - 1); o.dy = dragBase.dy + (b.cy - ay) * (k - 1)
         } else {
             var dx = Double(p.x - s.x), dy = Double(p.y - s.y)
             if event.modifierFlags.contains(.shift) { if abs(dx) > abs(dy) { dy = 0 } else { dx = 0 } }
@@ -1512,19 +1563,23 @@ final class CanvasView: MTKView {
             } else { lineOverrides[oid] = nil }
             return
         }
-        if let h = dragHandle, h.isSide, let oid = dragOID, let b = dragBox, let w = wrapBand {
+        if let h = dragHandle, h.isSide, let oid = dragOID, let b = dragBox, let w = wrapBand {   // a text box's side
             if abs(w.w - b.w) >= 2 { onWrap?(oid, w.w, h == .e ? "right" : "left") }
             return
         }
         guard let oid = dragOID, var o = overrides[oid] else { return }
-        let idle = o.dx == 0 && o.dy == 0 && o.replacement == nil      // nothing else of this object is still previewed
         if dragHandle != nil {
-            if abs(o.scale - 1) > 0.002 { onResize?(oid, o.scale) } else if idle { overrides[oid] = nil }
+            let sdx = o.dx - dragBase.dx, sdy = o.dy - dragBase.dy     // how far the centre went with the pinned side
+            if abs(o.kx - 1) > 0.002 || abs(o.ky - 1) > 0.002 { onResize?(oid, o.kx, o.ky, sdx, sdy) }
+            else {
+                o.scale = 1; o.sx = 1; o.sy = 1; o.dx = dragBase.dx; o.dy = dragBase.dy
+                overrides[oid] = o.dx == 0 && o.dy == 0 && o.replacement == nil ? nil : o
+            }
         } else {
             let dx = o.dx - dragBase.dx, dy = o.dy - dragBase.dy      // this drag alone; earlier moves are already on their way
             let moved = abs(dx) + abs(dy) >= 1
             if !moved {
-                if dragBase.dx == 0 && dragBase.dy == 0 && o.scale == 1 && o.replacement == nil { overrides[oid] = nil }
+                if dragBase.dx == 0 && dragBase.dy == 0 && o.kx == 1 && o.ky == 1 && o.replacement == nil { overrides[oid] = nil }
                 else { o.dx = dragBase.dx; o.dy = dragBase.dy; overrides[oid] = o }
             }
             let group = dragGroup.sorted(by: { $0.key < $1.key })        // the rest of the selection went along
@@ -1532,7 +1587,7 @@ final class CanvasView: MTKView {
                 if moved { onMove?(oid, dx, dy) }
                 for (m, base) in group {
                     if moved { onMove?(m, dx, dy) }
-                    else if let g = overrides[m], base.dx == 0 && base.dy == 0 && g.scale == 1 && g.replacement == nil { overrides[m] = nil }
+                    else if let g = overrides[m], base.dx == 0 && base.dy == 0 && g.kx == 1 && g.ky == 1 && g.replacement == nil { overrides[m] = nil }
                     else if var g = overrides[m] { g.dx = base.dx; g.dy = base.dy; overrides[m] = g }
                 }
             }
@@ -1713,7 +1768,8 @@ extension CanvasView: NSTextViewDelegate {
         inline = InlineEdit(oid: oid, view: tv, center: CGPoint(x: area?.cx ?? b.cx, y: area?.cy ?? b.cy), fontPx: fontPx,
                             family: family, bold: bold, italic: italic, original: text, done: done,
                             cell: cell.map { ($0.row, $0.col, area!) }, placeholder: placeholder?.line,
-                            anchor: anchor, align: cell == nil ? align : "left", lineSpacing: cell == nil ? lineSpacing : nil)
+                            anchor: anchor, align: cell == nil ? align : "left", lineSpacing: cell == nil ? lineSpacing : nil,
+                            pinOnLayout: anchor == nil && cell == nil)
         addSubview(tv)
         layoutTextEditor()
         setNeedsDisplay(bounds)
@@ -1910,7 +1966,11 @@ extension CanvasView: NSTextViewDelegate {
         let r = slideRect
         let cx = r.minX + e.center.x * s, cy = r.maxY - e.center.y * s
         var f = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
-        if let a = e.anchor {                     // pinned: grows from its left edge, centre or right edge (and down)
+        if e.pinOnLayout {                        // free text: first shown centred on its ink, then pinned there
+            let edge = e.align == "center" ? f.midX : e.align == "right" ? f.maxX : f.minX
+            inline?.anchor = TextAnchor(x: Double((edge - r.minX) / s), y: Double((r.maxY - f.maxY) / s), top: true, align: e.align)
+            inline?.pinOnLayout = false
+        } else if let a = e.anchor {              // pinned: grows from its left edge, centre or right edge (and down)
             let ax = r.minX + CGFloat(a.x) * s, ay = r.maxY - CGFloat(a.y) * s
             let x = a.align == "center" ? ax - w / 2 : a.align == "right" ? ax - w : ax
             f = CGRect(x: x, y: a.top ? ay - h : ay - h / 2, width: w, height: h)

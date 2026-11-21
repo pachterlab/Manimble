@@ -104,6 +104,7 @@
         </MenuItem>
         <MenuItem Header="New B_uild" InputGestureText="Ctrl+Shift+B" Click="NewBuild_Click"/>
         <MenuItem Header="_Duplicate Slide" InputGestureText="Ctrl+Shift+D" Click="DuplicateSlide_Click"/>
+        <MenuItem Header="Duplicate Build" Click="DuplicateBuild_Click"/>
         <MenuItem Header="De_lete Slide" Click="DeleteSlide_Click"/>
         <MenuItem Header="_Hide Slide" Click="HideSlide_Click" x:Name="HideSlideItem"/>
         <MenuItem Header="Delete Bui_ld" Click="DeleteBuild_Click"/>
@@ -162,6 +163,7 @@
         <MenuItem Header="_Ungroup" InputGestureText="Ctrl+Shift+G" Click="Ungroup_Click"/>
         <Separator/>
         <MenuItem Header="Apply Move to All B_uilds" InputGestureText="Ctrl+Shift+A" Click="SpreadMove_Click"/>
+        <MenuItem Header="Apply Move to _Matching Builds" InputGestureText="Ctrl+Alt+Shift+A" Click="SpreadMatchingMove_Click"/>
       </MenuItem>
       <MenuItem Header="_View">
         <MenuItem Header="_Grid Lines" IsCheckable="True" x:Name="GridItem" InputGestureText="Ctrl+'" Click="Grid_Click"/>
@@ -457,6 +459,16 @@
                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                  SelectionChanged="SlideList_SelectionChanged" KeyDown="SlideList_KeyDown"
                  AllowDrop="True" PreviewMouseLeftButtonDown="SlideList_PreviewDown" PreviewMouseMove="SlideList_PreviewMove" Drop="SlideList_Drop">
+          <!-- right-click: the row (or build) under the pointer is selected first, as on the Mac -->
+          <ListBox.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="New Build" Click="NewBuild_Click"/>
+              <MenuItem Header="Duplicate Slide" Click="DuplicateSlide_Click"/>
+              <MenuItem Header="Duplicate Build" Click="DuplicateBuild_Click"/>
+              <Separator/>
+              <MenuItem Header="Delete Slide" Click="DeleteSlide_Click"/>
+            </ContextMenu>
+          </ListBox.ContextMenu>
           <ListBox.ItemTemplate>
             <DataTemplate>
               <Grid Margin="2,4" Opacity="{Binding Opacity}">
@@ -479,7 +491,7 @@
                     <ItemsControl.ItemTemplate>
                       <DataTemplate>
                         <Border BorderThickness="{Binding RingThickness}" BorderBrush="{Binding Ring}" CornerRadius="3" Background="#FF000000"
-                                Margin="0,0,0,4" Cursor="Hand" Tag="{Binding}" PreviewMouseLeftButtonDown="BuildThumb_MouseDown"
+                                Margin="0,0,0,4" Cursor="Hand" Tag="{Binding}" PreviewMouseLeftButtonDown="BuildThumb_MouseDown" PreviewMouseRightButtonDown="BuildThumb_MouseDown"
                                 ToolTip="{Binding Tip}">
                           <Grid>
                             <Image Source="{Binding Thumb}" Stretch="Uniform" Width="186" Height="{Binding ThumbHeight}" Opacity="{Binding ImageOpacity}"/>
