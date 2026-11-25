@@ -74,6 +74,7 @@ def main():
         "undo_mark": lambda a: need().undo_mark(),
         "undo_merge": lambda a: need().undo_merge(a),
         "sprite": lambda a: need().sprite(a),
+        "wrap_preview": lambda a: need().wrap_preview(a),
         "present": present,
         "animation_preview": lambda a: need().animation_preview(a),
         "export": lambda a: need().export(a),

@@ -1213,10 +1213,7 @@ class Manimble:
                     label = "text box width"
                     if obj["kind"] != "text" or not before_box:
                         return {"ok": False, "error": "only text can be given a box width"}
-                    box = max(0.05, float(req["width"]) * ux)
-                    frame = self.planner.frame_box(obj)
-                    inner = max(0.05, box - 2 * BOX_PAD) if frame else box
-                    value = self._wrapped(obj, obj["value"], inner, (before_box[3] - before_box[1]) * ux)
+                    box, frame, value = self._wrap_width(obj, float(req["width"]), before_box, ux)
                     fields = {}
                     if frame and req.get("side") == "left":      # the right edge stays: the frame grows leftwards
                         fields["x"] = frame["x"] + frame["w"] - box
@@ -1716,6 +1713,63 @@ class Manimble:
         else:
             a, b = (wx * vx + wy * vy) / n2, (wy * vx - wx * vy) / n2
         return [a, b, -b, a, cx - (a * ax - b * ay), cy - (b * ax + a * ay)]
+
+    def _wrap_width(self, obj: dict, width_px: float, before_box, ux: float):
+        """The `wrap` op's layout for a box `width_px` frame px wide: (box width, frame or None, wrapped value)."""
+        box = max(0.05, width_px * ux)
+        frame = self.planner.frame_box(obj)
+        inner = max(0.05, box - 2 * BOX_PAD) if frame else box
+        return box, frame, self._wrapped(obj, obj["value"], inner, (before_box[3] - before_box[1]) * ux)
+
+    def wrap_preview(self, req: dict) -> dict:
+        """A text box's side being dragged: the text as the `wrap` op would re-wrap it to `width` (frame px), drawn
+        by the auxiliary worker at the size it shows on the slide. Reads the current render only (no edit lock), so
+        it answers while an edit is rendering."""
+        name, oid = req["scene"], str(req["oid"])
+        with self.lock:
+            rec = self.results.get(name)
+        if not rec or "data" not in rec:
+            return {"error": "the slide is not rendered"}
+        data = rec["data"]
+        obj = data["objects"].get(oid)
+        stops = data["stops"]
+        vis = {str(v[0]): v for v in stops[min(int(req.get("stop", 0)), len(stops) - 1)]["visible"]}
+        before_box = vis.get(oid)
+        if not obj or obj["kind"] != "text" or not before_box:
+            return {"error": "not a text box"}
+        fw, _ = data["frame"]
+        pw, _ = data["size"]
+        ux = fw / pw
+        _, _, value = self._wrap_width(obj, float(req["width"]), before_box, ux)
+
+        def draw(v: str, styled: bool) -> dict:
+            args = {"kind": "text", "value": v, "font_size": obj.get("font_size") or 30}
+            for k in ("color", "font", "weight", "slant"):
+                if obj.get(k):
+                    args[k] = obj[k]
+            if styled:          # formatting of part of the text, on the same characters once re-wrapped
+                styles = {}
+                for k, src in (("italic", "italic"), ("bold", "bold"), ("color", "colors")):
+                    runs = [r for r in (obj.get(src) or []) if len(r) >= 2]
+                    if runs:
+                        styles[k] = [m + list(r[2:]) for r in runs for m in map_ranges(obj["value"], v, [r[:2]])]
+                if styles:
+                    args["styles"] = styles
+            return self.sprite(args)
+
+        # the slide may show the text scaled (font_size alone does not say how big): measure the text as it stands
+        key = (name, rec.get("dir"), oid, obj["value"])
+        k = self._wrap_scale.get(key) if hasattr(self, "_wrap_scale") else None
+        if k is None:
+            ref = draw(obj["value"], False)
+            if "error" in ref or not ref.get("w"):
+                return {"error": ref.get("error", "empty")}
+            k = (before_box[3] - before_box[1]) / ref["w"]
+            self._wrap_scale = {key: k}
+        sp = draw(value, True)
+        if "error" in sp:
+            return sp
+        return {"ok": True, "value": value, "path": sp["path"], "w": sp["w"] * k, "h": sp["h"] * k}
 
     def _wrapped(self, obj: dict, value: str, box: float, shown_w: float) -> str:
         """`value` word-wrapped to `box` manim units in the object's font. Widths come from the font file,
