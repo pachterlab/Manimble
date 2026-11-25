@@ -1,0 +1,14 @@
+{
+  "name": "manimble",
+  "version": "0.4.8",
+  "description": "Skills for Manimble: write slides that stay editable on the canvas, start a deck from an outline or paper, render and fix slides, import PowerPoint/Keynote/Beamer, and export to MP4, PDF and HTML.",
+  "author": {
+    "name": "Pachter Lab",
+    "url": "https://github.com/pachterlab"
+  },
+  "homepage": "https://pachterlab.github.io/Manimble/",
+  "repository": "https://github.com/pachterlab/Manimble",
+  "license": "BSD-2-Clause",
+  "keywords": ["manim", "manim-slides", "slides", "presentation", "animation"],
+  "skills": "./skills/"
+}

@@ -66,6 +66,55 @@ A deck is a folder of scene classes (`class MySlide(Slide): def construct(self):
 otherwise every scene class is listed. *File ▸ New Deck…* makes a new one, and *File ▸ Import* converts PowerPoint,
 Keynote and Beamer presentations. See the [documentation](https://pachterlab.github.io/Manimble/) for the rest.
 
+## Use with AI
+
+Manimble's terminal runs Claude Code, Codex or Gemini CLI on the open deck, and tells the agent how the deck works
+(see [building slides with an AI agent](https://pachterlab.github.io/Manimble/ai/agents/)). The Manimble agent skills
+add the rest, inside Manimble or in any other terminal: writing slides that stay editable on the canvas, starting a
+deck from an outline or a paper, rendering slides to check them, importing PowerPoint, Keynote and Beamer talks, and
+exporting to MP4, PDF and HTML.
+
+Install the manimble plugin for your agent:
+
+**Claude Code** (two separate prompts):
+
+```
+/plugin marketplace add pachterlab/Manimble
+```
+```
+/plugin install manimble@manimble
+```
+
+**Codex:**
+
+```bash
+codex plugin marketplace add pachterlab/Manimble
+codex plugin add manimble@manimble
+```
+
+**From a clone** (any agent):
+
+```bash
+git clone https://github.com/pachterlab/Manimble.git
+cp -R Manimble/skills/manimble-* ~/.claude/skills/   # Claude Code, every project
+cp -R Manimble/skills/manimble-* ~/.codex/skills/    # Codex
+cp -R Manimble/skills/manimble-* DIR                 # any other agent's skills directory
+```
+
+Then ask:
+
+```LLM
+/manimble-new-deck Make a 10-minute Manimble deck from my paper in /PATH/TO/PAPER.pdf.
+```
+
+| Skill | What it does |
+|---|---|
+| `/manimble-slides` | Add or change slides, builds, animations, formulas, pictures, BioCartoon icons, plots and speaker notes, in code Manimble can still edit on the canvas |
+| `/manimble-new-deck` | Create a new deck with a theme from an outline, notes, a paper or a description |
+| `/manimble-check` | Render every slide to PNG without touching the deck, find slides that fail and text off the edge, and fix them |
+| `/manimble-import` | Convert a PowerPoint, Keynote or Beamer presentation into an editable deck |
+| `/manimble-export` | Export a deck or a `.manimble` package to MP4, PDF, HTML or PowerPoint, and check, inspect or unpack packages |
+
 ## Command-line tools
 
 `manimbler` inspects, extracts, and converts portable `.manimble` projects. The installer places it at

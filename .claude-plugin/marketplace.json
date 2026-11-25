@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "manimble",
+  "description": "Skills for building, checking, importing and exporting Manimble presentations (Manim Slides decks).",
+  "owner": {
+    "name": "Pachter Lab",
+    "url": "https://github.com/pachterlab"
+  },
+  "plugins": [
+    {
+      "name": "manimble",
+      "description": "Write slides that stay editable in Manimble, start a deck from an outline or paper, render and fix slides, import PowerPoint/Keynote/Beamer, and export to MP4, PDF and HTML.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
