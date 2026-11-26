@@ -1746,8 +1746,14 @@ extension CanvasView: NSTextViewDelegate {
         let widest = lines.map { ($0 as NSString).size(withAttributes: [.font: ref]).width }.max() ?? 0
         let lineH = NSLayoutManager().defaultLineHeight(for: ref)
         let byHeight = 100 * CGFloat(b.h) / (CGFloat(lines.count) * lineH * 0.8)
-        let fontPx = placeholder.map { CGFloat(Double($0.size) / 72 * unitPx) }
-            ?? (widest > 1 ? min(max(100 * CGFloat(b.w) / widest, byHeight * 0.5), byHeight * 2) : byHeight)
+        let fitted: CGFloat
+        if widest > 1 {
+            let byWidth: CGFloat = 100 * CGFloat(b.w) / widest
+            fitted = min(max(byWidth, byHeight * 0.5), byHeight * 2)
+        } else {
+            fitted = byHeight
+        }
+        let fontPx: CGFloat = placeholder.map { CGFloat(Double($0.size) / 72 * unitPx) } ?? fitted
 
         var c = NSColor(hex: color ?? "#FFFFFF").usingColorSpace(.sRGB) ?? .white
         if colorView != .normal {

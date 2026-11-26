@@ -1446,11 +1446,17 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         Task { @MainActor in
             if let name = env["MANIMBLE_TEST_SCENE"] { await selectScene(name) }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard let stop = canvas.stop, let sc = scene,
-                  let oid = env["MANIMBLE_TEST_OID"].flatMap({ Int($0) })
-                      ?? stop.visible.map({ Int($0[0]) }).filter({ sc.objects?[String($0)]?.kind == "text" && sc.objects?[String($0)]?.textOk != false })
-                          .max(by: { (sc.objects?[String($0)]?.value.count ?? 0) < (sc.objects?[String($1)]?.value.count ?? 0) }),
-                  let b0 = stop.box(of: oid) else { log("no text on \(sceneName ?? "?")"); exit(0) }
+            guard let stop = canvas.stop, let sc = scene else { log("no text on \(sceneName ?? "?")"); exit(0) }
+            func textObject(_ id: Int) -> ObjInfo? {
+                guard let o = sc.objects?[String(id)], o.kind == "text", o.textOk != false else { return nil }
+                return o
+            }
+            func textLength(_ id: Int) -> Int { textObject(id)?.value.count ?? 0 }
+            let ids: [Int] = stop.visible.map { Int($0[0]) }
+            let wrappable: [Int] = ids.filter { textObject($0) != nil }
+            let longest: Int? = wrappable.max { textLength($0) < textLength($1) }
+            let requested: Int? = env["MANIMBLE_TEST_OID"].flatMap { Int($0) }
+            guard let oid = requested ?? longest, let b0 = stop.box(of: oid) else { log("no text on \(sceneName ?? "?")"); exit(0) }
             selection = oid; canvas.selection = oid
             let b = canvas.selectedBox ?? b0
             log("\(sceneName ?? "?") object \(oid) '\(sc.objects?[String(oid)]?.value ?? "")' box \(Int(b.x0)),\(Int(b.y0)) \(Int(b.w))x\(Int(b.h))")

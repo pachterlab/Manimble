@@ -227,7 +227,8 @@ enum ImageFill {
         for v in valid { isValid[Int(v)] = true }
         for p in targets(L) {
             let x = p % L.w, y = p / L.w
-            let c = coarse[min(C.h - 1, y / 2) * C.w + min(C.w - 1, x / 2)]
+            let cy: Int = min(C.h - 1, y / 2), cx: Int = min(C.w - 1, x / 2)
+            let c = coarse[cy * C.w + cx]
             if c >= 0 {
                 let qx = min(L.w - 1, Int(c) % C.w * 2 + x % 2), qy = min(L.h - 1, Int(c) / C.w * 2 + y % 2)
                 let q = qy * L.w + qx
