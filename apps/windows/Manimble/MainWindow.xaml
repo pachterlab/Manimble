@@ -27,7 +27,7 @@
         <Separator/>
         <MenuItem Header="_Save to Original" InputGestureText="Ctrl+S" Click="Save_Click" x:Name="SaveItem"/>
         <MenuItem Header="Save Project _Copy…" Click="SaveCopy_Click"/>
-        <MenuItem Header="Package for S_haring…" Click="PackageProject_Click"/>
+        <MenuItem Header="Save ._manimble…" Click="PackageProject_Click"/>
         <MenuItem Header="Re_vert to Original…" Click="Revert_Click"/>
         <Separator/>
         <MenuItem Header="Export _To">
@@ -178,6 +178,8 @@
                   ToolTip="Show slides with whites and blacks swapped (nothing is written to the deck)"/>
         <MenuItem Header="_Invert Colors" IsCheckable="True" x:Name="InvertColorsItem" Click="InvertColorsItem_Click"
                   ToolTip="Show every colour as its complement (nothing is written to the deck)"/>
+        <MenuItem Header="_Recolor Images Too" IsCheckable="True" x:Name="RecolorImagesItem" Click="RecolorImagesItem_Click"
+                  ToolTip="Map inserted pictures in dark mode and inverted colours as well (off: they keep their own colours)"/>
         <Separator/>
         <MenuItem Header="Zoom _In" InputGestureText="Ctrl+=" Click="ZoomIn_Click"/>
         <MenuItem Header="Zoom _Out" InputGestureText="Ctrl+-" Click="ZoomOut_Click"/>
@@ -198,6 +200,7 @@
         <MenuItem Header="Play from _Beginning" InputGestureText="F5" Click="PlayBeginning_Click"/>
         <MenuItem Header="Play from _Current Slide" InputGestureText="Shift+F5" Click="PlayCurrent_Click"/>
         <MenuItem Header="Presenter _View" InputGestureText="Alt+F5" Click="PresenterView_Click"/>
+        <Separator/>
         <MenuItem Header="_Scripted Presentation" Click="ScriptedPresentation_Click"/>
         <MenuItem Header="Scripted Presentation from Current Slide" Click="ScriptedPresentationCurrent_Click"/>
         <Separator/>
@@ -208,6 +211,8 @@
           <MenuItem Header="1440p" Tag="1440" IsCheckable="True" Click="Resolution_Click"/>
           <MenuItem Header="2160p (4K)" Tag="2160" IsCheckable="True" Click="Resolution_Click"/>
         </MenuItem>
+        <MenuItem Header="Show Slide and Build _Numbers" IsCheckable="True" x:Name="ShowSlideNumbersItem" Click="ShowSlideNumbers_Click"
+                  ToolTip="The slide and build counter and progress bar in a show. Press P while playing to show or hide them."/>
       </MenuItem>
       <MenuItem Header="_Help">
         <MenuItem Header="Manimble _Documentation" Click="Docs_Click"/>

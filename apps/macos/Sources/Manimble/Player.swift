@@ -193,7 +193,7 @@ final class SlidePlayer: NSObject {
     var onChange: (() -> Void)?
     private var cache: [String: CGImage] = [:]
     private var blackedOut = false
-    private var showProgress = true
+    private var showProgress = UserDefaults.standard.bool(forKey: "showSlideNumbers")
     private var hideWork: DispatchWorkItem?
     private var savedOptions: NSApplication.PresentationOptions = []
     var onExit: (() -> Void)?

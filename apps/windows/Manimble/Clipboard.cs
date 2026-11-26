@@ -162,7 +162,7 @@ public partial class MainWindow
     }
 
     /// Edit > Paste (Ctrl+V): objects copied in Manimble, or a picture or text from another program.
-    void PasteOnSlide()
+    async void PasteOnSlide()
     {
         if (workspace == null || sceneName == null) return;
         var ws = workspace;
@@ -191,11 +191,9 @@ public partial class MainWindow
             Insert("image", new JsonObject { ["file"] = file, ["sx"] = cx + d - half, ["sy"] = cy + d, ["ex"] = cx + d + half, ["ey"] = cy + d });
             return;
         }
-        if (data.GetDataPresent(DataFormats.FileDrop) && data.GetData(DataFormats.FileDrop) is string[] files
-            && files.FirstOrDefault(f => new[] { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" }.Contains(Path.GetExtension(f).ToLowerInvariant())) is { } img)
+        if (DroppedFiles(data).FirstOrDefault() is { } img)
         {
-            var name = UniqueName(ws.Work, Path.GetFileName(img));
-            File.Copy(img, Path.Combine(ws.Work, name));
+            if (await PictureFile(img, ws.Work) is not { } name || sceneName == null) return;
             var half = 2 * UnitPx;
             Insert("image", new JsonObject { ["file"] = name, ["sx"] = cx + d - half, ["sy"] = cy + d, ["ex"] = cx + d + half, ["ey"] = cy + d });
             return;
@@ -208,7 +206,7 @@ public partial class MainWindow
         Toast("Nothing on the clipboard can go on a slide: copy a picture or some text", error: true);
     }
 
-    static readonly string[] PictureExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp" };
+    static readonly string[] PictureExts = { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".pdf", ".svg" };
     static readonly System.Net.Http.HttpClient http = new();
 
     static string[] DroppedFiles(IDataObject d) =>
@@ -238,10 +236,7 @@ public partial class MainWindow
         if (workspace is not { } ws || sceneName == null) return;
         var names = new List<string>();
         foreach (var f in DroppedFiles(d))
-        {
-            try { var name = UniqueName(ws.Work, Path.GetFileName(f)); File.Copy(f, Path.Combine(ws.Work, name)); names.Add(name); }
-            catch (Exception ex) { Toast("Could not copy the picture: " + ex.Message, error: true); }
-        }
+            if (await PictureFile(f, ws.Work) is { } name) names.Add(name);
         if (names.Count == 0 && DroppedImageLinks(d) is { Length: > 0 } links)
         {
             Busy(+1, "Downloading the picture…");
@@ -271,6 +266,69 @@ public partial class MainWindow
             var (cx, cy) = (at.X + off, at.Y + off);
             Insert("image", new JsonObject { ["file"] = names[k], ["sx"] = cx - half, ["sy"] = cy, ["ex"] = cx + half, ["ey"] = cy });
         }
+    }
+
+    /// A picture file copied into the deck folder as manim reads it: PNG, JPEG, GIF, BMP and WebP as they are, a TIFF
+    /// as a PNG, a PDF's first page drawn as a PNG, an SVG as a vector copy (the engine's svg_icon). Its name, or null.
+    async Task<string?> PictureFile(string f, string dir)
+    {
+        var ext = Path.GetExtension(f).ToLowerInvariant();
+        var stem = Path.GetFileNameWithoutExtension(f);
+        try
+        {
+            switch (ext)
+            {
+                case ".tif" or ".tiff":
+                {
+                    var name = UniqueName(dir, stem + ".png");
+                    var src = BitmapFrame.Create(new Uri(Path.GetFullPath(f)), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                    using var fs = File.Create(Path.Combine(dir, name));
+                    var enc = new PngBitmapEncoder();
+                    enc.Frames.Add(BitmapFrame.Create(src));
+                    enc.Save(fs);
+                    return name;
+                }
+                case ".pdf":
+                {
+                    var name = UniqueName(dir, stem + ".png");
+                    var file = await global::Windows.Storage.StorageFile.GetFileFromPathAsync(Path.GetFullPath(f));
+                    var doc = await global::Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(file);
+                    if (doc.PageCount == 0) throw new InvalidDataException("the PDF has no pages");
+                    using var page = doc.GetPage(0);
+                    var k = 2400 / Math.Max(1, Math.Max(page.Size.Width, page.Size.Height));
+                    using var mem = new global::Windows.Storage.Streams.InMemoryRandomAccessStream();
+                    await page.RenderToStreamAsync(mem, new global::Windows.Data.Pdf.PdfPageRenderOptions
+                    {
+                        DestinationWidth = (uint)Math.Max(1, Math.Round(page.Size.Width * k)),
+                        DestinationHeight = (uint)Math.Max(1, Math.Round(page.Size.Height * k)),
+                    });                                  // PNG is the default encoding
+                    using var fs = File.Create(Path.Combine(dir, name));
+                    await mem.AsStreamForRead().CopyToAsync(fs);
+                    return name;
+                }
+                case ".svg":
+                {
+                    var name = UniqueName(dir, stem + ".svg");
+                    Busy(+1, $"Preparing {Path.GetFileName(f)}…");
+                    try
+                    {
+                        // no PNG to compare with: taken when nothing in it is out of manim's reach
+                        var r = await engine.TryCall<SvgPrepared>("svg_icon", new JsonObject { ["svg"] = Path.GetFullPath(f), ["out"] = Path.Combine(dir, name) });
+                        if (r is { Ok: true }) return name;
+                        Toast($"Manim cannot draw {Path.GetFileName(f)}: {r?.Why ?? "the engine did not answer"}", error: true);
+                        return null;
+                    }
+                    finally { Busy(-1); }
+                }
+                default:
+                {
+                    var name = UniqueName(dir, Path.GetFileName(f));
+                    File.Copy(f, Path.Combine(dir, name));
+                    return name;
+                }
+            }
+        }
+        catch (Exception ex) { Toast($"Could not read {Path.GetFileName(f)}: {ex.Message}", error: true); return null; }
     }
 
     static string UniqueName(string dir, string fileName)

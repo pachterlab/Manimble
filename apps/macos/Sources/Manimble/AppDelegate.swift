@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Each deck gets its own window, never a tab (macOS merges windows into tabs under "Prefer tabs" or full screen)
         NSWindow.allowsAutomaticWindowTabbing = false
         // terminals open where the slides come from, so an agent's edits show up live (View ▸ Terminal Starts in Working Copy)
-        UserDefaults.standard.register(defaults: ["terminalInWorkCopy": true])
+        UserDefaults.standard.register(defaults: ["terminalInWorkCopy": true, "showSlideNumbers": true])
         buildMenu()
         router.target = { [weak self] in self?.controller }
         func wire(_ menu: NSMenu?) {
@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // a deck given at launch wins over the last one; the engine opens it once it is running
         for u in launchURLs + commandLineDecks() { c.openProject(at: u) }
         c.start()
+        Updates.checkInBackground()
     }
 
     /// Open a deck in `c`'s window if it is empty; else bring forward the window already showing that deck, or
@@ -137,6 +138,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @MainActor @objc func checkForUpdates(_ sender: Any?) { Updates.check(userInitiated: true) }
+
     private func item(_ title: String, _ sel: Selector, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
         i.keyEquivalentModifierMask = mods
@@ -153,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         add("Manimble", [
             item("About Manimble", #selector(showAbout)),
+            item("Check for Updates…", #selector(checkForUpdates)),
             .separator(),
             item("Install Dependencies…", #selector(MainController.installDependencies), ""),
             item("Choose Python…", #selector(MainController.choosePython), ""),
@@ -184,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .separator(),
             item("Save to Original", #selector(MainController.saveToOriginal), "s"),
             item("Save Project Copy…", #selector(MainController.saveProjectFolderPressed), ""),
-            item("Package for Sharing…", #selector(MainController.packageProjectPressed), ""),
+            item("Save .manimble…", #selector(MainController.packageProjectPressed), ""),
             item("Revert to Original…", #selector(MainController.revertToOriginal), ""),
             .separator(),
             exportItem,
@@ -382,6 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             animations.addItem(mi)
         }
         let animationsItem = NSMenuItem(title: "Animation Resolution", action: nil, keyEquivalent: ""); animationsItem.submenu = animations
+        let numbersItem = item("Show Slide and Build Numbers", #selector(MainController.toggleShowSlideNumbers), "", [])
+        numbersItem.toolTip = "The slide and build counter and progress bar in a show. Press P while playing to show or hide them."
         // Show/Hide Animations switches the three items below it between the animated show and the stills slideshow.
         add("Play", [
             item("Show Animations", #selector(MainController.toggleShowAnimations), "a", [.command, .option]),
@@ -389,11 +395,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Play from Beginning", #selector(MainController.playMenuFromBeginning), "p", [.command, .option, .shift]),
             item("Play from Current Slide", #selector(MainController.playMenuFromCurrent), "p", [.command, .option]),
             item("Presenter View", #selector(MainController.playMenuPresenter), "p", [.command, .control]),
+            .separator(),
             item("Scripted Presentation", #selector(MainController.autoPresentFromBeginning), "", []),
             item("Scripted Presentation from Current Slide", #selector(MainController.autoPresentFromCurrent), "", []),
             .separator(),
             item("Preview Current Slide’s Animations", #selector(MainController.playCurrentSlideAnimations), "r", [.command, .option]),
             animationsItem,
+            numbersItem,
         ])
         let win = NSMenu(title: "Window")
         win.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))

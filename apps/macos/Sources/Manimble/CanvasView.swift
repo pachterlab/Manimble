@@ -177,6 +177,9 @@ struct Override {
     /// and its top when `keepTop` (lines added or removed), as the engine places it; nil centres it on the ink.
     var keepEdge: String?
     var keepTop = false
+    /// A text box's side being dragged (or just let go): the re-wrapped text's box, and the side that moved. Free
+    /// text keeps its top and the opposite edge; text in a frame sits in it (this box) by its alignment.
+    var wrapAt: (box: Box, side: String)?
     var kx: Double { scale * sx }             // the horizontal and vertical factors shown
     var ky: Double { scale * sy }
 }
@@ -201,6 +204,13 @@ final class CanvasView: MTKView {
     private var shadowPipe: MTLRenderPipelineState!
     private var discPipe: MTLRenderPipelineState!
     private var cache: [String: MTLTexture] = [:]
+    /// Sharp tiles of the zoomed-in view and the request for them (ZoomTiles.swift).
+    var hires: HiresSet? { didSet { setNeedsDisplay(bounds) } }
+    var onWantHires: ((HiresWant) -> Void)?
+    var hiresTimer: Timer?
+    var hiresAsked: HiresWant?
+    var hiresInFlight = false
+    var hiresQueued = false
     private var cacheOrder: [String] = []
     private let loader: MTKTextureLoader
 
@@ -279,7 +289,7 @@ final class CanvasView: MTKView {
     var showObjects = false { didSet { needsDisplay2() } }
     /// Dark mode / inverted colours (nothing is written): the slide is composited from backdrop + sprites, each colour-mapped.
     var colorView = ColorView.normal { didSet { needsDisplay2() } }
-    var darkImages = true { didSet { needsDisplay2() } }
+    var darkImages = false { didSet { needsDisplay2() } }
     /// Live endpoint edits of lines/arrows: oid -> (sx, sy, ex, ey) in frame px.
     var lineOverrides: [Int: [Double]] = [:] { didSet { needsDisplay2() } }
     /// A just-inserted element shown at once, before the real render arrives.
@@ -334,6 +344,9 @@ final class CanvasView: MTKView {
     var onResize: ((Int, Double, Double, Double, Double) -> Void)?
     /// A text box's side was dragged: its new width (frame px) and the side ("left" / "right") that moved.
     var onWrap: ((Int, Double, String) -> Void)?
+    /// A text box's side is being dragged: its box right now (frame px) and the side that moves, to preview the
+    /// text re-wrapped to it; nil when the drag ended without a change (the preview goes).
+    var onWrapPreview: ((Int, Box?, String) -> Void)?
     /// Edit an object; for a double-click, the click's window location (where text editing puts the caret).
     var onEdit: ((Int, CGPoint?) -> Void)?
     var onNudge: ((Int, Double, Double) -> Void)?
@@ -615,6 +628,18 @@ final class CanvasView: MTKView {
     func texture(path: String) -> MTLTexture? {
         let key = CanvasView.textureKey(path)
         if let t = cache[key] { return t }
+        guard let t = makeTexture(path: path) else { return nil }
+        cache[key] = t
+        cacheOrder.append(key)
+        if cacheOrder.count > 160 {            // bound memory: drop oldest
+            for old in cacheOrder.prefix(40) { cache.removeValue(forKey: old) }
+            cacheOrder.removeFirst(40)
+        }
+        return t
+    }
+
+    /// Decode a PNG/JPEG into a premultiplied RGBA8 Metal texture (not cached).
+    func makeTexture(path: String) -> MTLTexture? {
         guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return textureFailed(path, "the image could not be read") }
         let w = img.width, h = img.height
@@ -634,12 +659,6 @@ final class CanvasView: MTKView {
             return true
         }
         guard drawn else { return textureFailed(path, "the image could not be decoded") }
-        cache[key] = t
-        cacheOrder.append(key)
-        if cacheOrder.count > 160 {            // bound memory: drop oldest
-            for old in cacheOrder.prefix(40) { cache.removeValue(forKey: old) }
-            cacheOrder.removeFirst(40)
-        }
         return t
     }
 
@@ -672,6 +691,7 @@ final class CanvasView: MTKView {
     func dropTextures() {
         for k in cacheOrder where !k.hasPrefix("sp_") { cache.removeValue(forKey: k) }
         cacheOrder.removeAll { !$0.hasPrefix("sp_") }
+        hires = nil; hiresAsked = nil
     }
 
     // MARK: geometry
@@ -807,6 +827,7 @@ final class CanvasView: MTKView {
     private func frameBox(_ oid: Int) -> Box? {
         guard let f = sceneObjects[String(oid)]?.frameBox else { return nil }
         guard let o = overrides[oid] else { return f }
+        if let wa = o.wrapAt { return Box(x0: wa.box.x0, y0: f.y0, x1: wa.box.x1, y1: f.y1) }   // re-wrapped: its new width
         let w = f.w * o.kx, h = f.h * o.ky
         return Box(x0: f.cx + o.dx - w / 2, y0: f.cy + o.dy - h / 2, x1: f.cx + o.dx + w / 2, y1: f.cy + o.dy + h / 2)
     }
@@ -814,6 +835,10 @@ final class CanvasView: MTKView {
     /// Where a replacement raster of a text goes: pinned in its frame by its alignment, else centred on the ink.
     private func replacementBox(_ oid: Int, _ o: Override, ink b: Box, _ rep: (tex: MTLTexture, w: Double, h: Double)) -> Box {
         let w = rep.w * o.scale, h = rep.h * o.scale
+        if let wa = o.wrapAt, frameBox(oid) == nil {     // re-wrapped free text: the top and the far edge stay
+            let x0 = wa.side == "left" ? wa.box.x1 - w : wa.box.x0
+            return Box(x0: x0, y0: b.y0 + o.dy, x1: x0 + w, y1: b.y0 + o.dy + h)
+        }
         if let f = frameBox(oid) {
             let fmt = sceneObjects[String(oid)]?.format, pad = CanvasView.framePad * unitPx
             let x0 = fmt?.align == "center" ? f.cx - w / 2 : fmt?.align == "right" ? f.x1 - pad - w : f.x0 + pad
@@ -860,6 +885,7 @@ final class CanvasView: MTKView {
         enc.endEncoding()
         cb.present(drawable)
         cb.commit()
+        hiresCheck()
     }
 
     /// The whole view (backdrop, shadow, slide, selection) rendered offscreen; used by --selftest.
@@ -1013,10 +1039,13 @@ final class CanvasView: MTKView {
             // the exact frame has object edges blended into the background, so dark mode maps each layer on its own
             // (inverting is linear, but the same path keeps "leave images alone" working)
             let slide = layers.contains(.slide)
+            let sharp = liveHires                 // the zoomed-in view drawn again at the screen's density
             if slide && overrides.isEmpty && lineOverrides.isEmpty && !dark && inline == nil && !optimistic {
                 if let t = texture(path: stop.png) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
+                if let f = sharp?.full { drawTex(f.tex, f.box.x0, f.box.y0, f.box.w, f.box.h) }
             } else {
                 if slide, let t = texture(path: stop.bg) { drawTex(t, 0, 0, Double(frameSize.width), Double(frameSize.height)) }
+                if slide, let b = sharp?.bg { drawTex(b.tex, b.box.x0, b.box.y0, b.box.w, b.box.h) }
                 for sp in stop.sprites {
                     if lineOverrides[sp.oid] != nil || sp.oid == inline?.oid && inline?.cell == nil { continue }
                     let hole = sp.oid == inline?.oid ? inline?.cell?.area : nil
@@ -1046,6 +1075,10 @@ final class CanvasView: MTKView {
                         let cx = b.cx, cy = b.cy
                         let nx = cx + o.dx + (sp.x - cx) * o.kx, ny = cy + o.dy + (sp.y - cy) * o.ky
                         drawTex(t, nx, ny, sp.w * o.kx, sp.h * o.ky, map: map)
+                    } else if hole == nil, let tile = sharp?.sprites[sp.oid] {
+                        // the low-res sprite only where the sharp tile (cut to the view) doesn't reach
+                        drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map, hole: tile.box)
+                        drawTex(tile.tex, tile.box.x0, tile.box.y0, tile.box.w, tile.box.h, map: map)
                     } else {
                         drawTex(t, sp.x, sp.y, sp.w, sp.h, map: map, hole: hole)
                     }
@@ -1454,6 +1487,7 @@ final class CanvasView: MTKView {
             let minW = 24 * pxPerPoint
             if h == .e { w.x1 = max(b.x0 + minW, Double(p.x)) } else { w.x0 = min(b.x1 - minW, Double(p.x)) }
             wrapBand = w
+            onWrapPreview?(oid, w, h == .e ? "right" : "left")
             return
         }
         var o = overrides[oid] ?? Override()
@@ -1564,7 +1598,9 @@ final class CanvasView: MTKView {
             return
         }
         if let h = dragHandle, h.isSide, let oid = dragOID, let b = dragBox, let w = wrapBand {   // a text box's side
-            if abs(w.w - b.w) >= 2 { onWrap?(oid, w.w, h == .e ? "right" : "left") }
+            let side = h == .e ? "right" : "left"
+            if abs(w.w - b.w) >= 2 { onWrapPreview?(oid, w, side); onWrap?(oid, w.w, side) }
+            else { onWrapPreview?(oid, nil, side) }
             return
         }
         guard let oid = dragOID, var o = overrides[oid] else { return }

@@ -24,7 +24,7 @@ public struct Preview
 /// dragged or resized, or while an optimistic edit waits for its verifying render, it composites the backdrop and the
 /// per-object sprites the engine wrote, so edits show at once. Coordinates are frame pixels throughout: the frame
 /// sits in a Viewbox, so a mouse position read against `frame` is already in the engine's coordinates.
-public sealed class SlideCanvas : Border
+public sealed partial class SlideCanvas : Border
 {
     readonly Viewbox viewbox = new() { Stretch = Stretch.Uniform, StretchDirection = StretchDirection.Both };
     readonly Grid frame = new() { ClipToBounds = true, Background = Brushes.Black };
@@ -154,7 +154,7 @@ public sealed class SlideCanvas : Border
         host.Children.Add(vRuler);
         host.Children.Add(scroller);
         host.Children.Add(emptyText);
-        scroller.ScrollChanged += (_, _) => RedrawRulers();
+        scroller.ScrollChanged += (_, _) => { RedrawRulers(); HiresCheck(); };
         // Ctrl+wheel zooms, as in other editors
         scroller.PreviewMouseWheel += (_, e) =>
         {
@@ -183,7 +183,7 @@ public sealed class SlideCanvas : Border
         overlay.MouseLeave += (_, _) => { pointer = null; RedrawRulers(); if (hover != null) { hover = null; DrawOverlay(); } };
         overlay.LostMouseCapture += (_, _) => { if (mode != Mode.None && Mouse.LeftButton != MouseButtonState.Pressed) EndPress(commit: true); };
         SizeChanged += (_, _) => DrawOverlay();
-        viewbox.SizeChanged += (_, _) => RedrawRulers();
+        viewbox.SizeChanged += (_, _) => { RedrawRulers(); HiresCheck(); };
     }
 
     // ---------------------------------------------------------------- rulers and guides
@@ -356,7 +356,7 @@ public sealed class SlideCanvas : Border
                 scroller.HorizontalScrollBarVisibility = scroller.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
             }
             ZoomChanged?.Invoke();
-            Dispatcher.BeginInvoke(DrawOverlay, System.Windows.Threading.DispatcherPriority.Loaded);
+            Dispatcher.BeginInvoke(() => { DrawOverlay(); HiresCheck(); }, System.Windows.Threading.DispatcherPriority.Loaded);
         }
     }
     public event Action? ZoomChanged;
@@ -495,7 +495,14 @@ public sealed class SlideCanvas : Border
     }
 
     bool Compositing => mode is Mode.Move or Mode.Resize or Mode.Endpoint || Overrides.Count > 0 || LineOverrides.Count > 0
-                        || Scene?.Optimistic == true;
+                        || Scene?.Optimistic == true || KeepsPictures(Stop);
+
+    /// Whether a picture on this build keeps its own colours in dark mode / inverted colours: the frame is then drawn
+    /// layer by layer (as the Mac does), so the zoom tile of the whole frame, mapped as one, isn't used.
+    bool KeepsPictures(StopInfo? st) => st != null && Images.View != ColorView.Normal && !Images.RecolorImages
+                                        && st.Sprites.Any(sp => IsPicture(sp.Oid));
+
+    bool IsPicture(int oid) => Scene?.Obj(oid)?.Kind == "image";
 
     public void Redraw()
     {
@@ -505,9 +512,12 @@ public sealed class SlideCanvas : Border
         exact.Source = Images.Load(st.Png);
         exact.Visibility = compositing ? Visibility.Hidden : Visibility.Visible;
         composite.Children.Clear();
+        var sharp = LiveHires;                  // the zoomed-in view drawn again at the screen's density (ZoomTiles.cs)
+        if (!compositing && sharp?.Full is { } full) composite.Children.Add(TileImage(full));
         if (compositing)
         {
             composite.Children.Add(new Image { Source = Images.Load(st.Bg), Width = frame.Width, Height = frame.Height, Stretch = Stretch.Fill });
+            if (sharp?.Bg is { } bgTile) composite.Children.Add(TileImage(bgTile));
             foreach (var sp in st.Sprites.OrderBy(s => s.Z))
             {
                 if (LineOverrides.ContainsKey(sp.Oid) || (mode == Mode.Endpoint && sp.Oid == dragOid))
@@ -515,7 +525,7 @@ public sealed class SlideCanvas : Border
                     AddLinePreview(sp.Oid);
                     continue;
                 }
-                var img = new Image { Source = Images.Load(sp.File), Width = sp.W, Height = sp.H, Stretch = Stretch.Fill };
+                var img = new Image { Source = Images.Load(sp.File, map: Images.RecolorImages || !IsPicture(sp.Oid)), Width = sp.W, Height = sp.H, Stretch = Stretch.Fill };
                 var pv = PreviewOf(sp.Oid);
                 if (Scene?.Optimistic == true && st.Xforms != null && st.Xforms.TryGetValue(sp.Oid.ToString(), out var x) && x.Length == 6)
                 {
@@ -533,11 +543,21 @@ public sealed class SlideCanvas : Border
                     img.Width = sp.W * kx; img.Height = sp.H * ky;
                     Canvas.SetLeft(img, c.X + (sp.X - c.X) * kx + pv.Offset.X);
                     Canvas.SetTop(img, c.Y + (sp.Y - c.Y) * ky + pv.Offset.Y);
+                    if (pv.IsIdentity && sharp != null && sharp.Sprites.TryGetValue(sp.Oid, out var tile))
+                    {
+                        // the low-res sprite only where the sharp tile (cut to the view) doesn't reach
+                        img.Clip = new CombinedGeometry(GeometryCombineMode.Exclude, new RectangleGeometry(new Rect(0, 0, sp.W, sp.H)),
+                            new RectangleGeometry(new Rect(tile.Box.X - sp.X, tile.Box.Y - sp.Y, tile.Box.Width, tile.Box.Height)));
+                        composite.Children.Add(img);
+                        composite.Children.Add(TileImage(tile));
+                        continue;
+                    }
                 }
                 composite.Children.Add(img);
             }
         }
         DrawOverlay();
+        HiresCheck();
     }
 
     void AddLinePreview(int oid)

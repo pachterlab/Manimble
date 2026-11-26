@@ -687,14 +687,22 @@ class Slide(Scene):
         out = _STATE["out"]
         fw, fh = config.frame_width, config.frame_height
         cam = r.camera
-        # full, exact frame
-        undo = _flip_colors(self) if _STATE.get("flip") else []
-        r.update_frame(self, ignore_skipping=True)
-        full = np.array(r.get_frame())
-        for m, attr, arr in undo:
-            setattr(m, attr, arr)
-        Image.fromarray(full[..., :3].astype("uint8")).save(os.path.join(out, f"stop{n}.png"))
-        pw, ph = full.shape[1], full.shape[0]
+        # a zoom re-raster (`hires`): only the build asked for, and only which mobjects make up which sprite
+        hs = _STATE.get("hires_stop")
+        if hs is not None and n != hs:
+            _STATE["stops"].append({"png": None})
+            self._sl_anim = None
+            return
+        rast = raster if hs is None else (lambda _cam, fam, _out: {"fam": fam})
+        if hs is None:
+            # full, exact frame
+            undo = _flip_colors(self) if _STATE.get("flip") else []
+            r.update_frame(self, ignore_skipping=True)
+            full = np.array(r.get_frame())
+            for m, attr, arr in undo:
+                setattr(m, attr, arr)
+            Image.fromarray(full[..., :3].astype("uint8")).save(os.path.join(out, f"stop{n}.png"))
+        pw, ph = cam.pixel_width, cam.pixel_height
         members = extract_mobject_family_members(
             list_update(self.mobjects, self.foreground_mobjects), use_z_index=True, only_those_with_points=True)
         order = {id(m): i for i, m in enumerate(members)}
@@ -767,7 +775,7 @@ class Slide(Scene):
                 for f in fam:
                     taken.add(id(f))
                 z = min((order.get(id(f), 10 ** 9) for f in fam), default=10 ** 9)
-                sp = raster(cam, fam, out)
+                sp = rast(cam, fam, out)
                 if sp:
                     sp.update(oid=m._sl_id, z=z, zi=float(m.z_index),
                               seq=min((added.get(id(f), 10 ** 9) for f in fam), default=10 ** 9))
@@ -790,7 +798,7 @@ class Slide(Scene):
                        if id(f) not in taken]
                 for f in fam:
                     taken.add(id(f))
-                sp = raster(cam, fam, out)
+                sp = rast(cam, fam, out)
                 if sp:
                     sp.update(oid=uid, z=min((order.get(id(f), 10 ** 9) for f in fam), default=10 ** 9),
                               zi=max(float(m.z_index) for m in ms),
@@ -799,6 +807,11 @@ class Slide(Scene):
             except Exception:
                 traceback.print_exc()
         sprites.sort(key=lambda s: s["z"])
+        if hs is not None:
+            _STATE["snap"] = {"members": members, "bg": [m for m in members if id(m) not in taken],
+                              "sprites": [(sp["oid"], sp["fam"]) for sp in sprites],
+                              "bgcolor": cam.background_color, "bgop": cam.background_opacity, "pw": pw, "ph": ph}
+            raise _HiresDone()
         cam.reset()
         cam.capture_mobjects([m for m in members if id(m) not in taken], include_submobjects=False)
         Image.fromarray(np.array(cam.pixel_array)[..., :3].astype("uint8")).save(os.path.join(out, f"bg{n}.png"))
@@ -1227,6 +1240,137 @@ def sprite(req):
     return sp
 
 
+class _HiresDone(Exception):
+    """Raised by _sl_stop once the build a `hires` request asked for is captured: the rest of the slide is skipped."""
+
+
+_HIRES = {"key": None, "snap": None}
+HIRES_MAX_PIXELS = 24_000_000
+
+
+def _straight(arr):
+    """Cairo's premultiplied RGBA as straight-alpha uint8."""
+    crop = arr.astype("float32")
+    al = crop[..., 3:4]
+    rgb = np.where(al > 0, crop[..., :3] * 255.0 / np.maximum(al, 1), 0)
+    return np.concatenate([np.clip(rgb, 0, 255), al], axis=2).astype("uint8")
+
+
+def _region_camera(snap, X0, Y0, X1, Y1, s, opaque):
+    """A camera drawing frame px [X0, X1) x [Y0, Y1) at `s` device px per frame px."""
+    pw, ph = snap["pw"], snap["ph"]
+    fw, fh = config.frame_width, config.frame_height
+    sx, sy = pw / fw, ph / fh
+    kw = {"background_color": snap["bgcolor"], "background_opacity": snap["bgop"]} if opaque else {}
+    cam = Camera(pixel_width=int(round((X1 - X0) * s)), pixel_height=int(round((Y1 - Y0) * s)),
+                 frame_width=(X1 - X0) / sx, frame_height=(Y1 - Y0) / sy,
+                 frame_center=np.array([((X0 + X1) / 2 - pw / 2) / sx, (ph / 2 - (Y0 + Y1) / 2) / sy, 0]), **kw)
+    cam.max_allowable_norm = 10 * max(fw, fh)
+    return cam
+
+
+def _capture(cam, mobs, opaque):
+    cam.reset()
+    if not opaque:
+        cam.pixel_array[:] = 0
+    cam.capture_mobjects(mobs, include_submobjects=False)
+    return np.array(cam.pixel_array)
+
+
+def _hires_tiles(snap, scale, rect, out, tag):
+    """The build kept in `snap` drawn again over `rect` (frame px) at `scale`: the whole frame there (opaque), the
+    part of it no sprite owns (opaque), and each sprite's part (straight alpha, cropped to its ink). Edges are
+    snapped to a 4 px grid and the scale to quarters, so every tile is a whole number of pixels."""
+    pw, ph = snap["pw"], snap["ph"]
+    fw = config.frame_width
+    g = 4
+
+    def snap_out(x0, y0, x1, y1):
+        return (math.floor(x0 / g) * g, math.floor(y0 / g) * g, math.ceil(x1 / g) * g, math.ceil(y1 / g) * g)
+
+    rx0, ry0, rx1, ry1 = snap_out(*rect)
+    s = max(1.0, math.ceil(float(scale) * 4) / 4)
+    area = max(1, (rx1 - rx0) * (ry1 - ry0))
+    while s > 1 and area * s * s > HIRES_MAX_PIXELS:
+        s -= 0.25
+    res = {"scale": s, "sprites": []}
+
+    def save(arr, name, rgb):
+        path = os.path.join(out, name)
+        img = Image.fromarray(arr[..., :3].astype("uint8"), "RGB") if rgb else Image.fromarray(arr, "RGBA")
+        img.save(path, compress_level=1)
+        return name
+
+    sx0, sy0, sx1, sy1 = max(rx0, 0), max(ry0, 0), min(rx1, pw), min(ry1, ph)
+    if sx1 > sx0 and sy1 > sy0:
+        cam = _region_camera(snap, sx0, sy0, sx1, sy1, s, True)
+        box = {"x": sx0, "y": sy0, "w": sx1 - sx0, "h": sy1 - sy0}
+        res["full"] = dict(box, file=save(_capture(cam, snap["members"], True), f"z{tag}_full.png", True))
+        res["bg"] = dict(box, file=save(_capture(cam, snap["bg"], True), f"z{tag}_bg.png", True))
+    sxp = pw / fw
+    margin = 0.15 * sxp
+    for oid, fam in snap["sprites"]:
+        try:
+            pts = [f.points for f in fam if len(f.points)]
+            if not pts:
+                continue
+            pts = np.vstack(pts)
+            x0 = (pts[:, 0].min() + fw / 2) * sxp - margin
+            x1 = (pts[:, 0].max() + fw / 2) * sxp + margin
+            y0 = (config.frame_height / 2 - pts[:, 1].max()) * sxp - margin
+            y1 = (config.frame_height / 2 - pts[:, 1].min()) * sxp + margin
+            X0, Y0, X1, Y1 = snap_out(max(x0, rx0), max(y0, ry0), min(x1, rx1), min(y1, ry1))
+            X0, Y0, X1, Y1 = max(X0, rx0), max(Y0, ry0), min(X1, rx1), min(Y1, ry1)
+            if X1 <= X0 or Y1 <= Y0:
+                continue
+            arr = _capture(_region_camera(snap, X0, Y0, X1, Y1, s, False), fam, False)
+            a = arr[..., 3]
+            cols, rows = np.flatnonzero(a.any(axis=0)), np.flatnonzero(a.any(axis=1))
+            if len(cols) == 0:
+                continue
+            c0, c1, r0, r1 = cols[0], cols[-1] + 1, rows[0], rows[-1] + 1
+            name = save(_straight(arr[r0:r1, c0:c1]), f"z{tag}_{oid}.png", False)
+            res["sprites"].append({"oid": oid, "file": name, "x": X0 + c0 / s, "y": Y0 + r0 / s,
+                                   "w": (c1 - c0) / s, "h": (r1 - r0) / s})
+        except Exception:
+            traceback.print_exc()
+    return res
+
+
+def hires(req):
+    """One build of a slide drawn again at a zoom: `scale` device px per frame px over `rect` (frame px). The
+    first request for a build runs the slide up to it (and no further) and keeps its mobjects, so panning and
+    zooming on it only re-rasters. `files` are the hashes of the code the shown render read: tiles of other
+    code would not match the canvas, so a mismatch answers {"stale": true}."""
+    out = req["out"]
+    key = (req["scene"], req["module"], int(req["stop"]), json.dumps(req.get("files") or {}, sort_keys=True))
+    if _HIRES["key"] != key:
+        _HIRES.update(key=None, snap=None)
+        _STATE["hires_stop"] = int(req["stop"])
+        _STATE.pop("snap", None)
+        try:
+            render({"scene": req["scene"], "module": req["module"], "out": out})
+        except _HiresDone:
+            pass
+        finally:
+            _STATE.pop("hires_stop", None)
+        snap = _STATE.pop("snap", None)
+        if snap is None:
+            return {"error": "no such build"}
+        if req.get("files") is not None and _STATE.get("files") != req["files"]:
+            return {"stale": True}
+        _HIRES.update(key=key, snap=snap)
+    os.makedirs(out, exist_ok=True)
+    for f in os.listdir(out):
+        if f.startswith("z") and f.endswith(".png"):
+            try:
+                os.remove(os.path.join(out, f))
+            except OSError:
+                pass
+    tag = hashlib.md5(json.dumps([req["rect"], req["scale"], time.time()]).encode()).hexdigest()[:8]
+    return _hires_tiles(_HIRES["snap"], req["scale"], req["rect"], out, tag)
+
+
 def latex(req):
     from manim.utils.tex_file_writing import tex_to_svg_file
     path = tex_to_svg_file(req["tex"], environment="align*")
@@ -1272,6 +1416,8 @@ def main():
                 res = render(req)
             elif req["cmd"] == "sprite":
                 res = sprite(req)
+            elif req["cmd"] == "hires":
+                res = hires(req)
             elif req["cmd"] == "latex":
                 res = latex(req)
             elif req["cmd"] == "svg_icon":

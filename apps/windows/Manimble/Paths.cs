@@ -138,6 +138,8 @@ public sealed class Settings
     public bool ShowSource { get; set; } = true;
     public bool ShowAnimations { get; set; } = true;
     public int AnimationHeight { get; set; } = 720;
+    /// Play > Show Slide and Build Numbers: a show starts with its counter and progress bar (P toggles them).
+    public bool ShowSlideNumbers { get; set; } = true;
     public double? WindowWidth { get; set; }
     public double? WindowHeight { get; set; }
     public bool WindowMaximized { get; set; }
@@ -151,6 +153,8 @@ public sealed class Settings
     public Dictionary<string, List<double[]>> Guides { get; set; } = new();
     /// How slides are shown (View > Dark Mode / Invert Colors, the toolbar's Dark Mode): Normal, Dark or Invert.
     public string? ColorView { get; set; }
+    /// View > Recolor Images Too: inserted pictures are mapped in dark mode and inverted colours as well.
+    public bool RecolorImages { get; set; }
 
     static Settings? current;
     public static Settings Current => current ??= Load();

@@ -213,6 +213,7 @@ class Manimble:
         self._settling = False
         self.scene_locks: dict = {}             # one render per scene at a time
         self.edit_worker = WorkerProc(python, self.deck, "interactive", media_root)   # edits never wait behind background renders
+        self.zoom_worker = WorkerProc(python, self.deck, "zoom", media_root)  # sharp tiles of a zoomed slide; starts at first use
         self._cancel = threading.Event()        # set by `cancel`: jobs stop at their next check (see `check_cancel`)
         self._job_procs: set = set()            # subprocesses of cancellable jobs (manim builds, ffmpeg), to kill
         self.scenes: list[dict] = []            # ordered scene descriptors (the slides of the talk)
@@ -241,6 +242,7 @@ class Manimble:
         self.render_worker.close()
         self.aux_worker.close()
         self.edit_worker.close()
+        self.zoom_worker.close()
 
     # -------------------------------------------------------- cancelling
     def cancel(self) -> dict:
@@ -878,6 +880,7 @@ class Manimble:
                 item = {"name": s["name"], "file": s["file"], "line": s["line"], "status": st, "hidden": bool(s.get("hidden"))}
                 if r and "data" in r:
                     item["thumb"] = str(self.cache_dir / s["name"] / r["dir"] / "thumb.jpg")
+                    self._write_pics(s["name"], r)
                     item["stops"] = len(r["data"]["stops"])
                 if r and "error" in r and st == "error":
                     item["error"] = r["error"]
@@ -1135,8 +1138,34 @@ class Manimble:
 
     def _restart_workers(self):
         """manim reads manim.cfg once, when a worker imports it."""
-        for w in (self.edit_worker, self.render_worker, self.aux_worker):
+        for w in (self.edit_worker, self.render_worker, self.aux_worker, self.zoom_worker):
             w.restart()
+
+    def hires(self, a: dict) -> dict:
+        """Sharp tiles of the slide the editor shows zoomed in: build `stop` of the render in folder `dir`, drawn
+        again over `rect` (frame px) at `scale` device px per frame px. {"stale": true} when that render is no longer
+        the slide's current one (an edit landed since), so the canvas keeps its own pixels."""
+        name = a["scene"]
+        with self.lock:
+            rec = self.results.get(name)
+        if not rec or "data" not in rec or rec.get("dir") != a.get("dir") or rec.get("optimistic"):
+            return {"stale": True}
+        out = self.cache_dir / name / rec["dir"] / "zoom"
+        res = self.zoom_worker.request({
+            "cmd": "hires", "scene": name, "module": self.scene(name)["module"], "stop": int(a["stop"]),
+            "scale": float(a["scale"]), "rect": [float(v) for v in a["rect"]], "out": str(out),
+            "files": rec["data"].get("files"),
+        })
+        if "error" in res or res.get("stale"):
+            return res
+        base = str(out) + "/"
+        for k in ("full", "bg"):
+            if k in res:
+                res[k]["file"] = base + res[k]["file"]
+        for sp in res["sprites"]:
+            sp["file"] = base + sp["file"]
+        res["dir"] = rec["dir"]
+        return res
 
     def edit(self, req: dict) -> dict:
         with self.edit_lock:
@@ -1184,10 +1213,7 @@ class Manimble:
                     label = "text box width"
                     if obj["kind"] != "text" or not before_box:
                         return {"ok": False, "error": "only text can be given a box width"}
-                    box = max(0.05, float(req["width"]) * ux)
-                    frame = self.planner.frame_box(obj)
-                    inner = max(0.05, box - 2 * BOX_PAD) if frame else box
-                    value = self._wrapped(obj, obj["value"], inner, (before_box[3] - before_box[1]) * ux)
+                    box, frame, value = self._wrap_width(obj, float(req["width"]), before_box, ux)
                     fields = {}
                     if frame and req.get("side") == "left":      # the right edge stays: the frame grows leftwards
                         fields["x"] = frame["x"] + frame["w"] - box
@@ -1687,6 +1713,63 @@ class Manimble:
         else:
             a, b = (wx * vx + wy * vy) / n2, (wy * vx - wx * vy) / n2
         return [a, b, -b, a, cx - (a * ax - b * ay), cy - (b * ax + a * ay)]
+
+    def _wrap_width(self, obj: dict, width_px: float, before_box, ux: float):
+        """The `wrap` op's layout for a box `width_px` frame px wide: (box width, frame or None, wrapped value)."""
+        box = max(0.05, width_px * ux)
+        frame = self.planner.frame_box(obj)
+        inner = max(0.05, box - 2 * BOX_PAD) if frame else box
+        return box, frame, self._wrapped(obj, obj["value"], inner, (before_box[3] - before_box[1]) * ux)
+
+    def wrap_preview(self, req: dict) -> dict:
+        """A text box's side being dragged: the text as the `wrap` op would re-wrap it to `width` (frame px), drawn
+        by the auxiliary worker at the size it shows on the slide. Reads the current render only (no edit lock), so
+        it answers while an edit is rendering."""
+        name, oid = req["scene"], str(req["oid"])
+        with self.lock:
+            rec = self.results.get(name)
+        if not rec or "data" not in rec:
+            return {"error": "the slide is not rendered"}
+        data = rec["data"]
+        obj = data["objects"].get(oid)
+        stops = data["stops"]
+        vis = {str(v[0]): v for v in stops[min(int(req.get("stop", 0)), len(stops) - 1)]["visible"]}
+        before_box = vis.get(oid)
+        if not obj or obj["kind"] != "text" or not before_box:
+            return {"error": "not a text box"}
+        fw, _ = data["frame"]
+        pw, _ = data["size"]
+        ux = fw / pw
+        _, _, value = self._wrap_width(obj, float(req["width"]), before_box, ux)
+
+        def draw(v: str, styled: bool) -> dict:
+            args = {"kind": "text", "value": v, "font_size": obj.get("font_size") or 30}
+            for k in ("color", "font", "weight", "slant"):
+                if obj.get(k):
+                    args[k] = obj[k]
+            if styled:          # formatting of part of the text, on the same characters once re-wrapped
+                styles = {}
+                for k, src in (("italic", "italic"), ("bold", "bold"), ("color", "colors")):
+                    runs = [r for r in (obj.get(src) or []) if len(r) >= 2]
+                    if runs:
+                        styles[k] = [m + list(r[2:]) for r in runs for m in map_ranges(obj["value"], v, [r[:2]])]
+                if styles:
+                    args["styles"] = styles
+            return self.sprite(args)
+
+        # the slide may show the text scaled (font_size alone does not say how big): measure the text as it stands
+        key = (name, rec.get("dir"), oid, obj["value"])
+        k = self._wrap_scale.get(key) if hasattr(self, "_wrap_scale") else None
+        if k is None:
+            ref = draw(obj["value"], False)
+            if "error" in ref or not ref.get("w"):
+                return {"error": ref.get("error", "empty")}
+            k = (before_box[3] - before_box[1]) / ref["w"]
+            self._wrap_scale = {key: k}
+        sp = draw(value, True)
+        if "error" in sp:
+            return sp
+        return {"ok": True, "value": value, "path": sp["path"], "w": sp["w"] * k, "h": sp["h"] * k}
 
     def _wrapped(self, obj: dict, value: str, box: float, shown_w: float) -> str:
         """`value` word-wrapped to `box` manim units in the object's font. Widths come from the font file,
@@ -3036,6 +3119,7 @@ class Manimble:
             return {"scene": name, "pages": [], "pending": True, "builds": max(1, builds)}
         base = str(self.cache_dir / name / rec["dir"]) + "/"
         data = rec["data"]
+        self._write_pics(name, rec)
         links: list = [[] for _ in data["stops"]]
         if any(b"manimble_link" in self.project.src(rel).data for rel in self.project.py_files()):
             data = self._rebased(data)
@@ -3051,6 +3135,39 @@ class Manimble:
                         links[k].append([v[1] / pw, v[3] / pw, v[2] / ph, v[4] / ph, urls[oid]])
         return {"scene": name, "pages": [base + st["png"] for st in data["stops"]], "notes": self._notes_of(name),
                 "buildNotes": self._build_notes_of(name, data["stops"]), "links": links}
+
+    def _write_pics(self, name: str, rec: dict):
+        """pics.json beside a render's frames: where the inserted pictures sit on each build's frame (and on the
+        thumbnail, which is the last build), as [x0, y0, x1, y1] fractions of the slide, y from the top. The app's dark mode and inverted colours put the original pixels back there, so a picture keeps its
+        own colours in the navigator, slideshow and Presenter View as it does on the canvas."""
+        d = self.cache_dir / name / rec["dir"]
+        done = getattr(self, "_pics_done", None)
+        if done is None:
+            done = self._pics_done = set()
+        if str(d) in done:
+            return
+        try:
+            data = rec["data"]
+            pw, ph = data["size"]
+            objs = data.get("objects") or {}
+            pages: dict = {}
+            for st in data["stops"]:
+                if not st.get("png"):
+                    continue
+                pages[st["png"]] = [[round(v[1] / pw, 5), round(v[2] / ph, 5), round(v[3] / pw, 5), round(v[4] / ph, 5)]
+                                    for v in st.get("visible", [])
+                                    if (objs.get(str(int(v[0]))) or {}).get("kind") == "image"]
+            last = next((st["png"] for st in reversed(data["stops"]) if st.get("png")), None)
+            if last:
+                pages["thumb.jpg"] = pages[last]
+            f = d / "pics.json"
+            if d.is_dir():
+                body = json.dumps({"pages": pages})
+                if not f.exists() or f.read_text() != body:
+                    f.write_text(body)
+            done.add(str(d))
+        except (OSError, KeyError, TypeError, ValueError, IndexError):
+            pass
 
     @staticmethod
     def _stop_links(sc: dict, stop: dict, with_oid: bool = False) -> list:

@@ -173,6 +173,7 @@ struct SourceEditResult: Decodable {
 }
 
 struct SpriteResult: Decodable {
+    var value: String?               // wrap_preview: the text as re-wrapped
     var file: String?
     var path: String?
     var w: Double?

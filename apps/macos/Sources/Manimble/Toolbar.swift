@@ -187,6 +187,7 @@ extension MainController: NSToolbarDelegate {
             }
             add("Share PDF (one page per slide)…", #selector(shareChosen(_:)), 0)
             add("Share PDF (every build)…", #selector(shareChosen(_:)), 1)
+            add("Share .manimble…", #selector(shareManimblePressed))
             m.addItem(.separator())
             add("Export PowerPoint (.pptx)…", #selector(exportPowerPoint))
             add("Export Keynote (.key)…", #selector(exportKeynote))
@@ -194,6 +195,7 @@ extension MainController: NSToolbarDelegate {
             add("Export Movie (.mp4)…", #selector(exportMovie))
             m.addItem(.separator())
             add("Save PDF…", #selector(exportPDFPressed))
+            add("Save .manimble…", #selector(packageProjectPressed))
             i.menu = m
             return i
         default: return nil
@@ -651,6 +653,16 @@ extension MainController: NSToolbarDelegate {
             guard let u = url else { return }
             showSharePicker(u)
         }
+    }
+
+    /// Share ▸ Share .manimble…: packages the project into the export folder, then offers it to the sharing picker.
+    @objc func shareManimblePressed() {
+        guard let ws = workspace else { return }
+        let dir = exportDir().appendingPathComponent("package-\(UUID().uuidString)")
+        do { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+        catch { toast("Could not make the export folder: \(error.localizedDescription)", error: true); return }
+        let destination = dir.appendingPathComponent(ws.projectName).appendingPathExtension("manimble")
+        savePortableProject(workspace: ws, destination: destination, archive: true) { [weak self] u in self?.showSharePicker(u) }
     }
 
     func showSharePicker(_ u: URL) {

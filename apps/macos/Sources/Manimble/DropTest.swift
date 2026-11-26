@@ -35,6 +35,28 @@ extension MainController {
                 let v = scene?.stops?[min(stopIndex, (scene?.stops?.count ?? 1) - 1)].visible.first { Int($0[0]) == Int(k) }
                 log("new image \(o.image ?? "?") centre " + (v.map { "\(Int(($0[1] + $0[3]) / 2)),\(Int(($0[2] + $0[4]) / 2))" } ?? "not visible"))
             }
+            // the other formats: TIFF and BMP become PNGs, a PDF its first page as a PNG, an SVG a vector picture
+            let rep = NSBitmapImageRep(data: SlidePaste.png(img)!)!
+            let tif = URL(fileURLWithPath: dir + "dropped.tiff"), bmp = URL(fileURLWithPath: dir + "dropped.bmp")
+            try? rep.representation(using: .tiff, properties: [:])?.write(to: tif)
+            try? rep.representation(using: .bmp, properties: [:])?.write(to: bmp)
+            let pdf = URL(fileURLWithPath: dir + "dropped.pdf")
+            let pv = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 150)); pv.wantsLayer = true
+            pv.layer?.backgroundColor = NSColor.systemBlue.cgColor
+            try? pv.dataWithPDF(inside: pv.bounds).write(to: pdf)
+            let svg = URL(fileURLWithPath: dir + "dropped.svg")
+            try? ##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60"><rect x="5" y="5" width="110" height="50" fill="#2a9d8f" stroke="#264653" stroke-width="4"/><circle cx="60" cy="30" r="15" fill="#e9c46a"/></svg>"##
+                .write(to: svg, atomically: true, encoding: .utf8)
+            for f in [tif, bmp, pdf, svg] {
+                let q = NSPasteboard(name: .init("manimble-drop-test-\(f.pathExtension)")); q.clearContents()
+                q.writeObjects([f as NSURL])
+                let n = images().count
+                log("\(f.pathExtension) accepted: \(canDropPictures(q)) dropped: \(picturesDropped(q, at: at))")
+                for _ in 0..<150 where images().count == n { try? await Task.sleep(nanoseconds: 200_000_000) }
+                await queueTail?.value
+                let names = Set(images().compactMap { $0.1.image })
+                log("  images \(n) -> \(images().count): \(names.sorted().joined(separator: ", "))")
+            }
             log("done")
         }
     }

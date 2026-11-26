@@ -158,12 +158,14 @@ public partial class MainWindow
         }
         Add("Share PDF (one page per slide)…", async (_, _) => await SharePdf(builds: false));
         Add("Share PDF (every build)…", async (_, _) => await SharePdf(builds: true));
+        Add("Share .manimble…", async (_, _) => await ShareManimble());
         m.Items.Add(new Separator());
         Add("Export PowerPoint (.pptx)…", ExportPowerPoint_Click);
         Add("Export Beamer (.tex)…", ExportBeamer_Click);
         Add("Export Movie (.mp4)…", ExportMovie_Click);
         m.Items.Add(new Separator());
         Add("Save PDF…", ExportPdf_Click);
+        Add("Save .manimble…", PackageProject_Click);
         m.IsOpen = true;
     }
 
@@ -181,6 +183,28 @@ public partial class MainWindow
         {
             Log.Note("share sheet: " + ex.Message);
             Toast("Sharing is not available here; the PDF is in Explorer");
+            Tools.Reveal(path);
+        }
+    }
+
+    /// Share .manimble…: packages the project into Manimble's export folder and offers it to the Windows share sheet.
+    async Task ShareManimble()
+    {
+        if (workspace == null) return;
+        string path;
+        try
+        {
+            var dir = Path.Combine(Paths.Base, "export", "package-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            path = Path.Combine(dir, workspace.ProjectName + ".manimble");
+        }
+        catch (Exception ex) { Toast("Could not make the export folder: " + ex.Message, error: true); return; }
+        if (!await SavePortable(path, archive: true, quiet: true)) return;
+        try { ShowShareSheet(path); }
+        catch (Exception ex)
+        {
+            Log.Note("share sheet: " + ex.Message);
+            Toast("Sharing is not available here; the .manimble file is in Explorer");
             Tools.Reveal(path);
         }
     }
@@ -219,7 +243,7 @@ public partial class MainWindow
                     var item = await Windows.Storage.StorageFile.GetFileFromPathAsync(file);
                     args.Request.Data.SetStorageItems(new[] { item });
                 }
-                catch (Exception ex) { args.Request.FailWithDisplayText("Could not share the PDF: " + ex.Message); }
+                catch (Exception ex) { args.Request.FailWithDisplayText("Could not share " + Path.GetFileName(file) + ": " + ex.Message); }
                 finally { deferral.Complete(); }
             };
             shareHooked = true;

@@ -172,12 +172,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         window.toolbar = makeToolbar()
         window.toolbarStyle = .unified
         canvas.onZoomChange = { [weak self] in self?.syncZoomPopup() }
+        canvas.onWantHires = { [weak self] w in self?.fetchHires(w) }
         canvas.onDelete = { [weak self] oid in self?.deleteSelected(oid) }
         canvas.onContextMenu = { [weak self] in self?.canvasMenu() }
         canvas.colorView = DarkMode.mode; canvas.darkImages = DarkMode.images
         canvas.onDraw = { [weak self] kind, sx, sy, ex, ey, anchors in self?.drawFinished(kind, sx, sy, ex, ey, anchors: anchors) }
         canvas.onPen = { [weak self] pts in self?.penFinished(pts) }
-        canvas.registerForDraggedTypes([BioCartoonPane.dragType, .fileURL, .URL, .png, .tiff, .html])
+        canvas.registerForDraggedTypes([BioCartoonPane.dragType, .fileURL, .URL, .png, .tiff, .pdf, .html])
         canvas.canDropPictures = { [weak self] pb in self?.canDropPictures(pb) ?? false }
         canvas.onPictureDrop = { [weak self] pb, p in self?.picturesDropped(pb, at: p) ?? false }
         canvas.onIconDrop = { [weak self] data, p in self?.biocartoonDropped(data, at: p) ?? false }
@@ -241,6 +242,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
         canvas.onResize = { [weak self] oid, kx, ky, dx, dy in self?.commitHandleResize(oid, kx, ky, dx: dx, dy: dy) }
         canvas.onWrap = { [weak self] oid, w, side in self?.commitWrap(oid, w, side) }
+        canvas.onWrapPreview = { [weak self] oid, band, side in self?.previewWrap(oid, band, side) }
         canvas.onEndpoints = { [weak self] oid, e, anchors in self?.commitEndpoints(oid, e, anchors: anchors) }
         canvas.onEdit = { [weak self] oid, at in self?.beginEdit(oid, at: at) }
         canvas.hasCornerAction = { [weak self] oid in self?.plotOf(oid) != nil }
@@ -693,7 +695,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @objc func packageProjectPressed() {
         guard let ws = workspace else { return }
         let panel = NSSavePanel()
-        panel.title = "Package Project for Sharing"
+        panel.title = "Save .manimble"
         panel.message = "Create one portable .manimble file that includes the deck and its checked dependencies."
         panel.nameFieldStringValue = ws.projectName
         if let projectType = UTType(filenameExtension: "manimble") { panel.allowedContentTypes = [projectType] }
@@ -703,7 +705,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         savePortableProject(workspace: ws, destination: destination, archive: true)
     }
 
-    func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool) {
+    /// `then` runs with `destination` once it is written (Share .manimble… hands it to the sharing picker).
+    func savePortableProject(workspace ws: Workspace, destination: URL, archive: Bool, then: ((URL) -> Void)? = nil) {
         Task { @MainActor in
             if sourceDraft != nil { window.makeFirstResponder(canvas) }     // applies the code being typed
             await finishEdits()                      // the copy holds the last edits, as Save does
@@ -735,7 +738,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 } else {
                     try PortableProject.createFolder(workspace: ws, dependencies: report.dependencies, at: destination)
                 }
-                toast(archive ? "Packaged \(destination.lastPathComponent)" : "Saved project folder \(destination.lastPathComponent)")
+                if let then = then { then(destination) }
+                else { toast(archive ? "Saved \(destination.lastPathComponent)" : "Saved project folder \(destination.lastPathComponent)") }
             } catch { alert("Could not save portable project", "\(error.localizedDescription)") }
         }
     }
@@ -1291,11 +1295,13 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_OFFSLIDE"] != nil, !testRan { testRan = true; offSlideTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_CONNECT"] != nil, !testRan { testRan = true; connectTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_MOVE"] != nil, !testRan { testRan = true; moveTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_WRAP"] != nil, !testRan { testRan = true; wrapTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_SHOW"] != nil, !testRan { testRan = true; showTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_FIND"] != nil, !testRan { testRan = true; findTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_PLOT"] != nil, !testRan { testRan = true; plotTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_SCRIPT"] != nil, !testRan { testRan = true; scriptTest() }
         if ProcessInfo.processInfo.environment["MANIMBLE_TEST_CANCEL"] != nil, !testRan { testRan = true; cancelTest() }
+        if ProcessInfo.processInfo.environment["MANIMBLE_TEST_ZOOM"] != nil, !testRan { testRan = true; zoomTest() }
         rebuildSteps()
         renderSource()
         rebuildInspector()
@@ -1420,6 +1426,66 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
                 }
             }
             if !settled { log("timed out") }
+            log("done")
+            exit(0)
+        }
+    }
+
+    /// Headless check of the live re-wrap preview: MANIMBLE_TEST_WRAP=1 (deck as argument), MANIMBLE_TEST_SCENE,
+    /// MANIMBLE_TEST_OID (default the longest text that can be wrapped). Drags its right side in with synthetic
+    /// mouse events, then back out past where it began, then in again and lets go; wrap.log and wrap-*.png in
+    /// MANIMBLE_TEST_OUT.
+    func wrapTest() {
+        let env = ProcessInfo.processInfo.environment
+        let dir = (env["MANIMBLE_TEST_OUT"] ?? "/tmp") + "/"
+        func log(_ s: String) { try? (s + "\n").appendLine(to: dir + "wrap.log") }
+        func shot(_ name: String) {
+            guard let img = canvas.snapshotView(), let png = NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:]) else { return }
+            try? png.write(to: URL(fileURLWithPath: dir + name + ".png"))
+        }
+        Task { @MainActor in
+            if let name = env["MANIMBLE_TEST_SCENE"] { await selectScene(name) }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let stop = canvas.stop, let sc = scene,
+                  let oid = env["MANIMBLE_TEST_OID"].flatMap({ Int($0) })
+                      ?? stop.visible.map({ Int($0[0]) }).filter({ sc.objects?[String($0)]?.kind == "text" && sc.objects?[String($0)]?.textOk != false })
+                          .max(by: { (sc.objects?[String($0)]?.value.count ?? 0) < (sc.objects?[String($1)]?.value.count ?? 0) }),
+                  let b0 = stop.box(of: oid) else { log("no text on \(sceneName ?? "?")"); exit(0) }
+            selection = oid; canvas.selection = oid
+            let b = canvas.selectedBox ?? b0
+            log("\(sceneName ?? "?") object \(oid) '\(sc.objects?[String(oid)]?.value ?? "")' box \(Int(b.x0)),\(Int(b.y0)) \(Int(b.w))x\(Int(b.h))")
+            shot("wrap-0-before")
+            let r = canvas.slideRect, k = r.width / canvas.frameSize.width
+            @MainActor func event(_ type: NSEvent.EventType, _ x: Double) -> NSEvent {
+                let wp = canvas.convert(CGPoint(x: r.minX + x * k, y: r.maxY - b.cy * k), to: nil)
+                return NSEvent.mouseEvent(with: type, location: wp, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                          context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            }
+            @MainActor func state(_ tag: String) {
+                let o = canvas.overrides[oid]
+                log("\(tag): replacement=\(o?.replacement.map { "\(Int($0.w))x\(Int($0.h))" } ?? "none") shown=\(canvas.selectedBox.map { "\(Int($0.x0))-\(Int($0.x1))" } ?? "?")")
+            }
+            canvas.mouseDown(with: event(.leftMouseDown, b.x1))
+            var n = 0
+            for f in [0.85, 0.7, 0.55, 0.4, 0.55, 0.8, 1.0, 1.2, 0.6] {
+                let t0 = Date()
+                canvas.mouseDragged(with: event(.leftMouseDragged, b.x0 + b.w * f))
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                n += 1
+                state("drag to \(Int(f * 100))% (\(Int(Date().timeIntervalSince(t0) * 1000)) ms)")
+                shot("wrap-\(n)-drag-\(Int(f * 100))")
+            }
+            let dir0 = shownDir
+            canvas.mouseUp(with: event(.leftMouseUp, b.x0 + b.w * 0.6))
+            state("let go")
+            shot("wrap-\(n + 1)-released")
+            for _ in 0..<300 {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                if shownDir != dir0, busy == 0, canvas.overrides[oid]?.replacement == nil { break }
+            }
+            state("rendered")
+            log("value now '\(scene?.objects?[String(oid)]?.value ?? "")' box \(canvas.stop?.box(of: oid).map { "\(Int($0.x0)),\(Int($0.y0)) \(Int($0.w))x\(Int($0.h))" } ?? "?")")
+            shot("wrap-\(n + 2)-rendered")
             log("done")
             exit(0)
         }
@@ -1859,7 +1925,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let cell = (tv.makeView(withIdentifier: SlideCell.id, owner: nil) as? SlideCell) ?? SlideCell()
         var img: NSImage?
         if let t = s.thumb {
-            let key = (DarkMode.mode.rawValue + ":" + t) as NSString
+            let key = (DarkMode.mode.rawValue + (DarkMode.images ? "+i:" : ":") + t) as NSString
             img = thumbCache.object(forKey: key)
             if img == nil, let i = DarkMode.image(path: t) { thumbCache.setObject(i, forKey: key); img = i }
         }
@@ -2003,7 +2069,7 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     /// Images for the builds listed under a slide (nil while a thumbnail is still rendering).
     func buildImages(_ paths: [String]) -> [NSImage?] {
         paths.map { png in
-            let key = (DarkMode.mode.rawValue + ":" + png) as NSString
+            let key = (DarkMode.mode.rawValue + (DarkMode.images ? "+i:" : ":") + png) as NSString
             if let i = thumbCache.object(forKey: key) { return i }
             guard let i = DarkMode.image(path: png) else { return nil }
             thumbCache.setObject(i, forKey: key); return i
@@ -2473,7 +2539,55 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     func commitWrap(_ oid: Int, _ width: Double, _ side: String) {
-        submit { [weak self] in await self?.runEdit(["op": "wrap", "oid": oid, "width": width, "side": side]) }
+        submit { [weak self] in
+            await self?.runEdit(["op": "wrap", "oid": oid, "width": width, "side": side])
+            if self?.wrapPreviewOID == oid { self?.wrapPreviewOID = nil }   // the render shows it now
+        }
+    }
+
+    /// The text box whose re-wrapped text is previewed, the latest box asked for, and whether a request is out.
+    private var wrapPreviewOID: Int?
+    private var wrapPreviewNext: (scene: String, oid: Int, band: Box, side: String)?
+    private var wrapPreviewBusy = false
+
+    /// A text box's side being dragged: show the text re-wrapped to its new width as the drag goes, like
+    /// PowerPoint. The engine wraps it as the `wrap` edit will and draws it in Pango (~30 ms on the auxiliary
+    /// worker); the line breaks only change at word boundaries, and only the latest box is asked for.
+    /// `band` nil: the drag ended where it began, so the preview goes.
+    func previewWrap(_ oid: Int, _ band: Box?, _ side: String) {
+        guard let name = sceneName, let band = band else {
+            wrapPreviewOID = nil; wrapPreviewNext = nil
+            if var o = canvas.overrides[oid], o.wrapAt != nil {
+                o.replacement = nil; o.wrapAt = nil
+                canvas.overrides[oid] = o.dx == 0 && o.dy == 0 && o.kx == 1 && o.ky == 1 ? nil : o
+            }
+            return
+        }
+        wrapPreviewOID = oid
+        wrapPreviewNext = (name, oid, band, side)
+        guard !wrapPreviewBusy else { return }
+        wrapPreviewBusy = true
+        Task { @MainActor [weak self] in
+            while let self = self, let req = self.wrapPreviewNext {
+                self.wrapPreviewNext = nil
+                let stop = self.stopIndex
+                let r = try? await self.engine.call("wrap_preview", ["scene": req.scene, "oid": req.oid, "width": req.band.w,
+                                                                     "stop": stop], as: SpriteResult.self)
+                guard self.wrapPreviewOID == req.oid, self.sceneName == req.scene else { continue }
+                let o0 = self.scene?.objects?[String(req.oid)]
+                if let r = r, r.value != nil, r.value == o0?.value {     // back to how it stands: the slide's own pixels
+                    if var o = self.canvas.overrides[req.oid] { o.replacement = nil; o.wrapAt = nil; self.canvas.overrides[req.oid] = o }
+                    continue
+                }
+                guard let r = r, let path = r.path, let w = r.w, let h = r.h, let tex = self.canvas.texture(path: path) else { continue }
+                var o = self.canvas.overrides[req.oid] ?? Override()
+                o.replacement = (tex, w, h)
+                o.wrapAt = (req.band, req.side)
+                o.keepEdge = nil; o.keepTop = false
+                self.canvas.overrides[req.oid] = o
+            }
+            self?.wrapPreviewBusy = false
+        }
     }
 
     func nudgeObject(_ oid: Int, _ dx: Double, _ dy: Double) {
@@ -3043,6 +3157,11 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
         toast(h == 720 ? "Animations build at 720p" : "Animations build at \(h == 2160 ? "4K" : "\(h)p") from the next show (slides rebuild once)")
     }
 
+    /// Play ▸ Show Slide and Build Numbers: whether a show starts with its counter and progress bar (P toggles them in the show).
+    @objc func toggleShowSlideNumbers() {
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "showSlideNumbers"), forKey: "showSlideNumbers")
+    }
+
     /// Play menu: whether Play and Presenter View run the animated show (manim clips) or the stills slideshow.
     var showAnimations: Bool { UserDefaults.standard.bool(forKey: "playShowAnimations") }
     @objc func toggleShowAnimations() {
@@ -3517,6 +3636,8 @@ final class MainController: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presentFromCurrent) : #selector(playFromCurrent), keyEquivalent: ""))
         case #selector(playMenuPresenter):
             return validateMenuItem(NSMenuItem(title: "", action: showAnimations ? #selector(presenterViewAnimated) : #selector(presenterView), keyEquivalent: ""))
+        case #selector(toggleShowSlideNumbers):
+            item.state = UserDefaults.standard.bool(forKey: "showSlideNumbers") ? .on : .off; return true
         case #selector(animationResolutionChosen(_:)):
             item.state = (item.representedObject as? Int) == animationHeight ? .on : .off
             return previewScene == nil && player == nil && presenter == nil && animatedPlayer == nil
