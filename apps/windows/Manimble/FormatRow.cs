@@ -25,7 +25,13 @@ public partial class MainWindow
         bool isText = o?.Kind == "text", isTexty = o?.IsText == true, plain = isText && o!.TextOk == true;
         if (isText && !fontsLoaded)
         {
-            FontCombo.ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(n => n).ToList();
+            // with Office's cloud fonts (Aptos Display, Aptos Serif, ...): downloaded for the user, a folder per family,
+            // not installed; the engine registers them for drawing slides (officefonts.py)
+            var cloud = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                                     "Microsoft", "FontCache", "4", "CloudFonts");
+            var office = Directory.Exists(cloud) ? Directory.GetDirectories(cloud).Select(Path.GetFileName).OfType<string>()
+                                                 : Enumerable.Empty<string>();
+            FontCombo.ItemsSource = Fonts.SystemFontFamilies.Select(f => f.Source).Concat(office).Distinct().OrderBy(n => n).ToList();
             fontsLoaded = true;
         }
         FontCombo.IsEnabled = isText;

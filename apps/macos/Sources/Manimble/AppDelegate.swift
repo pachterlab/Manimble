@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWindow.allowsAutomaticWindowTabbing = false
         // terminals open where the slides come from, so an agent's edits show up live (View ▸ Terminal Starts in Working Copy)
         UserDefaults.standard.register(defaults: ["terminalInWorkCopy": true, "showSlideNumbers": true])
+        OfficeFonts.register()          // Aptos, Calibri, ... in the font menus, before any is built
         buildMenu()
         router.target = { [weak self] in self?.controller }
         func wire(_ menu: NSMenu?) {

@@ -20,9 +20,10 @@ if sys.path and os.path.realpath(sys.path[0]) == os.path.realpath(os.path.dirnam
 # ...but the engine package itself is wanted, after the deck's modules (as in worker.py)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manimble import pilcompat  # noqa: E402
+from manimble import officefonts, pilcompat  # noqa: E402
 
 pilcompat.install()          # pictures under Pillow 13 with manim 0.21
+officefonts.install()        # Office's fonts (Aptos, Calibri, ...), before any text is drawn
 
 from manim_slides.slide.manim import Slide  # noqa: E402
 

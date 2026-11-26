@@ -26,7 +26,9 @@ Keynote, so Keynote must be installed for them.
 | Speaker notes | Kept as comments in each slide's code |
 
 Theme colours, placeholder styles and inherited text styles are resolved the way PowerPoint resolves them, so text
-gets the colours and sizes it shows in PowerPoint.
+gets the colours and sizes it shows in PowerPoint. Text in Office's fonts (Aptos and Aptos Display in Office's default
+theme, Calibri in older ones) is measured and drawn in them when Office is installed; see
+[Microsoft Office fonts](../guide/text.md#microsoft-office-fonts).
 
 ### What isn't imported
 

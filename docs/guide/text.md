@@ -70,6 +70,20 @@ How each format is written into the code:
 Choose a font family and type a size on the Home bar, or in the **Appearance** section of the inspector. In many decks
 the font is a constant shared by every slide (such as `FONT` in `common.py`); changing it then changes the whole deck.
 
+#### Microsoft Office fonts
+
+When Microsoft Office is installed, its fonts are in the font menus too, and slides are drawn in them: Aptos (Office's
+default since 2023), Aptos Narrow, Aptos Serif, Calibri, Cambria and the rest. Office doesn't install these fonts for
+other apps. It keeps them inside its own apps and downloads others when a document uses them, so Manimble uses them
+from where Office keeps them and copies nothing. A font Office hasn't downloaded yet appears once a document in
+PowerPoint or Word has used it.
+
+On a Mac, Aptos Display, the heading font of Office's default theme, is listed as part of Aptos, and a slide that uses
+`font="Aptos Display"` is drawn in Aptos, its nearest relative. The code keeps the name, so a PowerPoint export shows
+the slide in Aptos Display. A deck in an Office font draws in a substitute font on a computer without Office. Install
+Microsoft's free [Aptos download](https://www.microsoft.com/en-us/download/details.aspx?id=106087) there, or choose
+another font.
+
 ### Clear formatting
 
 **Format ▸ Clear Formatting** removes bold, italic, colour, per-character styles, line spacing, highlight, underline

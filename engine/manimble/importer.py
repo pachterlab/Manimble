@@ -20,15 +20,17 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from . import officefonts
 from .hostpaths import font_dirs
 
 FW, FH = 14.222222222222221, 8.0          # manim frame in units; 1280 x 720 px
 DEFAULT_FONT = "Helvetica Neue"          # used when neither the presentation nor its theme names a font
 PT_PER_FONT_SIZE = 0.945                  # same calibration as the exporter
 
-# Fonts that ship inside Microsoft Office (Calibri, Cambria, ...) are not installed system-wide, but can be used
-# for measuring text here and registered for rendering by the deck (FONT_REGISTER_SOURCE).
-OFFICE_FONT_DIRS = tuple(sorted(glob.glob("/Applications/Microsoft *.app/Contents/Resources/DFonts")))
+# Fonts that come with Microsoft Office (Aptos, Aptos Display, Calibri, Cambria, ...) are not installed system-wide,
+# but can be used for measuring text here and registered for rendering by the deck (FONT_REGISTER_SOURCE). See
+# officefonts.py: the fonts shipped inside the Office apps, and the cloud fonts Office downloads (one folder each).
+OFFICE_FONT_DIRS = tuple(officefonts.font_dirs())
 _FONT_DIRS = font_dirs() + OFFICE_FONT_DIRS
 
 # written into an imported deck's common.py when it has a table
@@ -97,9 +99,13 @@ def _register_fonts(*names):
         if name.lower() in have:
             continue
         stem = name.split()[0].lower()
-        for d in glob.glob("/Applications/Microsoft *.app/Contents/Resources/DFonts"):
+        cloud = Path.home() / "Library/Group Containers/UBF8T346G9.Office/FontCache/4/CloudFonts"
+        dirs = glob.glob("/Applications/Microsoft *.app/Contents/Resources/DFonts") + glob.glob(str(cloud / "*"))
+        for d in dirs:
+            # a cloud font's folder is named after its family, its files with numbers
+            in_family = Path(d).name.lower().startswith(stem)
             for f in Path(d).iterdir():
-                if f.suffix.lower() in (".ttf", ".otf", ".ttc") and f.stem.lower().startswith(stem):
+                if f.suffix.lower() in (".ttf", ".otf", ".ttc") and (in_family or f.stem.lower().startswith(stem)):
                     try:
                         manimpango.register_font(str(f))
                     except Exception:
@@ -181,16 +187,22 @@ def _font(family: str, bold: bool, italic: bool):
             p = Path(d)
             if not p.is_dir():
                 continue
+            in_family = p.name.lower().startswith(stem)         # a cloud font's folder, named after its family
             for f in p.iterdir():
-                if f.suffix.lower() in (".ttf", ".ttc", ".otf") and f.stem.lower().replace(" ", "").startswith(stem):
+                if f.suffix.lower() in (".ttf", ".ttc", ".otf") and (in_family or f.stem.lower().replace(" ", "").startswith(stem)):
                     for i in range(64):
                         try:
                             ft = ImageFont.truetype(str(f), 1000, index=i)
                         except Exception:                       # noqa: BLE001
                             break
                         fam, style = ft.getname()
-                        if (fam or "").lower() == family.lower():
-                            faces.append(((style or "").lower().replace("oblique", "italic"), ft))
+                        fam, style = (fam or "").lower(), (style or "").lower()
+                        if fam == family.lower():
+                            faces.append((style.replace("oblique", "italic"), ft))
+                        elif f"{fam} {style}" == family.lower() or f"{fam} {style}".startswith(family.lower() + " "):
+                            # Aptos Display's faces are named family "Aptos", style "Display Bold" ...
+                            rest = f"{fam} {style}"[len(family) + 1:].strip() or "regular"
+                            faces.append((rest.replace("oblique", "italic"), ft))
         found = next((ft for style, ft in faces if style == want), None)
         if found is None and faces:
             found = next((ft for style, ft in faces if style == "regular"), faces[0][1])
