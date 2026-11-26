@@ -43,6 +43,13 @@ Items marked *checked* were run on that stack on 2026-11-25.
 - **Fonts** must exist on the machine: Helvetica Neue, Avenir Next, Palatino
   and Menlo do on macOS. Set `font=` on every `Text`, through the theme's
   `FONT`.
+- **Pictures crash outside Manimble's renderers** with "ValueError: Invalid
+  mode for data type": manim 0.21 cannot draw an `ImageMobject` under Pillow 13,
+  which Manimble's Python ships (*checked*). Manimble's own renderers patch this
+  (`engine/manimble/pilcompat.py`, used by the app, `slides_render.py` and the
+  manimble-check skill's `render_stills.py`); plain `manim` or `manim-slides`
+  run with that Python do not. Render through one of those, or call
+  `pilcompat.install()` first in your own script.
 - Useful primitives: `DashedVMobject(...)` for dashed curves, `GrowArrow` for
   arrows, `Indicate` to point at a table cell or a term,
   `Succession(FadeIn(dot), MoveAlongPath(dot, path))` for a particle on a path.

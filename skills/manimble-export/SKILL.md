@@ -77,6 +77,11 @@ objects and never animate (plain manim-slides refuses those); it is
 # without Manimble: "$PY" -m manim_slides render slides.py $SLIDES < /dev/null
 ```
 
+The plain `manim_slides render` fallback cannot draw pictures with manim 0.21
+under Pillow 13 (the versions Manimble's Python has): a slide with an image
+fails with "Invalid mode for data type". Use `slides_render.py`, which patches
+it, whenever Manimble is installed.
+
 Keep stdin closed (`< /dev/null`) as above: when a name is not a class in the
 file, manim asks which scene to render and waits for an answer, which looks like
 a slow render. With stdin closed it may instead render a different scene of the
