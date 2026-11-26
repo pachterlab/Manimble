@@ -73,6 +73,13 @@ The default theme and the Madrid/Boadilla/Warsaw family are recognised.
 
 ## 4. Check and improve
 
+- Speaker notes come in as `# Speaker notes:` comments, which Manimble does
+  not show. Move each slide's notes into a `self.next_slide(notes="...")` as
+  the first statement of its `construct`, as one string.
+- A Beamer deck's frame number comes in as plain text at the edge of the slide
+  and is not renumbered when slides change. If the user wants slide numbers,
+  delete it and add Manimble's own (Format ▸ Slide Numbers in the app, or the
+  marked statement described in **manimble-slides**).
 - Render the new deck with the **manimble-check** skill and compare the PNGs
   with the original slides (export the original to PDF or PNGs to look at both
   when you can). Report slides that differ noticeably.

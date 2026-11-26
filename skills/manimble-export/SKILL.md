@@ -73,9 +73,15 @@ objects and never animate (plain manim-slides refuses those); it is
 `/Applications/Manimble.app/Contents/Resources/engine` or a checkout's `engine`:
 
 ```bash
-"$PY" "$ENGINE/manimble/slides_render.py" render --progress_bar none slides.py $SLIDES
-# without Manimble: "$PY" -m manim_slides render slides.py $SLIDES
+"$PY" "$ENGINE/manimble/slides_render.py" render --progress_bar none slides.py $SLIDES < /dev/null
+# without Manimble: "$PY" -m manim_slides render slides.py $SLIDES < /dev/null
 ```
+
+Keep stdin closed (`< /dev/null`) as above: when a name is not a class in the
+file, manim asks which scene to render and waits for an answer, which looks like
+a slow render. With stdin closed it may instead render a different scene of the
+file without saying so, so check first that every name in `$SLIDES` is a class
+in `slides.py`, and afterwards that `slides/<Slide>.json` exists for each.
 
 Slides spread over several files: run the render once per file with the
 classes from that file. Resolution comes from `manim.cfg` (1280×720); add

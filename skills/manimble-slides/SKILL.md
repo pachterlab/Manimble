@@ -60,7 +60,24 @@ existing slides, then write new slides in the same style with the same helpers.
   `self.wait(0.1)`, as Manimble's own builds do.
 - Speaker notes: `self.next_slide(notes="...")` as the first statement of
   `construct` holds the slide's notes; `self.next_slide(notes="...")` between
-  builds holds that build's notes.
+  builds holds that build's notes. Write each as one literal string, with `\n\n`
+  between paragraphs, so Manimble can show and edit it.
+- Slide numbers: a statement ending in `# manimble page number pos=... start=...`
+  is Manimble's slide number (Format ▸ Slide Numbers). Copy it unchanged onto a
+  new slide. Manimble renumbers every slide when slides are added or moved in
+  the app, but not when you edit `order.txt`: then update each slide's
+  `"X / total"` yourself, leaving the first slide without one when the mark
+  says `skip=1`. Never clear a slide with `self.clear()` or
+  `FadeOut(*self.mobjects)`, which also removes the number; remove the objects
+  you added by name.
+- `present.json`, if present, holds the presenter's chapter jumps
+  (`"sections"`) and link regions (`"links"`) as 0-based positions in
+  `order.txt`. Nothing renumbers them: after inserting, deleting or moving a
+  slide in `order.txt`, shift the positions after it.
+- Manimble's engine provides `Slide` with `next_slide()`, `start_loop()` and
+  `end_loop()`, nothing more: no `ThreeDSlide`, `wipe`, `zoom` or canvas
+  methods. A slide that uses them renders with manim-slides but shows an error
+  in Manimble.
 - The frame is about 14.2 × 8 units, centred on the origin (x from −7.1 to 7.1,
   y from −4 to 4). Keep everything at least 0.3 units inside the edge.
 - Code runs with the deck folder as working directory. Refer to a picture next
@@ -81,7 +98,11 @@ statement that made each one. So:
   drag. `next_to`, `arrange` and `to_edge` are fine for things that move as a
   unit (a bullet list made as one `VGroup`, a label tied to its arrow).
 - Loops, comprehensions and helpers only for things nobody will want to move
-  or retype one at a time (axis ticks, a grid of dots).
+  or retype one at a time (axis ticks, a grid of dots). Make such a group in
+  one statement, `dots = VGroup(*[Dot(p) for p in pts])`, and Manimble moves
+  and scales it as a whole. Text built with f-strings or in a loop can't be
+  retyped on the canvas; write wording used on several slides as a constant in
+  `common.py`.
 - A helper that makes `Text` must accept and pass on `**kwargs`: Manimble stores
   bold, italic and colour on part of a text as `t2w`, `t2s` and `t2c`.
 - Use the theme constants (`FONT`, `TEXT_COLOR`, `ACCENT`, ...) rather than
@@ -95,7 +116,27 @@ statement that made each one. So:
   `.set(manimble_link=...)`. Don't edit `feedback.json`, `script.json`,
   `present.json` or `*.plot.json` unless asked.
 
-## 4. Recipes
+## 4. Layout and colour
+
+- **Nothing overlaps, at any build.** No text, formula or picture on another,
+  no label across the edge of a shape (put it inside or outside), no line or
+  arrow through text. Check every build, not only the last: an object added in
+  a later build must not land on one still showing.
+- Start and end arrows and connecting lines at the objects they join,
+  `Arrow(box_a.get_right(), box_b.get_left(), buff=0.15)`, rather than at typed
+  coordinates that stop matching when a box moves.
+- Spacing: at least 0.25 units between unrelated objects, the same gap between
+  the items of one list, and shared left edges or centres. Wrap a long line
+  into two objects, or split the slide, rather than shrinking text until it
+  fits. Leave the bottom-right corner free when the deck has slide numbers.
+- **Set a colour on every text, formula and axis.** manim draws them white by
+  default, which vanishes on a light theme. Use the theme constants; recolour a
+  whole axis system with `Axes(...).set_color(TEXT_COLOR)`.
+- Contrast: text needs a contrast ratio of at least 3:1 with the background
+  (4.5:1 below `font_size=24`). Pale accents (yellow, amber, sky blue) are for
+  fills and lines with dark labels, not for text on white.
+
+## 5. Recipes
 
 Text and bullets:
 
@@ -143,12 +184,16 @@ folder) and build `Axes(...)` plus `axes.plot_line_graph(...)` or `BarChart(...)
 or render a Matplotlib figure to a PNG in the deck folder and insert that. Keep
 the axes and title as separate, positioned statements.
 
+When a manim object misbehaves (text wider than expected, tick labels showing
+`2.00`, a bar chart upside down, part of a formula that won't colour, `Code`
+arguments, a slow `LaggedStart`), read `references/manim-pitfalls.md`.
+
 Deck-wide changes (a footer on every slide, a title style): put the shared part
 in `common.py` (a helper or a method on `Deck`) and call it from each slide,
 rather than pasting the code into every slide. A literal on each slide is
 better only when the user will want to adjust it per slide.
 
-## 5. Finish
+## 6. Finish
 
 - Make one change at a time and say which slide (class name) it touched, so the
   user can look before the next.
