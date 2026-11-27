@@ -279,7 +279,11 @@ extension NSAlert {
     /// no buttons gets an "OK" first, as `runModal` would have added. A long text (a list of file paths, a traceback)
     /// moves into a scrolling box, since NSAlert grows to fit it and would push its buttons below the screen.
     func addCopyButton() {
-        if buttons.isEmpty { addButton(withTitle: "OK") }
+        // a fresh alert lists an implicit OK (tag 0) on macOS 26 and later, which a Copy button would replace:
+        // only buttons added with addButton (tags from 1000) count
+        if !buttons.contains(where: { $0.tag >= NSApplication.ModalResponse.alertFirstButtonReturn.rawValue }) {
+            addButton(withTitle: "OK")
+        }
         let copier = AlertCopier(text: [messageText, informativeText].filter { !$0.isEmpty }.joined(separator: "\n\n"))
         if accessoryView == nil, informativeText.count > 700 || informativeText.filter({ $0 == "\n" }).count > 14 {
             let scroll = NSTextView.scrollableTextView()
